@@ -1,5 +1,9 @@
 # go-jpeg2000
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/mrjoshuak/go-jpeg2000.svg)](https://pkg.go.dev/github.com/mrjoshuak/go-jpeg2000)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mrjoshuak/go-jpeg2000)](https://goreportcard.com/report/github.com/mrjoshuak/go-jpeg2000)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 A pure Go implementation of the JPEG 2000 image codec (ISO/IEC 15444-1) with HTJ2K support (ISO/IEC 15444-15).
 
 ## Overview
