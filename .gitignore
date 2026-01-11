@@ -1,0 +1,23 @@
+reference/
+.claude/
+
+# Development notes
+HTJ2K_REQUIREMENTS.md
+QUALITY.md
+
+# Test artifacts
+*.test
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
