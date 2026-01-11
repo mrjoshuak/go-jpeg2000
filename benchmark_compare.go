@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
-	jpeg2000 "github.com/aswf/go-jpeg2000"
+	jpeg2000 "github.com/mrjoshuak/go-jpeg2000"
 )
 
 func main() {

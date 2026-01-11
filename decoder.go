@@ -7,10 +7,10 @@ import (
 	"image/color"
 	"io"
 
-	"github.com/aswf/go-jpeg2000/internal/box"
-	"github.com/aswf/go-jpeg2000/internal/codestream"
-	"github.com/aswf/go-jpeg2000/internal/mct"
-	"github.com/aswf/go-jpeg2000/internal/tcd"
+	"github.com/mrjoshuak/go-jpeg2000/internal/box"
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/mct"
+	"github.com/mrjoshuak/go-jpeg2000/internal/tcd"
 )
 
 // decoder handles JPEG 2000 decoding.

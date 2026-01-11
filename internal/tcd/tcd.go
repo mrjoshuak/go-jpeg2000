@@ -9,9 +9,9 @@
 package tcd
 
 import (
-	"github.com/aswf/go-jpeg2000/internal/codestream"
-	"github.com/aswf/go-jpeg2000/internal/dwt"
-	"github.com/aswf/go-jpeg2000/internal/entropy"
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/dwt"
+	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
 )
 
 // Tile represents a single tile in the image.

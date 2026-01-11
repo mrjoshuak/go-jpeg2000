@@ -20,7 +20,7 @@ This package provides a native Go implementation of JPEG 2000 encoding and decod
 ## Installation
 
 ```bash
-go get github.com/aswf/go-jpeg2000
+go get github.com/mrjoshuak/go-jpeg2000
 ```
 
 ## Usage
@@ -34,7 +34,7 @@ import (
     "image"
     "os"
 
-    _ "github.com/aswf/go-jpeg2000" // Register format
+    _ "github.com/mrjoshuak/go-jpeg2000" // Register format
 )
 
 func main() {
@@ -58,7 +58,7 @@ import (
     "image"
     "os"
 
-    "github.com/aswf/go-jpeg2000"
+    "github.com/mrjoshuak/go-jpeg2000"
 )
 
 func main() {

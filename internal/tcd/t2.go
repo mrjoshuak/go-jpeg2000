@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/aswf/go-jpeg2000/internal/bio"
-	"github.com/aswf/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/bio"
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
 )
 
 // PacketIterator iterates over packets in progression order.

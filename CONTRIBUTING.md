@@ -120,7 +120,7 @@ func TestDecode_InvalidHeader(t *testing.T) {
 ### Building
 
 ```bash
-git clone https://github.com/aswf/go-jpeg2000.git
+git clone https://github.com/mrjoshuak/go-jpeg2000.git
 cd go-jpeg2000
 go build ./...
 ```

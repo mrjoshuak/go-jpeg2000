@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/aswf/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
 )
 
 // Helper to create precincts for testing.

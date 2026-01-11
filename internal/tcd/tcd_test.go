@@ -3,8 +3,8 @@ package tcd
 import (
 	"testing"
 
-	"github.com/aswf/go-jpeg2000/internal/codestream"
-	"github.com/aswf/go-jpeg2000/internal/entropy"
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
 )
 
 // TestCeilDiv tests the ceilDiv helper function.
