@@ -146,6 +146,153 @@ func TestHTDecoderMinimalData(t *testing.T) {
 	}
 }
 
+// TestHTDecodeSegments tests DecodeSegments with explicit lcup.
+func TestHTDecodeSegments(t *testing.T) {
+	width, height := 32, 32
+	data := make([]int32, width*height)
+	for i := range data {
+		data[i] = int32((i % 256) - 128)
+	}
+
+	enc := NewHTEncoder(width, height)
+	enc.SetData(data)
+	encoded := enc.Encode(BandLL)
+	if encoded == nil {
+		t.Fatal("Encode returned nil")
+	}
+
+	// DecodeSegments with lcup == len(data) should behave same as Decode
+	dec := NewHTDecoder(width, height)
+	decoded := dec.DecodeSegments(encoded, len(encoded), 16, BandLL)
+
+	dec2 := NewHTDecoder(width, height)
+	decoded2 := dec2.Decode(encoded, 16, BandLL)
+
+	for i := range decoded {
+		if decoded[i] != decoded2[i] {
+			t.Errorf("Mismatch at %d: DecodeSegments=%d, Decode=%d", i, decoded[i], decoded2[i])
+		}
+	}
+}
+
+// TestHTEncodeWithRefinement tests encoding with SPP/MRP refinement passes.
+func TestHTEncodeWithRefinement(t *testing.T) {
+	width, height := 32, 32
+	data := make([]int32, width*height)
+	for i := range data {
+		data[i] = int32((i % 256) - 128)
+	}
+
+	enc := NewHTEncoder(width, height)
+	enc.SetData(data)
+	combined, lcup := enc.EncodeWithRefinement(BandLL)
+	if combined == nil {
+		t.Fatal("EncodeWithRefinement returned nil")
+	}
+
+	if lcup <= 0 || lcup > len(combined) {
+		t.Fatalf("Invalid lcup: %d (total: %d)", lcup, len(combined))
+	}
+
+	// Decode with segments
+	dec := NewHTDecoder(width, height)
+	decoded := dec.DecodeSegments(combined, lcup, 16, BandLL)
+
+	if len(decoded) != len(data) {
+		t.Fatalf("Decoded length mismatch: got %d, want %d", len(decoded), len(data))
+	}
+}
+
+// TestHTSPPMRPEmptyRefinement tests SPP/MRP with no refinement data.
+func TestHTSPPMRPEmptyRefinement(t *testing.T) {
+	width, height := 8, 8
+	data := make([]int32, width*height)
+	for i := range data {
+		data[i] = int32(i%16 - 8)
+	}
+
+	enc := NewHTEncoder(width, height)
+	enc.SetData(data)
+	encoded := enc.Encode(BandLL)
+	if encoded == nil {
+		t.Fatal("Encode returned nil")
+	}
+
+	// Decode with no SPP/MRP (lcup == total length)
+	dec := NewHTDecoder(width, height)
+	decoded := dec.DecodeSegments(encoded, len(encoded), 16, BandLL)
+	if decoded == nil {
+		t.Fatal("DecodeSegments returned nil")
+	}
+}
+
+// TestHTSPPMRPSingleCoefficient tests SPP/MRP on a minimal code block.
+func TestHTSPPMRPSingleCoefficient(t *testing.T) {
+	// 4x4 block with a single non-zero coefficient
+	width, height := 4, 4
+	data := make([]int32, width*height)
+	data[0] = 5
+
+	enc := NewHTEncoder(width, height)
+	enc.SetData(data)
+	combined, lcup := enc.EncodeWithRefinement(BandLL)
+	if combined == nil {
+		t.Fatal("EncodeWithRefinement returned nil")
+	}
+
+	dec := NewHTDecoder(width, height)
+	decoded := dec.DecodeSegments(combined, lcup, 16, BandLL)
+	if decoded == nil {
+		t.Fatal("DecodeSegments returned nil")
+	}
+}
+
+// TestHTDecodeSPPMRPHelpers tests the significance helper methods directly.
+func TestHTDecodeSPPMRPHelpers(t *testing.T) {
+	dec := NewHTDecoder(8, 8)
+
+	// Initially nothing is significant
+	if dec.isSignificant(0, 0) {
+		t.Error("Expected (0,0) to be insignificant initially")
+	}
+
+	// Set (0,0) as significant
+	dec.setSignificant(0, 0)
+	if !dec.isSignificant(0, 0) {
+		t.Error("Expected (0,0) to be significant after setSignificant")
+	}
+
+	// Check that neighbor detection works
+	if !dec.hasSignificantNeighbor(1, 0) {
+		t.Error("Expected (1,0) to have a significant neighbor")
+	}
+	if !dec.hasSignificantNeighbor(0, 1) {
+		t.Error("Expected (0,1) to have a significant neighbor")
+	}
+	if !dec.hasSignificantNeighbor(1, 1) {
+		t.Error("Expected (1,1) to have a significant neighbor")
+	}
+
+	// Far-away sample should not have a significant neighbor
+	if dec.hasSignificantNeighbor(4, 4) {
+		t.Error("Expected (4,4) to have no significant neighbor")
+	}
+
+	// Out-of-bounds should not crash
+	if dec.isSignificant(-1, 0) {
+		t.Error("Out-of-bounds should not be significant")
+	}
+	if dec.isSignificant(0, -1) {
+		t.Error("Out-of-bounds should not be significant")
+	}
+	if dec.isSignificant(8, 0) {
+		t.Error("Out-of-bounds should not be significant")
+	}
+	if dec.isSignificant(0, 8) {
+		t.Error("Out-of-bounds should not be significant")
+	}
+}
+
 // BenchmarkHTEncoder benchmarks HTJ2K encoding.
 func BenchmarkHTEncoder(b *testing.B) {
 	sizes := []struct {

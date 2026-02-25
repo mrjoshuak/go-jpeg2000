@@ -335,6 +335,19 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	return e.encode()
 }
 
+// DecodeFloat reads a JPEG 2000 image and returns it as a FloatImage,
+// preserving float precision from the wavelet transform pipeline.
+func DecodeFloat(r io.Reader) (*FloatImage, error) {
+	return DecodeFloatConfig(r, nil)
+}
+
+// DecodeFloatConfig decodes a JPEG 2000 image with the specified configuration,
+// returning a FloatImage that preserves float precision.
+func DecodeFloatConfig(r io.Reader, cfg *Config) (*FloatImage, error) {
+	d := newDecoder(r)
+	return d.decodeFloat(cfg)
+}
+
 // DecodeMetadata reads only the header information without decoding the image.
 func DecodeMetadata(r io.Reader) (*Metadata, error) {
 	d := newDecoder(r)

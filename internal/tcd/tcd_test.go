@@ -823,3 +823,23 @@ func BenchmarkApplyInverseDWT53(b *testing.B) {
 		decoder.ApplyInverseDWT(comp)
 	}
 }
+
+// TestTileDecoderQualityLayerLimit tests the quality layer limit getter/setter.
+func TestTileDecoderQualityLayerLimit(t *testing.T) {
+	header := createTestHeader()
+	decoder := NewTileDecoder(header)
+
+	if decoder.QualityLayerLimit() != 0 {
+		t.Errorf("default QualityLayerLimit = %d; want 0", decoder.QualityLayerLimit())
+	}
+
+	decoder.SetQualityLayerLimit(3)
+	if decoder.QualityLayerLimit() != 3 {
+		t.Errorf("QualityLayerLimit = %d; want 3", decoder.QualityLayerLimit())
+	}
+
+	decoder.SetQualityLayerLimit(0)
+	if decoder.QualityLayerLimit() != 0 {
+		t.Errorf("QualityLayerLimit after reset = %d; want 0", decoder.QualityLayerLimit())
+	}
+}

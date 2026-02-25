@@ -87,31 +87,40 @@ func NewHTDecoder(width, height int) *HTDecoder {
 	}
 }
 
-// Decode decodes an HTJ2K code block.
+// Decode decodes an HTJ2K code block with a single cleanup pass segment.
 // data contains the code block data, numBitplanes is the number of bitplanes,
 // and bandType specifies the subband (LL, HL, LH, or HH).
 func (d *HTDecoder) Decode(data []byte, numBitplanes, bandType int) []int32 {
+	return d.DecodeSegments(data, len(data), numBitplanes, bandType)
+}
+
+// DecodeSegments decodes an HTJ2K code block with optional SPP/MRP segments.
+// data contains all segments concatenated, lcup is the cleanup pass segment length,
+// numBitplanes is the number of bitplanes, and bandType specifies the subband.
+// When lcup < len(data), the remaining bytes (len2 = len(data) - lcup) contain
+// the SPP and MRP refinement data.
+func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int) []int32 {
 	if len(data) < 2 {
-		// Empty or minimal code block
 		for i := range d.data {
 			d.data[i] = 0
 		}
 		return d.data
 	}
 
-	// Parse code block header to get lengths
-	// LCUP is stored in the last 2 bytes as a 12-bit value
-	scup := int(data[len(data)-1]) + (int(data[len(data)-2]&0x0F) << 8)
-	if scup < 2 || scup > len(data) {
-		// Invalid scup, return zeros
+	if lcup <= 0 || lcup > len(data) {
+		lcup = len(data)
+	}
+
+	// Parse code block header to get SCUP from the cleanup segment
+	scup := int(data[lcup-1]) + (int(data[lcup-2]&0x0F) << 8)
+	if scup < 2 || scup > lcup {
 		for i := range d.data {
 			d.data[i] = 0
 		}
 		return d.data
 	}
 
-	lcup := len(data)
-	len2 := 0 // Length of SPP+MRP segments (0 for cleanup-only pass)
+	len2 := len(data) - lcup
 
 	// Initialize bitstream readers
 	if !d.initMEL(data, lcup, scup) {
@@ -863,9 +872,121 @@ func (d *HTDecoder) decodeNonInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 	return consumed
 }
 
-// decodeSPPMRP decodes the SPP and MRP passes.
+// isSignificant checks if sample at (x,y) is significant using the sigma buffers.
+// sigma1 tracks significance for the first two rows of each stripe (y%4 < 2),
+// sigma2 tracks significance for the last two rows (y%4 >= 2).
+// Each sigma byte holds 4 bits of significance for a column of 4 samples.
+func (d *HTDecoder) isSignificant(x, y int) bool {
+	if x < 0 || x >= d.width || y < 0 || y >= d.height {
+		return false
+	}
+	qx := x / 4
+	bit := uint(x % 4)
+	row := y % 4
+	if row < 2 {
+		return d.sigma1[qx]&(1<<bit) != 0
+	}
+	return d.sigma2[qx]&(1<<bit) != 0
+}
+
+// setSignificant marks sample at (x,y) as significant in the sigma buffers.
+func (d *HTDecoder) setSignificant(x, y int) {
+	qx := x / 4
+	bit := uint(x % 4)
+	row := y % 4
+	if row < 2 {
+		d.sigma1[qx] |= 1 << bit
+	} else {
+		d.sigma2[qx] |= 1 << bit
+	}
+}
+
+// hasSignificantNeighbor checks if any of the 8-connected neighbors of (x,y)
+// are significant.
+func (d *HTDecoder) hasSignificantNeighbor(x, y int) bool {
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if dx == 0 && dy == 0 {
+				continue
+			}
+			if d.isSignificant(x+dx, y+dy) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// decodeSPPMRP decodes the SPP (Significance Propagation Pass) and
+// MRP (Magnitude Refinement Pass).
 func (d *HTDecoder) decodeSPPMRP() {
-	// TODO: Implement SPP and MRP decoding for refinement passes
+	width := d.width
+	height := d.height
+
+	// SPP: For each insignificant sample with a significant neighbor,
+	// read a significance bit. If significant, read a sign bit.
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if d.isSignificant(x, y) {
+				continue
+			}
+			if !d.hasSignificantNeighbor(x, y) {
+				continue
+			}
+
+			// Read significance bit from SPP stream
+			val := d.frwdFetch(&d.spp)
+			sig := val & 1
+			d.frwdAdvance(&d.spp, 1)
+
+			if sig == 0 {
+				continue
+			}
+
+			// Read sign bit
+			val = d.frwdFetch(&d.spp)
+			sign := val & 1
+			d.frwdAdvance(&d.spp, 1)
+
+			// Mark as significant
+			d.setSignificant(x, y)
+
+			// Set coefficient: magnitude 1 with sign
+			idx := y*width + x
+			if idx < len(d.data) {
+				if sign != 0 {
+					d.data[idx] = -1
+				} else {
+					d.data[idx] = 1
+				}
+			}
+		}
+	}
+
+	// MRP: For each significant sample, read one refinement bit and
+	// shift the magnitude left by 1, OR-ing in the new bit.
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if !d.isSignificant(x, y) {
+				continue
+			}
+
+			// Read refinement bit from MRP stream
+			val := d.revFetch(&d.mrp)
+			bit := val & 1
+			d.revAdvance(&d.mrp, 1)
+
+			idx := y*width + x
+			if idx < len(d.data) {
+				coeff := d.data[idx]
+				if coeff < 0 {
+					d.data[idx] = -((-coeff << 1) | int32(bit))
+				} else {
+					d.data[idx] = (coeff << 1) | int32(bit)
+				}
+			}
+		}
+	}
 }
 
 // HTEncoder is the High-Throughput JPEG 2000 block encoder.
@@ -1042,6 +1163,139 @@ func (e *HTEncoder) Encode(bandType int) []byte {
 	output[totalLen-1] = byte(scup & 0xFF)
 
 	return output
+}
+
+// EncodeWithRefinement encodes the code block with cleanup, SPP, and MRP passes.
+// Returns the combined data and the cleanup segment length (lcup).
+// The SPP/MRP data is appended after the cleanup data.
+func (e *HTEncoder) EncodeWithRefinement(bandType int) ([]byte, int) {
+	cleanup := e.Encode(bandType)
+	if cleanup == nil {
+		return nil, 0
+	}
+	lcup := len(cleanup)
+
+	width := e.width
+	height := e.height
+
+	// Build significance map from encoded data (same as what cleanup produces)
+	sig := make([]bool, width*height)
+	for i, v := range e.data {
+		sig[i] = (v != 0)
+	}
+
+	// Encode SPP data (forward bitstream)
+	var sppBits []byte
+	var sppBuf uint64
+	sppBitCount := 0
+
+	sppFlush := func(val, n uint32) {
+		sppBuf |= uint64(val) << sppBitCount
+		sppBitCount += int(n)
+		for sppBitCount >= 8 {
+			b := byte(sppBuf & 0xFF)
+			sppBits = append(sppBits, b)
+			sppBuf >>= 8
+			sppBitCount -= 8
+		}
+	}
+
+	// SPP pass: for insignificant samples with significant neighbors
+	newSig := make([]bool, width*height)
+	copy(newSig, sig)
+
+	hasNeighbor := func(x, y int) bool {
+		for dy := -1; dy <= 1; dy++ {
+			for dx := -1; dx <= 1; dx++ {
+				if dx == 0 && dy == 0 {
+					continue
+				}
+				nx, ny := x+dx, y+dy
+				if nx < 0 || nx >= width || ny < 0 || ny >= height {
+					continue
+				}
+				if sig[ny*width+nx] {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// For SPP, we encode refinement bits for samples that are NOT significant
+	// in the cleanup pass but have significant neighbors.
+	// In a real encoder, these would add precision. For testing, we encode
+	// the actual next bit of the coefficient.
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			idx := y*width + x
+			if sig[idx] || !hasNeighbor(x, y) {
+				continue
+			}
+			// This sample was insignificant in cleanup but has a neighbor.
+			// For simplicity in testing, always signal as insignificant (0).
+			// A real encoder would check if the original coefficient warrants it.
+			sppFlush(0, 1) // Not significant in SPP
+		}
+	}
+
+	// Flush remaining SPP bits
+	if sppBitCount > 0 {
+		sppBits = append(sppBits, byte(sppBuf&0xFF))
+	}
+
+	// Encode MRP data (reverse bitstream)
+	var mrpBits []byte
+	var mrpBuf uint64
+	mrpBitCount := 0
+
+	mrpFlush := func(val, n uint32) {
+		mrpBuf |= uint64(val) << mrpBitCount
+		mrpBitCount += int(n)
+		for mrpBitCount >= 8 {
+			b := byte(mrpBuf & 0xFF)
+			mrpBits = append(mrpBits, b)
+			mrpBuf >>= 8
+			mrpBitCount -= 8
+		}
+	}
+
+	// MRP pass: for each significant sample, write one refinement bit
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			idx := y*width + x
+			if !newSig[idx] {
+				continue
+			}
+			// Write the next magnitude bit (bit 0 of the absolute value)
+			v := e.data[idx]
+			if v < 0 {
+				v = -v
+			}
+			mrpFlush(uint32(v&1), 1)
+		}
+	}
+
+	// Flush remaining MRP bits
+	if mrpBitCount > 0 {
+		mrpBits = append(mrpBits, byte(mrpBuf&0xFF))
+	}
+
+	// Combine: SPP bytes followed by MRP bytes (MRP stored in reverse)
+	len2 := len(sppBits) + len(mrpBits)
+	if len2 == 0 {
+		return cleanup, lcup
+	}
+
+	combined := make([]byte, lcup+len2)
+	copy(combined[:lcup], cleanup)
+	copy(combined[lcup:lcup+len(sppBits)], sppBits)
+	// MRP bytes are stored in reverse order (backward bitstream)
+	for i, b := range mrpBits {
+		combined[lcup+len(sppBits)+len(mrpBits)-1-i] = b
+	}
+
+	return combined, lcup
 }
 
 // encodeCleanup encodes the cleanup pass.

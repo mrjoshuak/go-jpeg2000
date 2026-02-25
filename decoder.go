@@ -310,6 +310,9 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 
 	// Decode each tile
 	tileDecoder := tcd.NewTileDecoder(h)
+	if cfg != nil && cfg.QualityLayers > 0 {
+		tileDecoder.SetQualityLayerLimit(cfg.QualityLayers)
+	}
 	numTiles := int(h.NumTilesX * h.NumTilesY)
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
@@ -611,4 +614,116 @@ func (r *byteReader) Read(p []byte) (int, error) {
 	n := copy(p, r.data[r.pos:])
 	r.pos += n
 	return n, nil
+}
+
+// decodeFloat decodes the image as a FloatImage.
+func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
+	if err := d.readFormat(); err != nil {
+		return nil, fmt.Errorf("reading format: %w", err)
+	}
+
+	if err := d.parseCodestream(); err != nil {
+		return nil, fmt.Errorf("parsing codestream: %w", err)
+	}
+
+	return d.decodeTilesFloat(cfg)
+}
+
+// decodeTilesFloat decodes all tiles and assembles a FloatImage output.
+func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
+	h := d.header
+
+	width := int(h.ImageWidth - h.ImageXOffset)
+	height := int(h.ImageHeight - h.ImageYOffset)
+
+	if cfg != nil && cfg.ReduceResolution > 0 {
+		for i := 0; i < cfg.ReduceResolution; i++ {
+			width = (width + 1) / 2
+			height = (height + 1) / 2
+		}
+	}
+
+	numComp := int(h.NumComponents)
+	if numComp == 0 || len(h.ComponentInfo) == 0 {
+		return nil, fmt.Errorf("invalid image: no components")
+	}
+	precision := h.ComponentInfo[0].Precision()
+	signed := h.ComponentInfo[0].IsSigned()
+
+	// Decode tiles into int32 component data (same as integer path)
+	componentData := make([][]int32, numComp)
+	for c := 0; c < numComp; c++ {
+		componentData[c] = make([]int32, width*height)
+	}
+
+	tileDecoder := tcd.NewTileDecoder(h)
+	if cfg != nil && cfg.QualityLayers > 0 {
+		tileDecoder.SetQualityLayerLimit(cfg.QualityLayers)
+	}
+	numTiles := int(h.NumTilesX * h.NumTilesY)
+
+	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
+		if err := d.decodeTile(tileDecoder, tileIdx, componentData, width, height, cfg); err != nil {
+			return nil, fmt.Errorf("decoding tile %d: %w", tileIdx, err)
+		}
+	}
+
+	// Build float component data
+	compFloat := make([][]float64, numComp)
+	for c := 0; c < numComp; c++ {
+		compFloat[c] = make([]float64, len(componentData[c]))
+		for i, v := range componentData[c] {
+			compFloat[c][i] = float64(v)
+		}
+	}
+
+	// Apply inverse MCT in float
+	if h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
+		if h.CodingStyle.IsReversible() {
+			// RCT: apply integer RCT then convert
+			mct.InverseRCT(componentData[0], componentData[1], componentData[2])
+			for c := 0; c < 3; c++ {
+				for i, v := range componentData[c] {
+					compFloat[c][i] = float64(v)
+				}
+			}
+		} else {
+			// ICT: apply directly on float data
+			mct.InverseICT(compFloat[0], compFloat[1], compFloat[2])
+		}
+	}
+
+	// Apply DC level shift in float
+	for c := 0; c < numComp; c++ {
+		if !h.ComponentInfo[c].IsSigned() {
+			mct.DCLevelShiftInverseFloat(compFloat[c], h.ComponentInfo[c].Precision())
+		}
+	}
+
+	return d.createFloatImage(compFloat, width, height, numComp, precision, signed)
+}
+
+// createFloatImage creates a FloatImage from float64 component data.
+func (d *decoder) createFloatImage(
+	compFloat [][]float64,
+	width, height int,
+	numComp int,
+	precision int,
+	signed bool,
+) (*FloatImage, error) {
+	components := make([][]float32, numComp)
+	for c := 0; c < numComp; c++ {
+		components[c] = make([]float32, width*height)
+		for i, v := range compFloat[c] {
+			components[c][i] = float32(v)
+		}
+	}
+
+	return &FloatImage{
+		Width:      width,
+		Height:     height,
+		Components: components,
+		BitDepth:   precision,
+		Signed:     signed,
+	}, nil
 }

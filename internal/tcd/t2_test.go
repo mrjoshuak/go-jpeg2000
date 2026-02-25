@@ -40,7 +40,7 @@ func TestNewPacketIterator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pi := NewPacketIterator(tt.numComponents, tt.numResolutions, tt.numLayers, precincts, tt.order)
+			pi := NewPacketIterator(tt.numComponents, tt.numResolutions, tt.numLayers, precincts, tt.order, 0)
 			if pi == nil {
 				t.Fatal("NewPacketIterator returned nil")
 			}
@@ -64,7 +64,7 @@ func TestNewPacketIterator(t *testing.T) {
 func TestPacketIteratorLRCP(t *testing.T) {
 	// 2 layers, 2 resolutions, 2 components, 1 precinct each
 	precincts := createTestPrecincts(2, 2, 1)
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.LRCP)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.LRCP, 0)
 
 	// LRCP: Layer is outermost, Resolution next, Component next, Precinct innermost
 	// Expected order: L=0,R=0,C=0,P=0 -> L=0,R=0,C=1,P=0 -> L=0,R=1,C=0,P=0 -> ...
@@ -100,7 +100,7 @@ func TestPacketIteratorLRCP(t *testing.T) {
 func TestPacketIteratorRLCP(t *testing.T) {
 	// 2 layers, 2 resolutions, 2 components, 1 precinct each
 	precincts := createTestPrecincts(2, 2, 1)
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.RLCP)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.RLCP, 0)
 
 	// RLCP: Resolution is outermost, Layer next, Component next, Precinct innermost
 	// Expected order: R=0,L=0,C=0,P=0 -> R=0,L=0,C=1,P=0 -> R=0,L=1,C=0,P=0 -> ...
@@ -129,7 +129,7 @@ func TestPacketIteratorRLCP(t *testing.T) {
 // TestPacketIteratorRPCL tests RPCL progression order.
 func TestPacketIteratorRPCL(t *testing.T) {
 	precincts := createTestPrecincts(2, 2, 1)
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.RPCL)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.RPCL, 0)
 
 	// RPCL: Resolution, Precinct, Component, Layer
 	expectedPackets := []Packet{
@@ -157,7 +157,7 @@ func TestPacketIteratorRPCL(t *testing.T) {
 // TestPacketIteratorPCRL tests PCRL progression order.
 func TestPacketIteratorPCRL(t *testing.T) {
 	precincts := createTestPrecincts(2, 2, 1)
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.PCRL)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.PCRL, 0)
 
 	// PCRL: Precinct, Component, Resolution, Layer
 	expectedPackets := []Packet{
@@ -185,7 +185,7 @@ func TestPacketIteratorPCRL(t *testing.T) {
 // TestPacketIteratorCPRL tests CPRL progression order.
 func TestPacketIteratorCPRL(t *testing.T) {
 	precincts := createTestPrecincts(2, 2, 1)
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.CPRL)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.CPRL, 0)
 
 	// CPRL: Component, Position, Resolution, Layer
 	expectedPackets := []Packet{
@@ -213,7 +213,7 @@ func TestPacketIteratorCPRL(t *testing.T) {
 // TestPacketIteratorReset tests resetting the iterator.
 func TestPacketIteratorReset(t *testing.T) {
 	precincts := createTestPrecincts(2, 2, 2)
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.LRCP)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.LRCP, 0)
 
 	// Consume some packets
 	for i := 0; i < 4; i++ {
@@ -240,7 +240,7 @@ func TestPacketIteratorReset(t *testing.T) {
 // TestPacketIteratorMultiplePrecincts tests with multiple precincts.
 func TestPacketIteratorMultiplePrecincts(t *testing.T) {
 	precincts := createTestPrecincts(1, 1, 2) // 2 precincts
-	pi := NewPacketIterator(1, 1, 1, precincts, codestream.LRCP)
+	pi := NewPacketIterator(1, 1, 1, precincts, codestream.LRCP, 0)
 
 	// Should iterate through both precincts
 	p1, ok1 := pi.Next()
@@ -268,7 +268,7 @@ func TestPacketIteratorMaxPrecincts(t *testing.T) {
 		{{1}, {4}}, // Component 1: res 0 has 1 precinct, res 1 has 4
 	}
 
-	pi := NewPacketIterator(2, 2, 1, precincts, codestream.PCRL)
+	pi := NewPacketIterator(2, 2, 1, precincts, codestream.PCRL, 0)
 	maxPrec := pi.maxPrecincts()
 
 	// Max should be 4
@@ -784,7 +784,7 @@ func TestEncodeDecodePacketRoundTrip(t *testing.T) {
 func TestPacketIteratorEmptyPrecincts(t *testing.T) {
 	// Empty precincts slice
 	precincts := [][][]int{}
-	pi := NewPacketIterator(0, 0, 0, precincts, codestream.LRCP)
+	pi := NewPacketIterator(0, 0, 0, precincts, codestream.LRCP, 0)
 
 	_, ok := pi.Next()
 	if ok {
@@ -795,7 +795,7 @@ func TestPacketIteratorEmptyPrecincts(t *testing.T) {
 // TestPacketIteratorSingleElement tests with minimal configuration.
 func TestPacketIteratorSingleElement(t *testing.T) {
 	precincts := createTestPrecincts(1, 1, 1)
-	pi := NewPacketIterator(1, 1, 1, precincts, codestream.LRCP)
+	pi := NewPacketIterator(1, 1, 1, precincts, codestream.LRCP, 0)
 
 	packet, ok := pi.Next()
 	if !ok {
@@ -899,7 +899,7 @@ func TestPacketIteratorCountPackets(t *testing.T) {
 
 	for _, tt := range tests {
 		precincts := createTestPrecincts(tt.comp, tt.res, tt.prec)
-		pi := NewPacketIterator(tt.comp, tt.res, tt.layers, precincts, tt.order)
+		pi := NewPacketIterator(tt.comp, tt.res, tt.layers, precincts, tt.order, 0)
 
 		count := 0
 		for {
@@ -922,7 +922,7 @@ func BenchmarkPacketIteratorLRCP(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		pi := NewPacketIterator(3, 5, 10, precincts, codestream.LRCP)
+		pi := NewPacketIterator(3, 5, 10, precincts, codestream.LRCP, 0)
 		for {
 			_, ok := pi.Next()
 			if !ok {
@@ -938,7 +938,7 @@ func BenchmarkPacketIteratorRLCP(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		pi := NewPacketIterator(3, 5, 10, precincts, codestream.RLCP)
+		pi := NewPacketIterator(3, 5, 10, precincts, codestream.RLCP, 0)
 		for {
 			_, ok := pi.Next()
 			if !ok {
@@ -954,7 +954,7 @@ func BenchmarkPacketIteratorCPRL(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		pi := NewPacketIterator(3, 5, 10, precincts, codestream.CPRL)
+		pi := NewPacketIterator(3, 5, 10, precincts, codestream.CPRL, 0)
 		for {
 			_, ok := pi.Next()
 			if !ok {
@@ -1040,7 +1040,7 @@ func BenchmarkByteReaderAt(b *testing.B) {
 func TestPacketIteratorUnknownOrder(t *testing.T) {
 	precincts := createTestPrecincts(1, 1, 1)
 	// Use an invalid order (larger than CPRL)
-	pi := NewPacketIterator(1, 1, 1, precincts, codestream.ProgressionOrder(99))
+	pi := NewPacketIterator(1, 1, 1, precincts, codestream.ProgressionOrder(99), 0)
 
 	// With unknown order, hasMore should return false
 	_, ok := pi.Next()
@@ -1208,7 +1208,7 @@ func TestPacketIteratorWithVariablePrecincts(t *testing.T) {
 		{{1}, {2}, {4}}, // Component 0: 1, 2, 4 precincts at res 0, 1, 2
 	}
 
-	pi := NewPacketIterator(1, 3, 1, precincts, codestream.LRCP)
+	pi := NewPacketIterator(1, 3, 1, precincts, codestream.LRCP, 0)
 
 	// Count all packets
 	count := 0
@@ -1239,7 +1239,7 @@ func TestHasMoreAllOrders(t *testing.T) {
 	}
 
 	for _, order := range orders {
-		pi := NewPacketIterator(2, 2, 2, precincts, order)
+		pi := NewPacketIterator(2, 2, 2, precincts, order, 0)
 
 		// Should have packets initially
 		packet, ok := pi.Next()
@@ -1510,7 +1510,7 @@ func TestDecodePacketDataCopy(t *testing.T) {
 // TestPacketIteratorBoundsEdgeCases tests edge cases for bounds.
 func TestPacketIteratorBoundsEdgeCases(t *testing.T) {
 	precincts := createTestPrecincts(1, 1, 1)
-	pi := NewPacketIterator(1, 1, 1, precincts, codestream.LRCP)
+	pi := NewPacketIterator(1, 1, 1, precincts, codestream.LRCP, 0)
 
 	// Initial state
 	if pi.layer != 0 {
@@ -1570,7 +1570,7 @@ func TestEncodePacketNoCodeBlocks(t *testing.T) {
 // TestAdvanceRPCLMultiplePrecincts tests RPCL advancement with multiple precincts.
 func TestAdvanceRPCLMultiplePrecincts(t *testing.T) {
 	precincts := createTestPrecincts(2, 2, 3) // 3 precincts
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.RPCL)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.RPCL, 0)
 
 	// Consume all packets and count
 	count := 0
@@ -1592,7 +1592,7 @@ func TestAdvanceRPCLMultiplePrecincts(t *testing.T) {
 // TestAdvanceCPRLMultiplePrecincts tests CPRL advancement with multiple precincts.
 func TestAdvanceCPRLMultiplePrecincts(t *testing.T) {
 	precincts := createTestPrecincts(2, 2, 3) // 3 precincts
-	pi := NewPacketIterator(2, 2, 2, precincts, codestream.CPRL)
+	pi := NewPacketIterator(2, 2, 2, precincts, codestream.CPRL, 0)
 
 	// Consume all packets and count
 	count := 0
@@ -1724,4 +1724,106 @@ func TestDecodePacketWithCodeBlockDataBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodePacket error: %v", err)
 	}
+}
+
+// TestQualityLayerLimit tests that qualityLayerLimit caps packet iteration.
+func TestQualityLayerLimit(t *testing.T) {
+	precincts := createTestPrecincts(1, 1, 1)
+
+	t.Run("ZeroMeansAllLayers", func(t *testing.T) {
+		pi := NewPacketIterator(1, 1, 4, precincts, codestream.LRCP, 0)
+		count := 0
+		for {
+			_, ok := pi.Next()
+			if !ok {
+				break
+			}
+			count++
+		}
+		if count != 4 {
+			t.Errorf("packet count = %d; want 4 (all layers)", count)
+		}
+	})
+
+	t.Run("LimitToOneLRCP", func(t *testing.T) {
+		pi := NewPacketIterator(1, 1, 4, precincts, codestream.LRCP, 1)
+		count := 0
+		for {
+			_, ok := pi.Next()
+			if !ok {
+				break
+			}
+			count++
+		}
+		if count != 1 {
+			t.Errorf("packet count = %d; want 1", count)
+		}
+	})
+
+	t.Run("LimitExceedsActualLayers", func(t *testing.T) {
+		pi := NewPacketIterator(1, 1, 3, precincts, codestream.LRCP, 10)
+		count := 0
+		for {
+			_, ok := pi.Next()
+			if !ok {
+				break
+			}
+			count++
+		}
+		if count != 3 {
+			t.Errorf("packet count = %d; want 3 (capped to actual layers)", count)
+		}
+	})
+
+	t.Run("LimitWithMultipleComponents", func(t *testing.T) {
+		multiPrecincts := createTestPrecincts(2, 2, 1)
+		// LRCP: layers * (resolutions * components * precincts)
+		// With 4 layers, 2 res, 2 comp, 1 prec: 4 * 2 * 2 * 1 = 16
+		// Limit to 2 layers: 2 * 2 * 2 * 1 = 8
+		pi := NewPacketIterator(2, 2, 4, multiPrecincts, codestream.LRCP, 2)
+		count := 0
+		maxLayer := -1
+		for {
+			p, ok := pi.Next()
+			if !ok {
+				break
+			}
+			count++
+			if p.Layer > maxLayer {
+				maxLayer = p.Layer
+			}
+		}
+		if count != 8 {
+			t.Errorf("packet count = %d; want 8", count)
+		}
+		if maxLayer != 1 {
+			t.Errorf("max layer = %d; want 1 (0-indexed)", maxLayer)
+		}
+	})
+
+	t.Run("LimitWithRLCP", func(t *testing.T) {
+		multiPrecincts := createTestPrecincts(1, 2, 1)
+		// RLCP: resolutions * (layers * components * precincts)
+		// With 4 layers, 2 res, 1 comp, 1 prec: 2 * 4 * 1 * 1 = 8
+		// Limit to 2 layers: 2 * 2 * 1 * 1 = 4
+		pi := NewPacketIterator(1, 2, 4, multiPrecincts, codestream.RLCP, 2)
+		count := 0
+		maxLayer := -1
+		for {
+			p, ok := pi.Next()
+			if !ok {
+				break
+			}
+			count++
+			if p.Layer > maxLayer {
+				maxLayer = p.Layer
+			}
+		}
+		if count != 4 {
+			t.Errorf("packet count = %d; want 4", count)
+		}
+		if maxLayer != 1 {
+			t.Errorf("max layer = %d; want 1", maxLayer)
+		}
+	})
 }

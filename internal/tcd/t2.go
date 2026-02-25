@@ -38,11 +38,17 @@ type PacketIterator struct {
 }
 
 // NewPacketIterator creates a packet iterator.
+// If qualityLayerLimit > 0, layEnd is capped to min(numLayers, qualityLayerLimit).
 func NewPacketIterator(
 	numComponents, numResolutions, numLayers int,
 	precincts [][][]int,
 	order codestream.ProgressionOrder,
+	qualityLayerLimit int,
 ) *PacketIterator {
+	layEnd := numLayers
+	if qualityLayerLimit > 0 && qualityLayerLimit < layEnd {
+		layEnd = qualityLayerLimit
+	}
 	return &PacketIterator{
 		numComponents:  numComponents,
 		numResolutions: numResolutions,
@@ -51,7 +57,7 @@ func NewPacketIterator(
 		order:          order,
 		resEnd:         numResolutions,
 		compEnd:        numComponents,
-		layEnd:         numLayers,
+		layEnd:         layEnd,
 	}
 }
 

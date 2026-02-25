@@ -213,10 +213,11 @@ func (t *TagTree) Reset() {
 
 // TileDecoder decodes a single tile.
 type TileDecoder struct {
-	header     *codestream.Header
-	tileHeader *codestream.TilePartHeader
-	tile       *Tile
-	htj2k      bool // True if using High-Throughput mode
+	header            *codestream.Header
+	tileHeader        *codestream.TilePartHeader
+	tile              *Tile
+	htj2k             bool // True if using High-Throughput mode
+	qualityLayerLimit int  // 0 means all layers
 }
 
 // NewTileDecoder creates a new tile decoder.
@@ -225,6 +226,17 @@ func NewTileDecoder(header *codestream.Header) *TileDecoder {
 		header: header,
 		htj2k:  header.IsHTJ2K(),
 	}
+}
+
+// SetQualityLayerLimit sets the maximum number of quality layers to decode.
+// 0 means decode all layers.
+func (d *TileDecoder) SetQualityLayerLimit(limit int) {
+	d.qualityLayerLimit = limit
+}
+
+// QualityLayerLimit returns the current quality layer limit.
+func (d *TileDecoder) QualityLayerLimit() int {
+	return d.qualityLayerLimit
 }
 
 // SetHTJ2K sets whether this decoder uses High-Throughput mode.
