@@ -27,6 +27,16 @@ type ProgressiveDecoder struct {
 	totalExpected int
 }
 
+// NewProgressiveDecoderFromCodestream creates a progressive decoder from a raw
+// J2K codestream. It parses the main header and initializes the decoder.
+func NewProgressiveDecoderFromCodestream(cs []byte) (*ProgressiveDecoder, error) {
+	header, _, err := parseMainHeader(cs)
+	if err != nil {
+		return nil, fmt.Errorf("parsing codestream header: %w", err)
+	}
+	return NewProgressiveDecoder(header)
+}
+
 // NewProgressiveDecoder creates a progressive decoder from a parsed
 // codestream header. The header must contain SIZ, COD, and QCD markers.
 func NewProgressiveDecoder(header *codestream.Header, opts ...DecoderOption) (*ProgressiveDecoder, error) {
