@@ -218,6 +218,7 @@ type TileDecoder struct {
 	tile              *Tile
 	htj2k             bool // True if using High-Throughput mode
 	qualityLayerLimit int  // 0 means all layers
+	reduceResolution  int  // number of finest resolution levels to skip
 }
 
 // NewTileDecoder creates a new tile decoder.
@@ -237,6 +238,17 @@ func (d *TileDecoder) SetQualityLayerLimit(limit int) {
 // QualityLayerLimit returns the current quality layer limit.
 func (d *TileDecoder) QualityLayerLimit() int {
 	return d.qualityLayerLimit
+}
+
+// SetReduceResolution sets the number of finest resolution levels to skip.
+// 0 means full resolution. N means skip the N finest levels.
+func (d *TileDecoder) SetReduceResolution(n int) {
+	d.reduceResolution = n
+}
+
+// ReduceResolution returns the current resolution reduction level.
+func (d *TileDecoder) ReduceResolution() int {
+	return d.reduceResolution
 }
 
 // SetHTJ2K sets whether this decoder uses High-Throughput mode.
@@ -262,6 +274,13 @@ func (d *TileDecoder) InitTile(tileIndex int) {
 	x1 := min(int(h.TileXOffset)+(tileX+1)*int(h.TileWidth), int(h.ImageWidth))
 	y1 := min(int(h.TileYOffset)+(tileY+1)*int(h.TileHeight), int(h.ImageHeight))
 
+	// Clamp reduceResolution to valid range
+	numDecomp := int(h.CodingStyle.NumDecompositions)
+	reduce := d.reduceResolution
+	if reduce > numDecomp {
+		reduce = numDecomp
+	}
+
 	d.tile = &Tile{
 		Index:      tileIndex,
 		X0:         x0,
@@ -281,6 +300,14 @@ func (d *TileDecoder) InitTile(tileIndex int) {
 		cx1 := ceilDiv(x1, int(comp.SubsamplingX))
 		cy1 := ceilDiv(y1, int(comp.SubsamplingY))
 
+		// Apply resolution reduction to component bounds
+		for i := 0; i < reduce; i++ {
+			cx0 = ceilDiv(cx0, 2)
+			cy0 = ceilDiv(cy0, 2)
+			cx1 = ceilDiv(cx1, 2)
+			cy1 = ceilDiv(cy1, 2)
+		}
+
 		tc := &TileComponent{
 			Index: c,
 			X0:    cx0,
@@ -294,24 +321,35 @@ func (d *TileDecoder) InitTile(tileIndex int) {
 		height := cy1 - cy0
 		tc.Data = make([]int32, width*height)
 
-		// Initialize resolutions
-		numRes := int(h.CodingStyle.NumDecompositions) + 1
+		// Initialize only the resolutions we need (skip finest N levels)
+		numRes := numDecomp + 1 - reduce
 		tc.Resolutions = make([]*Resolution, numRes)
 
 		for r := 0; r < numRes; r++ {
-			d.initResolution(tc, r)
+			d.initResolutionReduced(tc, r, reduce)
 		}
 
 		d.tile.Components[c] = tc
 	}
 }
 
-// initResolution initializes a resolution level.
+// initResolution initializes a resolution level (no reduction).
 func (d *TileDecoder) initResolution(tc *TileComponent, resLevel int) {
+	d.initResolutionReduced(tc, resLevel, 0)
+}
+
+// initResolutionReduced initializes a resolution level accounting for reduction.
+// resLevel is the index in the reduced resolution set, reduce is the number of
+// skipped finest levels. The effective decomposition level used for scale
+// computation is (numDecomp - reduce - resLevel).
+func (d *TileDecoder) initResolutionReduced(tc *TileComponent, resLevel int, reduce int) {
 	h := d.header.CodingStyle
 
-	// Calculate resolution bounds
-	scale := 1 << (int(h.NumDecompositions) - resLevel)
+	// With reduction, numDecomp levels exist but we only use (numDecomp - reduce).
+	// resLevel 0 is the coarsest in the reduced set.
+	// The scale factor for this level relative to the reduced component bounds:
+	numDecompReduced := int(h.NumDecompositions) - reduce
+	scale := 1 << (numDecompReduced - resLevel)
 	rx0 := ceilDiv(tc.X0, scale)
 	ry0 := ceilDiv(tc.Y0, scale)
 	rx1 := ceilDiv(tc.X1, scale)
@@ -427,10 +465,17 @@ func (d *TileDecoder) DecodeCodeBlock(cb *CodeBlock, bandType int) error {
 // ApplyInverseDWT applies the inverse wavelet transform.
 func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 	h := d.header.CodingStyle
-	numLevels := int(h.NumDecompositions)
+	numLevels := int(h.NumDecompositions) - d.reduceResolution
+	if numLevels < 0 {
+		numLevels = 0
+	}
 
 	width := tc.X1 - tc.X0
 	height := tc.Y1 - tc.Y0
+
+	if numLevels == 0 {
+		return
+	}
 
 	if h.WaveletTransform == 1 {
 		// 5-3 reversible

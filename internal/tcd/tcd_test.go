@@ -843,3 +843,152 @@ func TestTileDecoderQualityLayerLimit(t *testing.T) {
 		t.Errorf("QualityLayerLimit after reset = %d; want 0", decoder.QualityLayerLimit())
 	}
 }
+
+// TestTileDecoderReduceResolution tests the reduce resolution getter/setter.
+func TestTileDecoderReduceResolution(t *testing.T) {
+	header := createTestHeader()
+	decoder := NewTileDecoder(header)
+
+	if decoder.ReduceResolution() != 0 {
+		t.Errorf("default ReduceResolution = %d; want 0", decoder.ReduceResolution())
+	}
+
+	decoder.SetReduceResolution(2)
+	if decoder.ReduceResolution() != 2 {
+		t.Errorf("ReduceResolution = %d; want 2", decoder.ReduceResolution())
+	}
+
+	decoder.SetReduceResolution(0)
+	if decoder.ReduceResolution() != 0 {
+		t.Errorf("ReduceResolution after reset = %d; want 0", decoder.ReduceResolution())
+	}
+}
+
+// TestInitTileReduceResolution0 tests that reduce=0 is backward compatible.
+func TestInitTileReduceResolution0(t *testing.T) {
+	header := createTestHeader() // 64x64, 2 decompositions
+	decoder := NewTileDecoder(header)
+	decoder.SetReduceResolution(0)
+	decoder.InitTile(0)
+
+	tile := decoder.Tile()
+	if tile == nil {
+		t.Fatal("tile is nil")
+	}
+	if len(tile.Components) != 1 {
+		t.Fatalf("expected 1 component, got %d", len(tile.Components))
+	}
+	tc := tile.Components[0]
+	width := tc.X1 - tc.X0
+	height := tc.Y1 - tc.Y0
+	if width != 64 || height != 64 {
+		t.Errorf("reduce=0 component dims = %dx%d, want 64x64", width, height)
+	}
+	// 2 decompositions + 1 = 3 resolution levels
+	if len(tc.Resolutions) != 3 {
+		t.Errorf("reduce=0 resolutions = %d, want 3", len(tc.Resolutions))
+	}
+}
+
+// TestInitTileReduceResolution1 tests that reduce=1 halves dimensions.
+func TestInitTileReduceResolution1(t *testing.T) {
+	header := createTestHeader() // 64x64, 2 decompositions
+	decoder := NewTileDecoder(header)
+	decoder.SetReduceResolution(1)
+	decoder.InitTile(0)
+
+	tile := decoder.Tile()
+	tc := tile.Components[0]
+	width := tc.X1 - tc.X0
+	height := tc.Y1 - tc.Y0
+	if width != 32 || height != 32 {
+		t.Errorf("reduce=1 component dims = %dx%d, want 32x32", width, height)
+	}
+	// 2 decompositions - 1 reduction + 1 = 2 resolution levels
+	if len(tc.Resolutions) != 2 {
+		t.Errorf("reduce=1 resolutions = %d, want 2", len(tc.Resolutions))
+	}
+}
+
+// TestInitTileReduceResolutionMax tests reduce=numDecompositions gives LL only.
+func TestInitTileReduceResolutionMax(t *testing.T) {
+	header := createTestHeader() // 64x64, 2 decompositions
+	decoder := NewTileDecoder(header)
+	decoder.SetReduceResolution(2) // = numDecompositions
+	decoder.InitTile(0)
+
+	tile := decoder.Tile()
+	tc := tile.Components[0]
+	width := tc.X1 - tc.X0
+	height := tc.Y1 - tc.Y0
+	if width != 16 || height != 16 {
+		t.Errorf("reduce=2 component dims = %dx%d, want 16x16", width, height)
+	}
+	// 2 - 2 + 1 = 1 resolution level (LL only)
+	if len(tc.Resolutions) != 1 {
+		t.Errorf("reduce=2 resolutions = %d, want 1", len(tc.Resolutions))
+	}
+}
+
+// TestInitTileReduceResolutionClamped tests that exceeding numDecompositions is clamped.
+func TestInitTileReduceResolutionClamped(t *testing.T) {
+	header := createTestHeader() // 2 decompositions
+	decoder := NewTileDecoder(header)
+	decoder.SetReduceResolution(10) // way more than numDecompositions
+	decoder.InitTile(0)
+
+	tile := decoder.Tile()
+	tc := tile.Components[0]
+	// Should be clamped to 2 (numDecompositions), same as max test
+	width := tc.X1 - tc.X0
+	height := tc.Y1 - tc.Y0
+	if width != 16 || height != 16 {
+		t.Errorf("reduce=10 (clamped) component dims = %dx%d, want 16x16", width, height)
+	}
+	if len(tc.Resolutions) != 1 {
+		t.Errorf("reduce=10 (clamped) resolutions = %d, want 1", len(tc.Resolutions))
+	}
+}
+
+// TestApplyInverseDWTReduced tests DWT with resolution reduction.
+func TestApplyInverseDWTReduced(t *testing.T) {
+	header := createTestHeader() // 64x64, 2 decompositions, 5-3 reversible
+	decoder := NewTileDecoder(header)
+	decoder.SetReduceResolution(1)
+	decoder.InitTile(0)
+
+	tile := decoder.Tile()
+	tc := tile.Components[0]
+
+	// Just verify it doesn't panic and data length is correct
+	decoder.ApplyInverseDWT(tc)
+	expectedLen := 32 * 32
+	if len(tc.Data) != expectedLen {
+		t.Errorf("data length after DWT = %d, want %d", len(tc.Data), expectedLen)
+	}
+}
+
+// TestApplyInverseDWTReduceMax tests DWT when reduce=numDecompositions (no DWT needed).
+func TestApplyInverseDWTReduceMax(t *testing.T) {
+	header := createTestHeader()
+	decoder := NewTileDecoder(header)
+	decoder.SetReduceResolution(2) // = numDecompositions, numLevels becomes 0
+	decoder.InitTile(0)
+
+	tile := decoder.Tile()
+	tc := tile.Components[0]
+
+	// Set some data to verify it's not corrupted
+	for i := range tc.Data {
+		tc.Data[i] = int32(i)
+	}
+
+	decoder.ApplyInverseDWT(tc) // Should be a no-op
+
+	for i := range tc.Data {
+		if tc.Data[i] != int32(i) {
+			t.Errorf("DWT modified data at index %d when reduce=max", i)
+			break
+		}
+	}
+}

@@ -2755,3 +2755,109 @@ func TestDecode_NRGBA64Roundtrip(t *testing.T) {
 		}
 	}
 }
+
+// TestDecodeConfig_ReduceResolutionMax tests reducing to LL subband only.
+func TestDecodeConfig_ReduceResolutionMax(t *testing.T) {
+	original := image.NewGray(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			original.SetGray(x, y, color.Gray{Y: uint8((x + y) * 2)})
+		}
+	}
+
+	var buf bytes.Buffer
+	opts := DefaultOptions()
+	opts.Format = FormatJ2K
+	opts.Lossless = true
+	opts.NumResolutions = 4 // 3 decompositions
+
+	if err := Encode(&buf, original, opts); err != nil {
+		t.Fatalf("Encode() error: %v", err)
+	}
+
+	// Reduce by numDecompositions (3) should give LL subband only
+	cfg := &Config{
+		ReduceResolution: 3,
+	}
+
+	decoded, err := DecodeConfig(bytes.NewReader(buf.Bytes()), cfg)
+	if err != nil {
+		t.Fatalf("DecodeConfig() error: %v", err)
+	}
+
+	// 64 / 2^3 = 8
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Errorf("Max reduction: dimensions = %dx%d, want 8x8",
+			bounds.Dx(), bounds.Dy())
+	}
+}
+
+// TestDecodeConfig_ReduceResolution0Compat tests that reduce=0 produces full resolution.
+func TestDecodeConfig_ReduceResolution0Compat(t *testing.T) {
+	original := image.NewGray(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			original.SetGray(x, y, color.Gray{Y: uint8(x + y)})
+		}
+	}
+
+	var buf bytes.Buffer
+	opts := DefaultOptions()
+	opts.Format = FormatJ2K
+	opts.Lossless = true
+
+	if err := Encode(&buf, original, opts); err != nil {
+		t.Fatalf("Encode() error: %v", err)
+	}
+
+	// Decode with reduce=0 (explicit) should match nil config
+	cfg := &Config{ReduceResolution: 0}
+	decoded, err := DecodeConfig(bytes.NewReader(buf.Bytes()), cfg)
+	if err != nil {
+		t.Fatalf("DecodeConfig(reduce=0) error: %v", err)
+	}
+
+	decodedNil, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	b0 := decoded.Bounds()
+	b1 := decodedNil.Bounds()
+	if b0.Dx() != b1.Dx() || b0.Dy() != b1.Dy() {
+		t.Errorf("reduce=0 dims %dx%d != nil config dims %dx%d",
+			b0.Dx(), b0.Dy(), b1.Dx(), b1.Dy())
+	}
+}
+
+// TestDecodeFloatConfig_ReduceResolution tests resolution reduction on float path.
+func TestDecodeFloatConfig_ReduceResolution(t *testing.T) {
+	original := image.NewGray(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			original.SetGray(x, y, color.Gray{Y: uint8((x + y) * 2)})
+		}
+	}
+
+	var buf bytes.Buffer
+	opts := DefaultOptions()
+	opts.Format = FormatJ2K
+	opts.Lossless = true
+	opts.NumResolutions = 4
+
+	if err := Encode(&buf, original, opts); err != nil {
+		t.Fatalf("Encode() error: %v", err)
+	}
+
+	cfg := &Config{ReduceResolution: 1}
+	decoded, err := DecodeFloatConfig(bytes.NewReader(buf.Bytes()), cfg)
+	if err != nil {
+		t.Fatalf("DecodeFloatConfig() error: %v", err)
+	}
+
+	if decoded.Width != 32 || decoded.Height != 32 {
+		t.Errorf("Float reduce=1: dims = %dx%d, want 32x32",
+			decoded.Width, decoded.Height)
+	}
+}

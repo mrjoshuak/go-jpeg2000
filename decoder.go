@@ -278,21 +278,26 @@ func (d *decoder) parseCodestream() error {
 	return nil
 }
 
+// reducedDimension computes the output dimension after reducing N resolution levels.
+func reducedDimension(size, reduce int) int {
+	for i := 0; i < reduce; i++ {
+		size = (size + 1) / 2
+	}
+	return size
+}
+
 // decodeTiles decodes all tiles and assembles the output image.
 func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	h := d.header
 
-	// Calculate output dimensions
-	width := int(h.ImageWidth - h.ImageXOffset)
-	height := int(h.ImageHeight - h.ImageYOffset)
-
+	reduce := 0
 	if cfg != nil && cfg.ReduceResolution > 0 {
-		// Reduce resolution
-		for i := 0; i < cfg.ReduceResolution; i++ {
-			width = (width + 1) / 2
-			height = (height + 1) / 2
-		}
+		reduce = cfg.ReduceResolution
 	}
+
+	// Calculate output dimensions at reduced resolution
+	width := reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
+	height := reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
 
 	// Create output image based on number of components
 	numComp := int(h.NumComponents)
@@ -312,6 +317,9 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	tileDecoder := tcd.NewTileDecoder(h)
 	if cfg != nil && cfg.QualityLayers > 0 {
 		tileDecoder.SetQualityLayerLimit(cfg.QualityLayers)
+	}
+	if reduce > 0 {
+		tileDecoder.SetReduceResolution(reduce)
 	}
 	numTiles := int(h.NumTilesX * h.NumTilesY)
 
@@ -372,37 +380,35 @@ func (d *decoder) decodeTile(
 ) error {
 	h := d.header
 
-	// Initialize tile
+	// Initialize tile (TileDecoder handles resolution reduction internally)
 	tileDecoder.InitTile(tileIdx)
-
-	// For now, we'll do a simplified decode
-	// A full implementation would:
-	// 1. Read tile-part headers and data from codestream
-	// 2. Decode T2 packets
-	// 3. Decode T1 code-blocks
-	// 4. Apply inverse DWT
 
 	tile := tileDecoder.Tile()
 	if tile == nil {
 		return fmt.Errorf("tile %d not initialized", tileIdx)
 	}
 
-	// Copy tile data to output (placeholder - actual decode would happen here)
+	// Compute image offset at reduced resolution
+	reduce := tileDecoder.ReduceResolution()
+	imgXOff := reducedDimension(int(h.ImageXOffset), reduce)
+	imgYOff := reducedDimension(int(h.ImageYOffset), reduce)
+
+	// Copy tile data to output
 	for c := 0; c < len(tile.Components) && c < len(componentData); c++ {
 		tc := tile.Components[c]
 		if tc == nil {
 			continue
 		}
 
-		// Apply inverse DWT
+		// Apply inverse DWT (uses reduced number of levels)
 		tileDecoder.ApplyInverseDWT(tc)
 
 		// Copy to output
-		for y := tc.Y0; y < tc.Y1 && y-int(h.ImageYOffset) < imgHeight; y++ {
-			for x := tc.X0; x < tc.X1 && x-int(h.ImageXOffset) < imgWidth; x++ {
+		for y := tc.Y0; y < tc.Y1 && y-imgYOff < imgHeight; y++ {
+			for x := tc.X0; x < tc.X1 && x-imgXOff < imgWidth; x++ {
 				srcIdx := (y-tc.Y0)*(tc.X1-tc.X0) + (x - tc.X0)
-				dstX := x - int(h.ImageXOffset)
-				dstY := y - int(h.ImageYOffset)
+				dstX := x - imgXOff
+				dstY := y - imgYOff
 				if dstX >= 0 && dstY >= 0 && dstX < imgWidth && dstY < imgHeight {
 					dstIdx := dstY*imgWidth + dstX
 					if srcIdx < len(tc.Data) {
@@ -633,15 +639,13 @@ func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
 func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 	h := d.header
 
-	width := int(h.ImageWidth - h.ImageXOffset)
-	height := int(h.ImageHeight - h.ImageYOffset)
-
+	reduce := 0
 	if cfg != nil && cfg.ReduceResolution > 0 {
-		for i := 0; i < cfg.ReduceResolution; i++ {
-			width = (width + 1) / 2
-			height = (height + 1) / 2
-		}
+		reduce = cfg.ReduceResolution
 	}
+
+	width := reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
+	height := reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
 
 	numComp := int(h.NumComponents)
 	if numComp == 0 || len(h.ComponentInfo) == 0 {
@@ -659,6 +663,9 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 	tileDecoder := tcd.NewTileDecoder(h)
 	if cfg != nil && cfg.QualityLayers > 0 {
 		tileDecoder.SetQualityLayerLimit(cfg.QualityLayers)
+	}
+	if reduce > 0 {
+		tileDecoder.SetReduceResolution(reduce)
 	}
 	numTiles := int(h.NumTilesX * h.NumTilesY)
 
