@@ -1,10 +1,12 @@
 package jpeg2000
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 
 	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
 	"github.com/mrjoshuak/go-jpeg2000/internal/mct"
 	"github.com/mrjoshuak/go-jpeg2000/internal/tcd"
 )
@@ -154,6 +156,26 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 			continue
 		}
 
+		// Decode received packets into tile component data
+		numRes := int(h.CodingStyle.NumDecompositions) + 1
+		bestRes := numRes - 1 - reduce
+		for addr, pktData := range d.receivedPkts {
+			if addr.Tile != uint16(tileIdx) {
+				continue
+			}
+			if int(addr.Resolution) > bestRes {
+				continue
+			}
+			comp := int(addr.Component)
+			res := int(addr.Resolution)
+			if comp < len(tile.Components) && tile.Components[comp] != nil {
+				tc := tile.Components[comp]
+				tcWidth := tc.X1 - tc.X0
+				tcHeight := tc.Y1 - tc.Y0
+				decodePacketIntoTile(tc.Data, tcWidth, tcHeight, numRes, comp, res, pktData, h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight())
+			}
+		}
+
 		imgXOff := reducedDimension(int(h.ImageXOffset), reduce)
 		imgYOff := reducedDimension(int(h.ImageYOffset), reduce)
 
@@ -266,6 +288,111 @@ func (d *ProgressiveDecoder) hasTileData(tile uint16) bool {
 		}
 	}
 	return false
+}
+
+// decodePacketIntoTile decodes a single (component, resolution) group's
+// mini-table into tile component data. The mini-table has the same format
+// as the full tile data: [2: numCB][per CB: 1 numBPS + 4 dataLen][encoded bytes].
+func decodePacketIntoTile(
+	tileData []int32,
+	tcWidth, tcHeight int,
+	numRes, comp, res int,
+	pktData []byte,
+	cbWidth, cbHeight int,
+) {
+	if len(pktData) < 2 {
+		return
+	}
+
+	numCB := int(binary.BigEndian.Uint16(pktData[0:2]))
+	metaSize := 2 + numCB*5
+	if len(pktData) < metaSize {
+		return
+	}
+
+	type decodeMeta struct {
+		numBPS  int
+		dataLen int
+	}
+	metas := make([]decodeMeta, numCB)
+	for i := 0; i < numCB; i++ {
+		off := 2 + i*5
+		metas[i].numBPS = int(pktData[off])
+		metas[i].dataLen = int(binary.BigEndian.Uint32(pktData[off+1 : off+5]))
+	}
+
+	// Iterate bands and code-blocks for this single resolution
+	numBands := 1
+	if res > 0 {
+		numBands = 3
+	}
+
+	cbIdx := 0
+	dataPos := metaSize
+
+	for b := 0; b < numBands; b++ {
+		bandType := entropy.BandLL
+		if res > 0 {
+			switch b {
+			case 0:
+				bandType = entropy.BandHL
+			case 1:
+				bandType = entropy.BandLH
+			case 2:
+				bandType = entropy.BandHH
+			}
+		}
+
+		// Compute band dimensions
+		scale := 1 << (numRes - 1 - res)
+		bandW := (tcWidth + scale - 1) / scale
+		bandH := (tcHeight + scale - 1) / scale
+		if res > 0 {
+			bandW = (bandW + 1) / 2
+			bandH = (bandH + 1) / 2
+		}
+
+		xOff, yOff := computeSubbandOffset(tcWidth, tcHeight, numRes, res, bandType)
+
+		for cby := 0; cby*cbHeight < bandH; cby++ {
+			for cbx := 0; cbx*cbWidth < bandW; cbx++ {
+				if cbIdx >= numCB {
+					return
+				}
+				meta := metas[cbIdx]
+
+				startX := cbx * cbWidth
+				startY := cby * cbHeight
+				actualW := cbWidth
+				actualH := cbHeight
+				if startX+actualW > bandW {
+					actualW = bandW - startX
+				}
+				if startY+actualH > bandH {
+					actualH = bandH - startY
+				}
+
+				if meta.numBPS > 0 && meta.dataLen > 0 && dataPos+meta.dataLen <= len(pktData) {
+					cbData := pktData[dataPos : dataPos+meta.dataLen]
+					t1 := entropy.NewT1(actualW, actualH)
+					decoded := t1.Decode(cbData, meta.numBPS, bandType)
+
+					for y := 0; y < actualH; y++ {
+						for x := 0; x < actualW; x++ {
+							dstX := xOff + startX + x
+							dstY := yOff + startY + y
+							if dstX < tcWidth && dstY < tcHeight {
+								tileData[dstY*tcWidth+dstX] = decoded[y*actualW+x]
+							}
+						}
+					}
+				}
+
+				dataPos += meta.dataLen
+				cbIdx++
+			}
+		}
+	}
 }
 
 // buildFloatImage converts int32 component data to a FloatImage.

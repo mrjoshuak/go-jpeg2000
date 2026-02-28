@@ -23,18 +23,16 @@ type Packet struct {
 	Data    []byte
 }
 
-// packetEntry records a packet's byte range within a codestream.
+// packetEntry records a packet's self-contained data.
 type packetEntry struct {
-	addr   PacketAddress
-	offset int
-	length int
+	addr PacketAddress
+	data []byte
 }
 
-// PacketIndex maps packet addresses to byte ranges within a codestream.
+// PacketIndex maps packet addresses to their self-contained data.
 type PacketIndex struct {
-	codestream []byte
-	entries    []packetEntry
-	addrMap    map[PacketAddress]int // maps address to entries index
+	entries []packetEntry
+	addrMap map[PacketAddress]int // maps address to entries index
 }
 
 // ExtractPackets parses a J2K codestream and returns all packets with their data.
@@ -46,8 +44,8 @@ func ExtractPackets(cs []byte) ([]Packet, error) {
 
 	packets := make([]Packet, len(idx.entries))
 	for i, entry := range idx.entries {
-		data := make([]byte, entry.length)
-		copy(data, cs[entry.offset:entry.offset+entry.length])
+		data := make([]byte, len(entry.data))
+		copy(data, entry.data)
 		packets[i] = Packet{
 			Address: entry.addr,
 			Data:    data,
@@ -70,8 +68,7 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 	}
 
 	idx := &PacketIndex{
-		codestream: cs,
-		addrMap:    make(map[PacketAddress]int),
+		addrMap: make(map[PacketAddress]int),
 	}
 
 	// Walk tile-parts
@@ -145,8 +142,8 @@ func (idx *PacketIndex) GetPacket(addr PacketAddress) ([]byte, error) {
 			addr.Tile, addr.Resolution, addr.Layer, addr.Component, addr.Precinct)
 	}
 	entry := idx.entries[i]
-	data := make([]byte, entry.length)
-	copy(data, idx.codestream[entry.offset:entry.offset+entry.length])
+	data := make([]byte, len(entry.data))
+	copy(data, entry.data)
 	return data, nil
 }
 
@@ -194,17 +191,10 @@ func parseMainHeader(cs []byte) (*codestream.Header, int, error) {
 // indexTilePackets indexes all packets within a tile's data region.
 //
 // The encoder writes code-block data in a flat C->R->B->CB order within each
-// tile. With a single layer and single precinct per resolution (the default),
-// each logical packet maps to a (layer=0, resolution=r, component=c, precinct=0)
-// tuple.
-//
-// The progression order from the COD marker determines the iteration order
-// of these logical packets. For the default LRCP order this is:
-//   layer -> resolution -> component -> precinct
-//
-// Since the encoder currently writes data sequentially as
-//   component -> resolution -> band -> codeblock
-// we partition the tile data by tracking code-block boundaries.
+// tile, preceded by a metadata table: [2: numCB][per CB: 1 numBPS + 4 dataLen].
+// This function parses that table to determine exact per-code-block sizes,
+// then groups code-blocks by (component, resolution) to build self-contained
+// per-packet mini-tables that can be independently decoded.
 func (idx *PacketIndex) indexTilePackets(
 	header *codestream.Header,
 	tileIndex uint16,
@@ -219,10 +209,8 @@ func (idx *PacketIndex) indexTilePackets(
 	}
 
 	// Calculate code-block dimensions
-	cbWidthExp := int(header.CodingStyle.CodeBlockWidthExp) + 2
-	cbHeightExp := int(header.CodingStyle.CodeBlockHeightExp) + 2
-	cbWidth := 1 << cbWidthExp
-	cbHeight := 1 << cbHeightExp
+	cbWidth := header.CodingStyle.CodeBlockWidth()
+	cbHeight := header.CodingStyle.CodeBlockHeight()
 
 	// Calculate tile dimensions
 	tileX := int(tileIndex) % int(header.NumTilesX)
@@ -236,259 +224,217 @@ func (idx *PacketIndex) indexTilePackets(
 	tileWidth := tx1 - tx0
 	tileHeight := ty1 - ty0
 
-	// Build a map of code-block byte sizes in the order the encoder writes them.
-	// The encoder writes: for c in components, for r in resolutions, for b in bands, for cb in codeblocks.
-	// Each code-block's encoded data length is self-delimiting within the T1 entropy coded stream.
-	//
-	// Since we cannot parse T1 boundaries without actually decoding the entropy-coded data,
-	// and the encoder writes all tile data as a single flat blob, we treat the entire tile
-	// data as a single packet when there is only one layer.
-	//
-	// For multi-layer codestreams with proper T2 packet framing, we would need to
-	// parse packet headers. For now, we partition the tile data evenly across the
-	// logical packet structure.
+	tileData := cs[dataStart:dataEnd]
 
-	// Calculate total number of code-blocks per (component, resolution) pair
+	// Compute expected number of code-blocks (same logic as decodeTileData)
 	type crKey struct {
 		comp int
 		res  int
 	}
-	type crInfo struct {
+	type crCodeBlockInfo struct {
 		numCodeBlocks int
 	}
-	crInfos := make(map[crKey]crInfo)
+	var crOrder []crKey // encoder write order: C→R
+	crInfos := make(map[crKey]crCodeBlockInfo)
+	expectedCB := 0
 
-	totalCodeBlocks := 0
-	// Follow the encoder's iteration order: c -> r -> b -> cb
 	for c := 0; c < numComp; c++ {
 		comp := header.ComponentInfo[c]
-		// Apply subsampling
 		compTileWidth := ceilDivInt(tileWidth, int(comp.SubsamplingX))
 		compTileHeight := ceilDivInt(tileHeight, int(comp.SubsamplingY))
 
 		for r := 0; r < numRes; r++ {
 			scale := 1 << (numRes - 1 - r)
-			bandWidth := ceilDivInt(compTileWidth, scale)
-			bandHeight := ceilDivInt(compTileHeight, scale)
+			bandW := ceilDivInt(compTileWidth, scale)
+			bandH := ceilDivInt(compTileHeight, scale)
 
-			var numBands int
-			if r == 0 {
-				numBands = 1
-			} else {
+			numBands := 1
+			if r > 0 {
 				numBands = 3
-				bandWidth = (bandWidth + 1) / 2
-				bandHeight = (bandHeight + 1) / 2
+				bandW = (bandW + 1) / 2
+				bandH = (bandH + 1) / 2
 			}
 
-			numCBPerBand := ceilDivInt(bandWidth, cbWidth) * ceilDivInt(bandHeight, cbHeight)
+			numCBPerBand := ceilDivInt(bandW, cbWidth) * ceilDivInt(bandH, cbHeight)
 			cb := numCBPerBand * numBands
-			crInfos[crKey{c, r}] = crInfo{numCodeBlocks: cb}
-			totalCodeBlocks += cb
+			key := crKey{c, r}
+			crOrder = append(crOrder, key)
+			crInfos[key] = crCodeBlockInfo{numCodeBlocks: cb}
+			expectedCB += cb
 		}
 	}
 
-	totalData := dataEnd - dataStart
-	if totalData < 0 {
-		totalData = 0
+	// Parse metadata table
+	if len(tileData) < 2 {
+		return idx.addEmptyPackets(header, tileIndex, numComp, numRes, numLayers)
 	}
 
-	// Generate packet addresses in progression order using the PacketIterator
-	// logic, then map each packet to its share of the tile data.
-	//
-	// For the default configuration (1 layer, 1 precinct per resolution),
-	// each packet covers one (component, resolution) pair.
+	numCB := int(binary.BigEndian.Uint16(tileData[0:2]))
+	if numCB != expectedCB {
+		// Not our format — fall back to empty packets
+		return idx.addEmptyPackets(header, tileIndex, numComp, numRes, numLayers)
+	}
 
-	// Build precinct counts: [component][resolution][0] = numPrecincts
-	precincts := make([][][]int, numComp)
-	for c := 0; c < numComp; c++ {
-		precincts[c] = make([][]int, numRes)
-		for r := 0; r < numRes; r++ {
-			precincts[c][r] = []int{1} // 1 precinct per resolution
+	metaSize := 2 + numCB*5
+	if len(tileData) < metaSize {
+		return idx.addEmptyPackets(header, tileIndex, numComp, numRes, numLayers)
+	}
+
+	// Read per-code-block metadata
+	type cbMeta struct {
+		numBPS  uint8
+		dataLen uint32
+	}
+	metas := make([]cbMeta, numCB)
+	for i := 0; i < numCB; i++ {
+		off := 2 + i*5
+		metas[i].numBPS = tileData[off]
+		metas[i].dataLen = binary.BigEndian.Uint32(tileData[off+1 : off+5])
+	}
+
+	// Build self-contained mini-tables per (C,R) group.
+	// Each mini-table has the same format as the full tile data:
+	// [2: groupNumCB][per CB: 1 numBPS + 4 dataLen][encoded bytes for these CBs]
+	crData := make(map[crKey][]byte)
+	cbIdx := 0
+	dataPos := metaSize
+
+	for _, key := range crOrder {
+		info := crInfos[key]
+		groupNum := info.numCodeBlocks
+
+		// Collect metadata and encoded bytes for this group
+		groupMetaSize := 2 + groupNum*5
+		var groupEncoded []byte
+		groupMetas := make([]cbMeta, groupNum)
+
+		for i := 0; i < groupNum; i++ {
+			if cbIdx >= numCB {
+				break
+			}
+			m := metas[cbIdx]
+			groupMetas[i] = m
+			if int(m.dataLen) > 0 && dataPos+int(m.dataLen) <= len(tileData) {
+				groupEncoded = append(groupEncoded, tileData[dataPos:dataPos+int(m.dataLen)]...)
+			}
+			dataPos += int(m.dataLen)
+			cbIdx++
 		}
+
+		// Build mini-table
+		miniTable := make([]byte, groupMetaSize+len(groupEncoded))
+		miniTable[0] = byte(groupNum >> 8)
+		miniTable[1] = byte(groupNum)
+		for i, m := range groupMetas {
+			off := 2 + i*5
+			miniTable[off] = m.numBPS
+			miniTable[off+1] = byte(m.dataLen >> 24)
+			miniTable[off+2] = byte(m.dataLen >> 16)
+			miniTable[off+3] = byte(m.dataLen >> 8)
+			miniTable[off+4] = byte(m.dataLen)
+		}
+		copy(miniTable[groupMetaSize:], groupEncoded)
+		crData[key] = miniTable
 	}
 
-	// Iterate in the progression order specified by the codestream
+	// Generate packet addresses in progression order and assign data
 	order := codestream.ProgressionOrder(header.CodingStyle.ProgressionOrder)
 
-	// Track how many code-blocks belong to each packet
-	type packetSlice struct {
-		addr      PacketAddress
-		numBlocks int
+	addPacket := func(l, r, c, p int) {
+		addr := PacketAddress{
+			Tile:       tileIndex,
+			Resolution: uint8(r),
+			Layer:      uint16(l),
+			Component:  uint8(c),
+			Precinct:   uint16(p),
+		}
+		data := crData[crKey{c, r}]
+		entryIdx := len(idx.entries)
+		idx.entries = append(idx.entries, packetEntry{addr: addr, data: data})
+		idx.addrMap[addr] = entryIdx
 	}
-	var packetSlices []packetSlice
 
-	// Generate all packet addresses
 	for l := 0; l < numLayers; l++ {
-		// Use progression order to determine packet sequence
 		switch order {
 		case codestream.LRCP:
 			for r := 0; r < numRes; r++ {
 				for c := 0; c < numComp; c++ {
-					for p := 0; p < 1; p++ { // 1 precinct
-						addr := PacketAddress{
-							Tile:       tileIndex,
-							Resolution: uint8(r),
-							Layer:      uint16(l),
-							Component:  uint8(c),
-							Precinct:   uint16(p),
-						}
-						info := crInfos[crKey{c, r}]
-						packetSlices = append(packetSlices, packetSlice{addr: addr, numBlocks: info.numCodeBlocks})
-					}
+					addPacket(l, r, c, 0)
 				}
 			}
 		case codestream.RLCP:
 			for r := 0; r < numRes; r++ {
 				for c := 0; c < numComp; c++ {
-					for p := 0; p < 1; p++ {
-						addr := PacketAddress{
-							Tile:       tileIndex,
-							Resolution: uint8(r),
-							Layer:      uint16(l),
-							Component:  uint8(c),
-							Precinct:   uint16(p),
-						}
-						info := crInfos[crKey{c, r}]
-						packetSlices = append(packetSlices, packetSlice{addr: addr, numBlocks: info.numCodeBlocks})
-					}
+					addPacket(l, r, c, 0)
 				}
 			}
 		case codestream.RPCL:
 			for r := 0; r < numRes; r++ {
-				for p := 0; p < 1; p++ {
-					for c := 0; c < numComp; c++ {
-						addr := PacketAddress{
-							Tile:       tileIndex,
-							Resolution: uint8(r),
-							Layer:      uint16(l),
-							Component:  uint8(c),
-							Precinct:   uint16(p),
-						}
-						info := crInfos[crKey{c, r}]
-						packetSlices = append(packetSlices, packetSlice{addr: addr, numBlocks: info.numCodeBlocks})
-					}
+				for c := 0; c < numComp; c++ {
+					addPacket(l, r, c, 0)
 				}
 			}
 		case codestream.PCRL:
-			for p := 0; p < 1; p++ {
-				for c := 0; c < numComp; c++ {
-					for r := 0; r < numRes; r++ {
-						addr := PacketAddress{
-							Tile:       tileIndex,
-							Resolution: uint8(r),
-							Layer:      uint16(l),
-							Component:  uint8(c),
-							Precinct:   uint16(p),
-						}
-						info := crInfos[crKey{c, r}]
-						packetSlices = append(packetSlices, packetSlice{addr: addr, numBlocks: info.numCodeBlocks})
-					}
+			for c := 0; c < numComp; c++ {
+				for r := 0; r < numRes; r++ {
+					addPacket(l, r, c, 0)
 				}
 			}
 		case codestream.CPRL:
 			for c := 0; c < numComp; c++ {
-				for p := 0; p < 1; p++ {
-					for r := 0; r < numRes; r++ {
-						addr := PacketAddress{
-							Tile:       tileIndex,
-							Resolution: uint8(r),
-							Layer:      uint16(l),
-							Component:  uint8(c),
-							Precinct:   uint16(p),
-						}
-						info := crInfos[crKey{c, r}]
-						packetSlices = append(packetSlices, packetSlice{addr: addr, numBlocks: info.numCodeBlocks})
-					}
+				for r := 0; r < numRes; r++ {
+					addPacket(l, r, c, 0)
 				}
 			}
 		}
 	}
 
-	// The encoder writes code-blocks in C->R->B->CB order regardless of progression order.
-	// However, this code-block data forms the content of packets when arranged
-	// according to the progression order. Since the encoder uses a single layer,
-	// we need to map the encoder's write order to the packet order.
-	//
-	// The encoder's write order for a single layer is:
-	//   for c: for r: for b: for cb: write(cb.data)
-	//
-	// This matches the CPRL progression order. For the data to be split by
-	// packet, we track byte boundaries proportional to code-block count.
+	return nil
+}
 
-	// Calculate total encoded data per code-block (estimate: distribute evenly)
-	// Since all code-blocks are written sequentially with no delimiter between them,
-	// and we don't have T2 framing, we distribute the tile data proportionally.
-	if totalCodeBlocks == 0 {
-		// No code-blocks, create empty packets
-		for _, ps := range packetSlices {
-			entryIdx := len(idx.entries)
-			idx.entries = append(idx.entries, packetEntry{
-				addr:   ps.addr,
-				offset: dataStart,
-				length: 0,
-			})
-			idx.addrMap[ps.addr] = entryIdx
+// addEmptyPackets adds empty packet entries for all expected packets.
+func (idx *PacketIndex) addEmptyPackets(
+	header *codestream.Header,
+	tileIndex uint16,
+	numComp, numRes, numLayers int,
+) error {
+	order := codestream.ProgressionOrder(header.CodingStyle.ProgressionOrder)
+
+	addPacket := func(l, r, c, p int) {
+		addr := PacketAddress{
+			Tile:       tileIndex,
+			Resolution: uint8(r),
+			Layer:      uint16(l),
+			Component:  uint8(c),
+			Precinct:   uint16(p),
 		}
-		return nil
-	}
-
-	// Map from encoder write order (C-R-B-CB) to byte offsets.
-	// Each packet in encoder order gets a proportional share of bytes.
-	bytesPerBlock := float64(totalData) / float64(totalCodeBlocks)
-
-	// Build encoder-order packet list with cumulative code-block counts
-	type encoderPacket struct {
-		comp         int
-		res          int
-		startBlock   int
-		numBlocks    int
-	}
-	var encoderOrder []encoderPacket
-	blockIdx := 0
-	for c := 0; c < numComp; c++ {
-		for r := 0; r < numRes; r++ {
-			info := crInfos[crKey{c, r}]
-			encoderOrder = append(encoderOrder, encoderPacket{
-				comp:       c,
-				res:        r,
-				startBlock: blockIdx,
-				numBlocks:  info.numCodeBlocks,
-			})
-			blockIdx += info.numCodeBlocks
-		}
-	}
-
-	// Build a lookup from (comp, res) to encoder byte range
-	type byteRange struct {
-		offset int
-		length int
-	}
-	encoderRanges := make(map[crKey]byteRange)
-	for _, ep := range encoderOrder {
-		startByte := int(float64(ep.startBlock) * bytesPerBlock)
-		endByte := int(float64(ep.startBlock+ep.numBlocks) * bytesPerBlock)
-		if ep.startBlock+ep.numBlocks == totalCodeBlocks {
-			endByte = totalData // ensure last packet gets remaining bytes
-		}
-		encoderRanges[crKey{ep.comp, ep.res}] = byteRange{
-			offset: dataStart + startByte,
-			length: endByte - startByte,
-		}
-	}
-
-	// Now assign byte ranges to packets in progression order
-	for _, ps := range packetSlices {
-		key := crKey{int(ps.addr.Component), int(ps.addr.Resolution)}
-		br := encoderRanges[key]
 		entryIdx := len(idx.entries)
-		idx.entries = append(idx.entries, packetEntry{
-			addr:   ps.addr,
-			offset: br.offset,
-			length: br.length,
-		})
-		idx.addrMap[ps.addr] = entryIdx
+		idx.entries = append(idx.entries, packetEntry{addr: addr})
+		idx.addrMap[addr] = entryIdx
 	}
 
+	for l := 0; l < numLayers; l++ {
+		switch order {
+		case codestream.LRCP, codestream.RLCP, codestream.RPCL:
+			for r := 0; r < numRes; r++ {
+				for c := 0; c < numComp; c++ {
+					addPacket(l, r, c, 0)
+				}
+			}
+		case codestream.PCRL:
+			for c := 0; c < numComp; c++ {
+				for r := 0; r < numRes; r++ {
+					addPacket(l, r, c, 0)
+				}
+			}
+		case codestream.CPRL:
+			for c := 0; c < numComp; c++ {
+				for r := 0; r < numRes; r++ {
+					addPacket(l, r, c, 0)
+				}
+			}
+		}
+	}
 	return nil
 }
 

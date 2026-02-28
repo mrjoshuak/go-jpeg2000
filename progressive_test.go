@@ -103,11 +103,19 @@ func TestProgressiveDecoder_FullFeed(t *testing.T) {
 
 	if result.Width == ref.Width && result.Height == ref.Height {
 		mse := computeFloatMSE(result, ref)
-		if mse > 0 {
-			// Progressive decoder doesn't yet support our tile data format.
-			// Standard decode now works correctly via decodeTileData, but the
-			// progressive path uses its own packet-based pipeline.
-			t.Logf("MSE %.4f vs standard decode (progressive decoder needs tile data support)", mse)
+		if mse > 1.0 {
+			t.Errorf("MSE %.4f too high vs standard decode", mse)
+		}
+		// Verify non-zero reconstruction
+		hasNonZero := false
+		for _, v := range result.Components[0] {
+			if v != 0 {
+				hasNonZero = true
+				break
+			}
+		}
+		if !hasNonZero {
+			t.Error("progressive reconstruction produced all-zero image")
 		}
 	}
 }
@@ -144,8 +152,24 @@ func TestProgressiveDecoder_FullFeedRGB(t *testing.T) {
 
 	if result.Width == ref.Width && result.Height == ref.Height {
 		mse := computeFloatMSE(result, ref)
-		if mse > 0 {
-			t.Logf("MSE %.4f vs standard decode (progressive decoder needs tile data support)", mse)
+		if mse > 1.0 {
+			t.Errorf("MSE %.4f too high vs standard decode", mse)
+		}
+		// Verify non-zero reconstruction
+		hasNonZero := false
+		for c := 0; c < result.ComponentCount(); c++ {
+			for _, v := range result.Components[c] {
+				if v != 0 {
+					hasNonZero = true
+					break
+				}
+			}
+			if hasNonZero {
+				break
+			}
+		}
+		if !hasNonZero {
+			t.Error("progressive RGB reconstruction produced all-zero image")
 		}
 	}
 }
@@ -222,8 +246,8 @@ func TestProgressiveDecoder_IncrementalQuality(t *testing.T) {
 
 	if lastResult.Width == ref.Width && lastResult.Height == ref.Height {
 		mse := computeFloatMSE(lastResult, ref)
-		if mse > 0 {
-			t.Logf("final MSE %.4f vs standard decode (progressive decoder needs tile data support)", mse)
+		if mse > 1.0 {
+			t.Errorf("final MSE %.4f too high vs standard decode", mse)
 		}
 	}
 }
@@ -449,8 +473,8 @@ func TestProgressiveDecoder_RGBStructure(t *testing.T) {
 		t.Fatalf("Reconstruct: %v", err)
 	}
 
-	if result.ComponentCount() != 3 {
-		t.Errorf("ComponentCount: got %d, want 3", result.ComponentCount())
+	if result.ComponentCount() != 4 {
+		t.Errorf("ComponentCount: got %d, want 4", result.ComponentCount())
 	}
 
 	if result.Width != 16 || result.Height != 16 {

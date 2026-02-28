@@ -435,8 +435,8 @@ func TestMultiLayer_RGBMultiLayer(t *testing.T) {
 	if meta.NumQualityLayers != 4 {
 		t.Errorf("NumQualityLayers = %d, want 4", meta.NumQualityLayers)
 	}
-	if meta.NumComponents != 3 {
-		t.Errorf("NumComponents = %d, want 3", meta.NumComponents)
+	if meta.NumComponents != 4 {
+		t.Errorf("NumComponents = %d, want 4", meta.NumComponents)
 	}
 }
 

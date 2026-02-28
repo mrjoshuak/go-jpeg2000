@@ -111,10 +111,10 @@ func (e *encoder) extractImageData() error {
 		}
 
 	case *image.RGBA:
-		e.numComponents = 3 // Alpha channel not encoded
+		e.numComponents = 4
 		e.precision = 8
-		e.componentData = make([][]int32, 3)
-		for c := 0; c < 3; c++ {
+		e.componentData = make([][]int32, 4)
+		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
 		}
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -124,14 +124,15 @@ func (e *encoder) extractImageData() error {
 				e.componentData[0][idx] = int32(c.R)
 				e.componentData[1][idx] = int32(c.G)
 				e.componentData[2][idx] = int32(c.B)
+				e.componentData[3][idx] = int32(c.A)
 			}
 		}
 
 	case *image.RGBA64:
-		e.numComponents = 3
+		e.numComponents = 4
 		e.precision = 16
-		e.componentData = make([][]int32, 3)
-		for c := 0; c < 3; c++ {
+		e.componentData = make([][]int32, 4)
+		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
 		}
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -141,6 +142,7 @@ func (e *encoder) extractImageData() error {
 				e.componentData[0][idx] = int32(c.R)
 				e.componentData[1][idx] = int32(c.G)
 				e.componentData[2][idx] = int32(c.B)
+				e.componentData[3][idx] = int32(c.A)
 			}
 		}
 
@@ -182,19 +184,20 @@ func (e *encoder) extractImageData() error {
 
 	default:
 		// Generic fallback - convert to RGBA
-		e.numComponents = 3
+		e.numComponents = 4
 		e.precision = 8
-		e.componentData = make([][]int32, 3)
-		for c := 0; c < 3; c++ {
+		e.componentData = make([][]int32, 4)
+		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
 		}
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 			for x := bounds.Min.X; x < bounds.Max.X; x++ {
 				idx := (y-bounds.Min.Y)*e.width + (x - bounds.Min.X)
-				r, g, b, _ := e.img.At(x, y).RGBA()
+				r, g, b, a := e.img.At(x, y).RGBA()
 				e.componentData[0][idx] = int32(r >> 8)
 				e.componentData[1][idx] = int32(g >> 8)
 				e.componentData[2][idx] = int32(b >> 8)
+				e.componentData[3][idx] = int32(a >> 8)
 			}
 		}
 	}

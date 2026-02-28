@@ -120,7 +120,7 @@ func TestEncodeRGBA(t *testing.T) {
 				R: uint8(x * 32),
 				G: uint8(y * 32),
 				B: uint8((x + y) * 16),
-				A: 255,
+				A: uint8(128 + x*8 + y*4),
 			})
 		}
 	}
@@ -144,14 +144,17 @@ func TestEncodeRGBA(t *testing.T) {
 		t.Fatalf("decoded dimensions = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
 	}
 
-	// Verify lossless RGB roundtrip
+	// Verify lossless RGBA roundtrip including alpha
 	for y := 0; y < 8; y++ {
 		for x := 0; x < 8; x++ {
-			oR, oG, oB, _ := img.At(x, y).RGBA()
-			dR, dG, dB, _ := decoded.At(x, y).RGBA()
+			oR, oG, oB, oA := img.At(x, y).RGBA()
+			dR, dG, dB, dA := decoded.At(x, y).RGBA()
 			if oR != dR || oG != dG || oB != dB {
-				t.Errorf("pixel (%d,%d): got (%d,%d,%d), want (%d,%d,%d)",
+				t.Errorf("pixel (%d,%d) RGB: got (%d,%d,%d), want (%d,%d,%d)",
 					x, y, dR>>8, dG>>8, dB>>8, oR>>8, oG>>8, oB>>8)
+			}
+			if oA != dA {
+				t.Errorf("pixel (%d,%d) alpha: got %d, want %d", x, y, dA>>8, oA>>8)
 			}
 		}
 	}
@@ -627,8 +630,8 @@ func TestDecodeMetadata_JP2(t *testing.T) {
 	if meta.Width != 8 || meta.Height != 8 {
 		t.Errorf("Dimensions = %dx%d, want 8x8", meta.Width, meta.Height)
 	}
-	if meta.NumComponents != 3 {
-		t.Errorf("NumComponents = %d, want 3", meta.NumComponents)
+	if meta.NumComponents != 4 {
+		t.Errorf("NumComponents = %d, want 4", meta.NumComponents)
 	}
 	if meta.Format != FormatJP2 {
 		t.Errorf("Format = %v, want FormatJP2", meta.Format)
@@ -808,8 +811,8 @@ func TestEncode_RGBA64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeMetadata() error: %v", err)
 	}
-	if meta.NumComponents != 3 {
-		t.Errorf("NumComponents = %d, want 3", meta.NumComponents)
+	if meta.NumComponents != 4 {
+		t.Errorf("NumComponents = %d, want 4", meta.NumComponents)
 	}
 	if meta.BitsPerComponent[0] != 16 {
 		t.Errorf("BitsPerComponent = %d, want 16", meta.BitsPerComponent[0])

@@ -133,8 +133,8 @@ func TestDecodeFloat_RGB(t *testing.T) {
 	if fi.Width != 8 || fi.Height != 8 {
 		t.Errorf("dimensions = %dx%d, want 8x8", fi.Width, fi.Height)
 	}
-	if fi.ComponentCount() != 3 {
-		t.Errorf("ComponentCount() = %d, want 3", fi.ComponentCount())
+	if fi.ComponentCount() != 4 {
+		t.Errorf("ComponentCount() = %d, want 4", fi.ComponentCount())
 	}
 }
 
@@ -167,8 +167,8 @@ func TestDecodeFloat_Lossy(t *testing.T) {
 	if fi.Width != 16 || fi.Height != 16 {
 		t.Errorf("dimensions = %dx%d, want 16x16", fi.Width, fi.Height)
 	}
-	if fi.ComponentCount() != 3 {
-		t.Errorf("ComponentCount() = %d, want 3", fi.ComponentCount())
+	if fi.ComponentCount() != 4 {
+		t.Errorf("ComponentCount() = %d, want 4", fi.ComponentCount())
 	}
 }
 

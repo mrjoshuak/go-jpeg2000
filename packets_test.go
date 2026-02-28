@@ -103,9 +103,9 @@ func TestExtractPackets_RGBBasic(t *testing.T) {
 		t.Fatalf("ExtractPackets: %v", err)
 	}
 
-	// Default: 1 tile, 6 resolutions, 1 layer, 3 components, 1 precinct
-	// Expected: 1 * 6 * 1 * 3 * 1 = 18 packets
-	expectedCount := 18
+	// Default: 1 tile, 6 resolutions, 1 layer, 4 components, 1 precinct
+	// Expected: 1 * 6 * 1 * 4 * 1 = 24 packets
+	expectedCount := 24
 	if len(packets) != expectedCount {
 		t.Errorf("got %d packets, want %d", len(packets), expectedCount)
 	}
@@ -290,15 +290,15 @@ func TestBuildPacketIndex_RGBAddresses(t *testing.T) {
 
 	addrs := idx.AllAddresses()
 
-	// Verify all 3 components are represented
+	// Verify all 4 components are represented
 	comps := make(map[uint8]int)
 	for _, addr := range addrs {
 		comps[addr.Component]++
 	}
-	if len(comps) != 3 {
-		t.Errorf("expected 3 components, got %d: %v", len(comps), comps)
+	if len(comps) != 4 {
+		t.Errorf("expected 4 components, got %d: %v", len(comps), comps)
 	}
-	for c := 0; c < 3; c++ {
+	for c := 0; c < 4; c++ {
 		if comps[uint8(c)] == 0 {
 			t.Errorf("component %d has no packets", c)
 		}
