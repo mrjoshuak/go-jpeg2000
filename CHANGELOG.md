@@ -12,12 +12,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - NLT Type 3 marker (0xFF73) generation and parsing for float-to-integer reinterpretation
 - 32-bit overflow-safe DWT (`Forward53_32bit` / `Inverse53_32bit`) using int64 intermediates
 - 32-bit overflow-safe RCT (`ForwardRCT32` / `InverseRCT32`) for multi-component float images
-- Float roundtrip tests covering NaN, Inf, subnormals, and edge cases
+- Per-component precision: encoder supports mixed bit depths per component (SIZ marker Ssiz)
+- Multi-layer encoding with EBCOT truncation points (V2 tile data format)
+- Quality layer limiting in decoder: `Config.QualityLayers` truncates code-block data at decode time
+- Alpha channel preservation in encoder for RGBA, RGBA64, and generic image paths
 
 ### Fixed
 - Parallel encoding data race: T1 encoded bytes are now copied before returning T1 to pool
 - External JP2 tile data format validation prevents misparse of T2 packet data
 - MinInt32 edge case in T1 SetData
+- Progressive decoder packet decoding: fed packet data is now decoded into tile coefficients
+- Alpha silently dropped during encoding (was hardcoded to 3 components)
+
+### Removed
+- Unused HTJ2K decoder scaffolding (MEL decoder methods, VLC helpers, lookup tables)
+- Unused struct fields and test helpers flagged by staticcheck
+
+## [1.1.0] - 2026-02-27
+
+### Added
+- `ProgressiveDecoder` API for incremental decoding: `NewProgressiveDecoder`, `FeedPacket`, `Reconstruct`
+- `NewProgressiveDecoderFromCodestream` convenience constructor
+- `FloatImage` type for HDR float precision through the decode pipeline
+- `DecodeFloat` / `DecodeFloatConfig` for float-valued image output
+- `ExtractPackets` / `BuildPacketIndex` for server-side progressive streaming
+- HTJ2K cleanup pass with SPP/MRP refinement support
+- Quality layer limiting via `Config.QualityLayers`
+- Resolution reduction via `Config.ReduceResolution`
+
+### Fixed
+- JP2 boxes with length=0 (extends to EOF) now parsed correctly
 
 ## [1.0.0] - 2026-01-11
 

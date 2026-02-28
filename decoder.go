@@ -477,7 +477,7 @@ func (d *decoder) findTileData(tileIdx int) []byte {
 // only; V1 format ignores this since it has no layer structure).
 func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) error {
 	tileData := d.findTileData(tileIdx)
-	if tileData == nil || len(tileData) < 2 {
+	if len(tileData) < 2 {
 		return nil // No tile data
 	}
 

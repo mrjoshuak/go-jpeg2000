@@ -79,21 +79,19 @@ type Packet struct {
 // Next advances to the next packet position.
 // Returns false when all packets have been visited.
 func (pi *PacketIterator) Next() (Packet, bool) {
-	for {
-		if !pi.hasMore() {
-			return Packet{}, false
-		}
-
-		p := Packet{
-			Layer:      pi.layer,
-			Resolution: pi.resolution,
-			Component:  pi.component,
-			Precinct:   pi.precinct,
-		}
-
-		pi.advance()
-		return p, true
+	if !pi.hasMore() {
+		return Packet{}, false
 	}
+
+	p := Packet{
+		Layer:      pi.layer,
+		Resolution: pi.resolution,
+		Component:  pi.component,
+		Precinct:   pi.precinct,
+	}
+
+	pi.advance()
+	return p, true
 }
 
 func (pi *PacketIterator) hasMore() bool {
@@ -443,7 +441,6 @@ func (e *PacketEncoder) encodeLength(length, bandIdx, cbIdx int) error {
 
 // PacketDecoder decodes packets from a bit stream.
 type PacketDecoder struct {
-	r   io.Reader
 	bio *bio.ByteStuffingReader
 	buf []byte
 	pos int

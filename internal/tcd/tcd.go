@@ -214,7 +214,6 @@ func (t *TagTree) Reset() {
 // TileDecoder decodes a single tile.
 type TileDecoder struct {
 	header            *codestream.Header
-	tileHeader        *codestream.TilePartHeader
 	tile              *Tile
 	htj2k             bool // True if using High-Throughput mode
 	qualityLayerLimit int  // 0 means all layers
@@ -331,11 +330,6 @@ func (d *TileDecoder) InitTile(tileIndex int) {
 
 		d.tile.Components[c] = tc
 	}
-}
-
-// initResolution initializes a resolution level (no reduction).
-func (d *TileDecoder) initResolution(tc *TileComponent, resLevel int) {
-	d.initResolutionReduced(tc, resLevel, 0)
 }
 
 // initResolutionReduced initializes a resolution level accounting for reduction.

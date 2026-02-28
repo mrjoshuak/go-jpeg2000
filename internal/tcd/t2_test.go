@@ -1336,20 +1336,6 @@ func TestDecodePacketEmptyPresent(t *testing.T) {
 	}
 }
 
-// TestEncodePacketWriteErrors tests error handling in packet encoding.
-type errorWriter struct {
-	failAfter int
-	written   int
-}
-
-func (w *errorWriter) Write(p []byte) (int, error) {
-	if w.written >= w.failAfter {
-		return 0, io.ErrShortWrite
-	}
-	w.written += len(p)
-	return len(p), nil
-}
-
 // TestDecodePacketNonZeroLayerInclusion tests decoding at layer > 0 with inclusion.
 func TestDecodePacketNonZeroLayerInclusion(t *testing.T) {
 	// Encode a packet at layer 1 with a code block

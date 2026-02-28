@@ -22,21 +22,6 @@ func (e *errWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// limitedReader limits how many bytes can be read.
-type limitedReader struct {
-	data []byte
-	pos  int
-}
-
-func (l *limitedReader) Read(p []byte) (int, error) {
-	if l.pos >= len(l.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, l.data[l.pos:])
-	l.pos += n
-	return n, nil
-}
-
 // =============================================================================
 // Reader tests
 // =============================================================================

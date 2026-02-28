@@ -823,11 +823,7 @@ func (t *T1) canUseRunLengthInlined(x, y, bp, stride int, flags []T1Flags) bool 
 
 	// South neighbors (below row y+3)
 	s := flags[idx3+stride] | flags[idx3+stride-1] | flags[idx3+stride+1]
-	if s&T1Sig != 0 {
-		return false
-	}
-
-	return true
+	return s&T1Sig == 0
 }
 
 // encodeRunLengthInlined encodes run-length with inlined MQ.
