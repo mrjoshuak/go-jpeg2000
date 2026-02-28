@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
-
+	"image/color"
 	"io"
 	"math"
 	"runtime"
@@ -200,12 +200,22 @@ func (e *encoder) extractImageData() error {
 		}
 
 	default:
-		// Generic fallback - convert to RGBA
-		e.numComponents = 4
-		e.componentPrecision = []int{8, 8, 8, 8}
-		e.componentSigned = []bool{false, false, false, false}
-		e.componentData = make([][]int32, 4)
-		for c := 0; c < 4; c++ {
+		// Generic fallback - check if color model supports alpha by testing
+		// whether it can represent a fully transparent pixel.
+		_, _, _, testA := e.img.ColorModel().Convert(color.Transparent).RGBA()
+		hasAlpha := testA == 0
+
+		if hasAlpha {
+			e.numComponents = 4
+			e.componentPrecision = []int{8, 8, 8, 8}
+			e.componentSigned = []bool{false, false, false, false}
+		} else {
+			e.numComponents = 3
+			e.componentPrecision = []int{8, 8, 8}
+			e.componentSigned = []bool{false, false, false}
+		}
+		e.componentData = make([][]int32, e.numComponents)
+		for c := 0; c < e.numComponents; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
 		}
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -215,7 +225,9 @@ func (e *encoder) extractImageData() error {
 				e.componentData[0][idx] = int32(r >> 8)
 				e.componentData[1][idx] = int32(g >> 8)
 				e.componentData[2][idx] = int32(b >> 8)
-				e.componentData[3][idx] = int32(a >> 8)
+				if hasAlpha {
+					e.componentData[3][idx] = int32(a >> 8)
+				}
 			}
 		}
 	}
