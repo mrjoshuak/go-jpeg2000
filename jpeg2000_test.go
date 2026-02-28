@@ -2,6 +2,7 @@ package jpeg2000
 
 import (
 	"bytes"
+	"encoding/binary"
 	"image"
 	"image/color"
 	"testing"
@@ -2859,5 +2860,58 @@ func TestDecodeFloatConfig_ReduceResolution(t *testing.T) {
 	if decoded.Width != 32 || decoded.Height != 32 {
 		t.Errorf("Float reduce=1: dims = %dx%d, want 32x32",
 			decoded.Width, decoded.Height)
+	}
+}
+
+// TestDecode_JP2_BoxExtendsToEOF verifies that JP2 files where the final
+// codestream box has length=0 (meaning "extends to EOF") decode correctly.
+// This is a valid encoding per ISO/IEC 15444-1 and is produced by some
+// encoders. Regression test for GitHub issue #2.
+func TestDecode_JP2_BoxExtendsToEOF(t *testing.T) {
+	// Encode a normal JP2 image
+	img := image.NewGray(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.SetGray(x, y, color.Gray{Y: uint8(x*16 + y*16)})
+		}
+	}
+
+	var buf bytes.Buffer
+	opts := DefaultOptions()
+	opts.Format = FormatJP2
+	opts.Lossless = true
+	if err := Encode(&buf, img, opts); err != nil {
+		t.Fatalf("Encode() error: %v", err)
+	}
+	original := buf.Bytes()
+
+	// Verify normal JP2 decodes fine
+	_, err := Decode(bytes.NewReader(original))
+	if err != nil {
+		t.Fatalf("Decode() normal JP2 error: %v", err)
+	}
+
+	// Find the jp2c box (type "jp2c" = 0x6A703263) and rewrite its length to 0
+	jp2cType := []byte{0x6A, 0x70, 0x32, 0x63}
+	modified := make([]byte, len(original))
+	copy(modified, original)
+
+	for i := 4; i+4 <= len(modified); i++ {
+		if bytes.Equal(modified[i:i+4], jp2cType) {
+			// Set length field (4 bytes before type) to 0
+			binary.BigEndian.PutUint32(modified[i-4:i], 0)
+			break
+		}
+	}
+
+	// Decode the modified JP2 with length=0 codestream box
+	decoded, err := Decode(bytes.NewReader(modified))
+	if err != nil {
+		t.Fatalf("Decode() JP2 with length=0 box error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Errorf("Decoded size = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
 	}
 }
