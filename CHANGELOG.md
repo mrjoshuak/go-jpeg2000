@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-02-28
+
+### Added
+- `EncodeFloat()` API for encoding `FloatImage` with 32-bit float components (bitwise lossless)
+- NLT Type 3 marker (0xFF73) generation and parsing for float-to-integer reinterpretation
+- 32-bit overflow-safe DWT (`Forward53_32bit` / `Inverse53_32bit`) using int64 intermediates
+- 32-bit overflow-safe RCT (`ForwardRCT32` / `InverseRCT32`) for multi-component float images
+- Float roundtrip tests covering NaN, Inf, subnormals, and edge cases
+
+### Fixed
+- Parallel encoding data race: T1 encoded bytes are now copied before returning T1 to pool
+- External JP2 tile data format validation prevents misparse of T2 packet data
+- MinInt32 edge case in T1 SetData
+
 ## [1.0.0] - 2026-01-11
 
 ### Added

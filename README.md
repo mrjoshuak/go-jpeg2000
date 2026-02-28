@@ -20,7 +20,8 @@ This package provides a native Go implementation of JPEG 2000 encoding and decod
 - **Packet Extraction**: `ExtractPackets` / `BuildPacketIndex` for server-side progressive streaming
 - **Lossless & Lossy**: Both compression modes supported
 - **Full Colorspace Support**: All 19 ISO/IEC 15444-1 colorspaces with automatic conversion to sRGB
-- **Flexible Precision**: 1-16 bit component precision, including 4-bit, 10-bit, and 12-bit
+- **32-bit Float Encoding**: `EncodeFloat` preserves IEEE 754 float32 values via NLT Type 3 markers (bitwise lossless)
+- **Flexible Precision**: 1-32 bit component precision, including 4-bit, 10-bit, 12-bit, and 32-bit float
 - **Standard Library Integration**: Implements `image.Image` interface
 - **Auto-registration**: Registers with Go's `image` package for transparent decode
 
@@ -99,6 +100,26 @@ fmt.Printf("Components: %d\n", meta.NumComponents)
 fmt.Printf("ColorSpace: %v\n", meta.ColorSpace)
 fmt.Printf("Tiles: %dx%d\n", meta.NumTilesX, meta.NumTilesY)
 ```
+
+### Float Encoding (32-bit HDR)
+
+```go
+// Encode float32 data with bitwise-lossless preservation
+floatImg := &jpeg2000.FloatImage{
+    Width:      width,
+    Height:     height,
+    Components: [][]float32{rChannel, gChannel, bChannel},
+    BitDepth:   32,
+    Signed:     true,
+}
+
+opts := jpeg2000.DefaultOptions()
+opts.Format = jpeg2000.FormatJ2K
+
+err := jpeg2000.EncodeFloat(file, floatImg, opts)
+```
+
+Float encoding uses NLT Type 3 markers to reinterpret IEEE 754 float32 bits as int32 with a sign-magnitude transform, preserving all values including NaN, Inf, and -0.0.
 
 ### Float Decoding (HDR)
 
@@ -244,7 +265,8 @@ Supported profiles (RSIZ parameter):
 jpeg2000/
 ├── jpeg2000.go          # Public API, types, image registration
 ├── decoder.go           # JP2/J2K decoding, colorspace detection
-├── encoder.go           # JP2/J2K encoding
+├── encoder.go           # JP2/J2K encoding (integer + float32)
+├── nlt.go               # Non-Linearity Transform (NLT Type 3 for float)
 ├── colorspace.go        # Color conversion functions
 ├── floatimage.go        # FloatImage type for HDR output
 ├── progressive.go       # ProgressiveDecoder for incremental decode
@@ -292,6 +314,7 @@ jpeg2000/
 - `image.NRGBA` / `image.NRGBA64`
 - `image.YCbCr`
 - `image.Paletted`
+- `jpeg2000.FloatImage` - Planar float32 components (via `EncodeFloat`)
 
 ## Testing
 
