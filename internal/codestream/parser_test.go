@@ -64,6 +64,7 @@ func TestMarker_String(t *testing.T) {
 		{CRG, "CRG"},
 		{COM, "COM"},
 		{CAP, "CAP"},
+		{NLT, "NLT"},
 		{CBD, "CBD"},
 		{MCT, "MCT"},
 		{MCC, "MCC"},
@@ -3426,5 +3427,278 @@ func TestParser_ReadTilePartHeader_SkipUnknown_Error(t *testing.T) {
 	_, err := parser.ReadTilePartHeader()
 	if err == nil {
 		t.Error("Expected error when skipping unknown marker in tile-part header")
+	}
+}
+
+// --- CAP marker tests ---
+
+func TestParser_ReadCAP(t *testing.T) {
+	buf := createBaseCodestream(1)
+	addCOD(buf, false)
+	addQCD(buf, QuantizationScalarDerived)
+
+	// Add CAP marker with HTJ2K bit set
+	binary.Write(buf, binary.BigEndian, uint16(CAP))
+	binary.Write(buf, binary.BigEndian, uint16(6))         // Length: 2 + 4
+	binary.Write(buf, binary.BigEndian, uint32(CapPcapHTJ2K)) // Pcap with HTJ2K flag
+
+	binary.Write(buf, binary.BigEndian, uint16(SOT))
+
+	parser := NewParser(bytes.NewReader(buf.Bytes()))
+	header, err := parser.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+
+	if header.Capabilities == nil {
+		t.Fatal("Capabilities is nil after parsing CAP marker")
+	}
+	if header.Capabilities.Pcap != CapPcapHTJ2K {
+		t.Errorf("Pcap = 0x%08X, want 0x%08X", header.Capabilities.Pcap, CapPcapHTJ2K)
+	}
+	if !header.Capabilities.IsHTJ2K() {
+		t.Error("IsHTJ2K() should be true with HTJ2K bit set")
+	}
+}
+
+func TestParser_ReadCAP_WithCCAPi(t *testing.T) {
+	buf := createBaseCodestream(1)
+	addCOD(buf, false)
+	addQCD(buf, QuantizationScalarDerived)
+
+	// CAP with Pcap + 2 CCAPi entries
+	binary.Write(buf, binary.BigEndian, uint16(CAP))
+	binary.Write(buf, binary.BigEndian, uint16(10))            // Length: 2 + 4 + 4
+	binary.Write(buf, binary.BigEndian, uint32(CapPcapHTJ2K))  // Pcap
+	binary.Write(buf, binary.BigEndian, uint16(0x2020))        // CCAPi[0]
+	binary.Write(buf, binary.BigEndian, uint16(0x4040))        // CCAPi[1]
+
+	binary.Write(buf, binary.BigEndian, uint16(SOT))
+
+	parser := NewParser(bytes.NewReader(buf.Bytes()))
+	header, err := parser.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+
+	if header.Capabilities == nil {
+		t.Fatal("Capabilities is nil")
+	}
+	if len(header.Capabilities.CCAPi) != 2 {
+		t.Fatalf("CCAPi length = %d, want 2", len(header.Capabilities.CCAPi))
+	}
+	if header.Capabilities.CCAPi[0] != 0x2020 {
+		t.Errorf("CCAPi[0] = 0x%04X, want 0x2020", header.Capabilities.CCAPi[0])
+	}
+	if header.Capabilities.CCAPi[1] != 0x4040 {
+		t.Errorf("CCAPi[1] = 0x%04X, want 0x4040", header.Capabilities.CCAPi[1])
+	}
+}
+
+func TestParser_ReadCAP_TooShort(t *testing.T) {
+	buf := createBaseCodestream(1)
+	addCOD(buf, false)
+	addQCD(buf, QuantizationScalarDerived)
+
+	binary.Write(buf, binary.BigEndian, uint16(CAP))
+	binary.Write(buf, binary.BigEndian, uint16(4)) // Length too short (< 6)
+	binary.Write(buf, binary.BigEndian, uint16(0)) // Truncated Pcap
+
+	binary.Write(buf, binary.BigEndian, uint16(SOT))
+
+	parser := NewParser(bytes.NewReader(buf.Bytes()))
+	_, err := parser.ReadHeader()
+	if err == nil {
+		t.Error("Expected error for CAP marker too short")
+	}
+}
+
+// --- NLT marker tests ---
+
+func TestParser_ReadNLT(t *testing.T) {
+	buf := createBaseCodestream(1)
+	addCOD(buf, false)
+	addQCD(buf, QuantizationScalarDerived)
+
+	// Add NLT marker: component 0, 32-bit signed (0x9F), transform type 3
+	binary.Write(buf, binary.BigEndian, uint16(NLT))
+	binary.Write(buf, binary.BigEndian, uint16(5)) // Length: 2 + 3
+	buf.WriteByte(0)    // Cnlt: component 0
+	buf.WriteByte(0x9F) // BDnlt: signed 32-bit (bit7=1, bits0-6=31 -> precision 32)
+	buf.WriteByte(3)    // Tnlt: type 3 (sign-magnitude transform)
+
+	binary.Write(buf, binary.BigEndian, uint16(SOT))
+
+	parser := NewParser(bytes.NewReader(buf.Bytes()))
+	header, err := parser.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+
+	if len(header.NLTMarkers) != 1 {
+		t.Fatalf("NLTMarkers length = %d, want 1", len(header.NLTMarkers))
+	}
+	nlt := header.NLTMarkers[0]
+	if nlt.ComponentIndex != 0 {
+		t.Errorf("ComponentIndex = %d, want 0", nlt.ComponentIndex)
+	}
+	if nlt.BitDepth != 0x9F {
+		t.Errorf("BitDepth = 0x%02X, want 0x9F", nlt.BitDepth)
+	}
+	if nlt.TransformType != 3 {
+		t.Errorf("TransformType = %d, want 3", nlt.TransformType)
+	}
+}
+
+func TestParser_ReadNLT_Multiple(t *testing.T) {
+	buf := createBaseCodestream(3)
+	addCOD(buf, false)
+	addQCD(buf, QuantizationScalarDerived)
+
+	// Add NLT for components 0, 1, 2
+	for i := byte(0); i < 3; i++ {
+		binary.Write(buf, binary.BigEndian, uint16(NLT))
+		binary.Write(buf, binary.BigEndian, uint16(5))
+		buf.WriteByte(i)    // Component index
+		buf.WriteByte(0x9F) // 32-bit signed
+		buf.WriteByte(3)    // Type 3
+	}
+
+	binary.Write(buf, binary.BigEndian, uint16(SOT))
+
+	parser := NewParser(bytes.NewReader(buf.Bytes()))
+	header, err := parser.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+
+	if len(header.NLTMarkers) != 3 {
+		t.Fatalf("NLTMarkers length = %d, want 3", len(header.NLTMarkers))
+	}
+	for i := 0; i < 3; i++ {
+		if header.NLTMarkers[i].ComponentIndex != byte(i) {
+			t.Errorf("NLTMarkers[%d].ComponentIndex = %d, want %d", i, header.NLTMarkers[i].ComponentIndex, i)
+		}
+	}
+}
+
+func TestParser_ReadNLT_TooShort(t *testing.T) {
+	buf := createBaseCodestream(1)
+	addCOD(buf, false)
+	addQCD(buf, QuantizationScalarDerived)
+
+	binary.Write(buf, binary.BigEndian, uint16(NLT))
+	binary.Write(buf, binary.BigEndian, uint16(3)) // Length too short (< 5)
+	buf.WriteByte(0) // Partial data
+
+	binary.Write(buf, binary.BigEndian, uint16(SOT))
+
+	parser := NewParser(bytes.NewReader(buf.Bytes()))
+	_, err := parser.ReadHeader()
+	if err == nil {
+		t.Error("Expected error for NLT marker too short")
+	}
+}
+
+// --- Header.HasNLT tests ---
+
+func TestHeader_HasNLT(t *testing.T) {
+	h := &Header{
+		NLTMarkers: []NLTMarker{
+			{ComponentIndex: 0, BitDepth: 0x9F, TransformType: 3},
+			{ComponentIndex: 2, BitDepth: 0x9F, TransformType: 3},
+		},
+	}
+
+	if !h.HasNLT(0) {
+		t.Error("HasNLT(0) should be true")
+	}
+	if h.HasNLT(1) {
+		t.Error("HasNLT(1) should be false (not in markers)")
+	}
+	if !h.HasNLT(2) {
+		t.Error("HasNLT(2) should be true")
+	}
+	if h.HasNLT(3) {
+		t.Error("HasNLT(3) should be false")
+	}
+}
+
+func TestHeader_HasNLT_Empty(t *testing.T) {
+	h := &Header{}
+	if h.HasNLT(0) {
+		t.Error("HasNLT(0) should be false with no NLT markers")
+	}
+}
+
+// --- CapabilitiesMarker.IsHTJ2K tests ---
+
+func TestCapabilitiesMarker_IsHTJ2K(t *testing.T) {
+	// nil marker
+	var cap *CapabilitiesMarker
+	if cap.IsHTJ2K() {
+		t.Error("nil CapabilitiesMarker should not report HTJ2K")
+	}
+
+	// Non-HTJ2K capabilities
+	cap = &CapabilitiesMarker{Pcap: 0x00000001}
+	if cap.IsHTJ2K() {
+		t.Error("Pcap without HTJ2K bit should not report HTJ2K")
+	}
+
+	// HTJ2K capability set
+	cap = &CapabilitiesMarker{Pcap: CapPcapHTJ2K}
+	if !cap.IsHTJ2K() {
+		t.Error("Pcap with HTJ2K bit should report HTJ2K")
+	}
+
+	// HTJ2K plus other bits
+	cap = &CapabilitiesMarker{Pcap: CapPcapHTJ2K | 0x00010001}
+	if !cap.IsHTJ2K() {
+		t.Error("Pcap with HTJ2K and other bits should report HTJ2K")
+	}
+}
+
+// --- Header.IsHTJ2K tests ---
+
+func TestHeader_IsHTJ2K_ViaCAPMarker(t *testing.T) {
+	h := &Header{
+		Capabilities: &CapabilitiesMarker{Pcap: CapPcapHTJ2K},
+	}
+	if !h.IsHTJ2K() {
+		t.Error("IsHTJ2K should be true with CAP marker HTJ2K bit set")
+	}
+}
+
+func TestHeader_IsHTJ2K_ViaCodeBlockStyle(t *testing.T) {
+	h := &Header{
+		CodingStyle: CodingStyleDefault{
+			CodeBlockStyle: CodeBlockHT,
+		},
+	}
+	if !h.IsHTJ2K() {
+		t.Error("IsHTJ2K should be true with CodeBlockHT in default coding style")
+	}
+}
+
+func TestHeader_IsHTJ2K_ViaComponentCodingStyle(t *testing.T) {
+	h := &Header{
+		ComponentCodingStyles: map[uint16]CodingStyleComponent{
+			0: {CodeBlockStyle: CodeBlockHT},
+		},
+	}
+	if !h.IsHTJ2K() {
+		t.Error("IsHTJ2K should be true with CodeBlockHT in component coding style")
+	}
+}
+
+func TestHeader_IsHTJ2K_False(t *testing.T) {
+	h := &Header{
+		CodingStyle: CodingStyleDefault{
+			CodeBlockStyle: 0,
+		},
+	}
+	if h.IsHTJ2K() {
+		t.Error("IsHTJ2K should be false with no HTJ2K indicators")
 	}
 }

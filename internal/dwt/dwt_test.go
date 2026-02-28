@@ -452,6 +452,249 @@ func TestClearInt32SliceFast(t *testing.T) {
 	}
 }
 
+// --- 32-bit overflow-safe DWT tests ---
+
+func TestForward53_32bit_Inverse53_32bit_Roundtrip(t *testing.T) {
+	tests := []struct {
+		name string
+		data []int32
+	}{
+		{"single", []int32{42}},
+		{"two", []int32{10, 20}},
+		{"four", []int32{1, 2, 3, 4}},
+		{"eight", []int32{1, 2, 3, 4, 5, 6, 7, 8}},
+		{"odd", []int32{1, 2, 3, 4, 5, 6, 7}},
+		{"ramp", []int32{0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100}},
+		{"constant", []int32{50, 50, 50, 50, 50, 50, 50, 50}},
+		{"alternating", []int32{-10, 10, -10, 10, -10, 10, -10, 10}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := make([]int32, len(tt.data))
+			copy(original, tt.data)
+
+			data := make([]int32, len(tt.data))
+			copy(data, tt.data)
+
+			Forward53_32bit(data, len(data))
+			Inverse53_32bit(data, len(data))
+
+			for i := range original {
+				if data[i] != original[i] {
+					t.Errorf("position %d: got %d, want %d", i, data[i], original[i])
+				}
+			}
+		})
+	}
+}
+
+func TestForward53_32bit_MatchesStandard(t *testing.T) {
+	// The 32-bit variant should produce identical results to the standard
+	// Forward53 for values that don't overflow int32 intermediates.
+	data := []int32{10, 20, 30, 40, 50, 60, 70, 80}
+	standard := make([]int32, len(data))
+	copy(standard, data)
+	safe := make([]int32, len(data))
+	copy(safe, data)
+
+	Forward53(standard, len(standard))
+	Forward53_32bit(safe, len(safe))
+
+	for i := range standard {
+		if safe[i] != standard[i] {
+			t.Errorf("position %d: 32bit got %d, standard got %d", i, safe[i], standard[i])
+		}
+	}
+}
+
+func TestForward53_32bit_LargeValues(t *testing.T) {
+	// Values near int32 boundaries where standard DWT intermediates
+	// would overflow but 32-bit-safe variant uses int64.
+	data := []int32{
+		math.MaxInt32 / 2, math.MaxInt32 / 2,
+		math.MinInt32 / 2, math.MinInt32 / 2,
+		math.MaxInt32 / 4, math.MinInt32 / 4,
+		1000000000, -1000000000,
+	}
+	original := make([]int32, len(data))
+	copy(original, data)
+
+	Forward53_32bit(data, len(data))
+
+	// Verify transform actually changed data (not a no-op)
+	changed := false
+	for i := range data {
+		if data[i] != original[i] {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		t.Error("Forward53_32bit did not modify data")
+	}
+
+	Inverse53_32bit(data, len(data))
+
+	for i := range original {
+		if data[i] != original[i] {
+			t.Errorf("position %d: got %d, want %d", i, data[i], original[i])
+		}
+	}
+}
+
+func TestForward2D53_32bit_Inverse2D53_32bit_Roundtrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{"2x2", 2, 2},
+		{"4x4", 4, 4},
+		{"8x8", 8, 8},
+		{"16x16", 16, 16},
+		{"8x4", 8, 4},
+		{"4x8", 4, 8},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			size := tt.width * tt.height
+			original := make([]int32, size)
+			for i := range original {
+				original[i] = int32(i * 10)
+			}
+
+			data := make([]int32, size)
+			copy(data, original)
+
+			Forward2D53_32bit(data, tt.width, tt.height)
+			Inverse2D53_32bit(data, tt.width, tt.height)
+
+			for i := range original {
+				if data[i] != original[i] {
+					t.Errorf("position %d: got %d, want %d", i, data[i], original[i])
+				}
+			}
+		})
+	}
+}
+
+func TestDecomposeMultiLevel53_32bit_Roundtrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		width  int
+		height int
+		levels int
+	}{
+		{"8x8_1level", 8, 8, 1},
+		{"8x8_2levels", 8, 8, 2},
+		{"16x16_3levels", 16, 16, 3},
+		{"32x32_4levels", 32, 32, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			size := tt.width * tt.height
+			original := make([]int32, size)
+			for i := range original {
+				original[i] = int32(i % 256)
+			}
+
+			data := make([]int32, size)
+			copy(data, original)
+
+			DecomposeMultiLevel53_32bit(data, tt.width, tt.height, tt.levels)
+			ReconstructMultiLevel53_32bit(data, tt.width, tt.height, tt.levels)
+
+			for i := range original {
+				if data[i] != original[i] {
+					t.Errorf("position %d: got %d, want %d", i, data[i], original[i])
+				}
+			}
+		})
+	}
+}
+
+func TestDecomposeMultiLevel53_32bit_LargeValues(t *testing.T) {
+	// Test multi-level decomposition with values near int32 boundaries.
+	width, height, levels := 8, 8, 2
+	size := width * height
+	original := make([]int32, size)
+	for i := range original {
+		// Alternating large positive and negative values
+		if i%2 == 0 {
+			original[i] = int32(1<<30 - int32(i)*1000)
+		} else {
+			original[i] = int32(-1<<30 + int32(i)*1000)
+		}
+	}
+
+	data := make([]int32, size)
+	copy(data, original)
+
+	DecomposeMultiLevel53_32bit(data, width, height, levels)
+	ReconstructMultiLevel53_32bit(data, width, height, levels)
+
+	for i := range original {
+		if data[i] != original[i] {
+			t.Errorf("position %d: got %d, want %d", i, data[i], original[i])
+		}
+	}
+}
+
+func TestCalculateSubbands_MultipleLevels(t *testing.T) {
+	tests := []struct {
+		name         string
+		width        int
+		height       int
+		level        int
+		expectLLSize [2]int // width, height of LL band
+	}{
+		{"32x32_level0", 32, 32, 0, [2]int{16, 16}},
+		{"32x32_level1", 32, 32, 1, [2]int{8, 8}},
+		{"32x32_level2", 32, 32, 2, [2]int{4, 4}},
+		{"7x7_level0", 7, 7, 0, [2]int{4, 4}},
+		{"13x11_level0", 13, 11, 0, [2]int{7, 6}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Scale input dimensions to the given decomposition level
+			w := tt.width >> tt.level
+			h := tt.height >> tt.level
+			if tt.level > 0 {
+				w = (tt.width + (1 << tt.level) - 1) >> tt.level
+				h = (tt.height + (1 << tt.level) - 1) >> tt.level
+			}
+
+			ll, hl, lh, hh := CalculateSubbands(w, h, 0)
+
+			llW := ll.X1 - ll.X0
+			llH := ll.Y1 - ll.Y0
+
+			if llW != tt.expectLLSize[0] || llH != tt.expectLLSize[1] {
+				t.Errorf("LL size: got %dx%d, want %dx%d", llW, llH, tt.expectLLSize[0], tt.expectLLSize[1])
+			}
+
+			// Verify HL, LH, HH have sensible sizes
+			hlW := hl.X1 - hl.X0
+			lhH := lh.Y1 - lh.Y0
+			if hlW <= 0 || lhH <= 0 {
+				t.Errorf("detail bands have zero/negative size: HL width=%d, LH height=%d", hlW, lhH)
+			}
+
+			// Verify subbands tile the space: LL+HL cover full width, LL+LH cover full height
+			if llW+hlW != w {
+				t.Errorf("LL+HL width %d+%d != %d", llW, hlW, w)
+			}
+			if llH+(hh.Y1-hh.Y0) != h {
+				t.Errorf("LL+HH height %d+%d != %d", llH, hh.Y1-hh.Y0, h)
+			}
+		})
+	}
+}
+
 func TestLargeBufferPool(t *testing.T) {
 	// Test buffer pool with size larger than initial 4096
 	// This exercises the buffer reallocation path
