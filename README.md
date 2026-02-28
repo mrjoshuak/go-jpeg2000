@@ -14,7 +14,10 @@ This package provides a native Go implementation of JPEG 2000 encoding and decod
 
 - **Pure Go**: No CGO dependencies, works on all Go-supported platforms
 - **Format Support**: JP2 file format and raw J2K codestream
-- **HTJ2K Support**: High-Throughput JPEG 2000 (ISO/IEC 15444-15) encoding and decoding
+- **HTJ2K Support**: High-Throughput JPEG 2000 (ISO/IEC 15444-15) with full cleanup + refinement passes (SPP/MRP)
+- **Progressive Decode**: Incremental decoding via `ProgressiveDecoder` — feed packets as they arrive, reconstruct at any point
+- **Float Image Output**: `FloatImage` type preserves HDR float precision through the decode pipeline
+- **Packet Extraction**: `ExtractPackets` / `BuildPacketIndex` for server-side progressive streaming
 - **Lossless & Lossy**: Both compression modes supported
 - **Full Colorspace Support**: All 19 ISO/IEC 15444-1 colorspaces with automatic conversion to sRGB
 - **Flexible Precision**: 1-16 bit component precision, including 4-bit, 10-bit, and 12-bit
@@ -95,6 +98,50 @@ fmt.Printf("Size: %dx%d\n", meta.Width, meta.Height)
 fmt.Printf("Components: %d\n", meta.NumComponents)
 fmt.Printf("ColorSpace: %v\n", meta.ColorSpace)
 fmt.Printf("Tiles: %dx%d\n", meta.NumTilesX, meta.NumTilesY)
+```
+
+### Float Decoding (HDR)
+
+```go
+// Preserve float precision through the decode pipeline
+floatImg, err := jpeg2000.DecodeFloat(file)
+// floatImg.Components[0] is []float32 for the first component (e.g. R)
+// floatImg.Components[1] is []float32 for G, etc.
+
+// With config options
+cfg := &jpeg2000.Config{ReduceResolution: 2}
+floatImg, err = jpeg2000.DecodeFloatConfig(file, cfg)
+```
+
+### Progressive Decoding
+
+```go
+// Parse the codestream header, then feed packets incrementally
+decoder, err := jpeg2000.NewProgressiveDecoderFromCodestream(codestreamBytes)
+
+// Feed packets as they arrive (any order)
+for _, pkt := range packets {
+    decoder.FeedPacket(pkt)
+}
+
+// Reconstruct the best image from data received so far
+floatImg, err := decoder.Reconstruct()
+
+// Check progress
+fmt.Printf("Received %d packets, complete: %v\n",
+    len(decoder.ReceivedPackets()), decoder.Complete())
+```
+
+### Packet Extraction (Server-Side)
+
+```go
+// Extract all packets from an encoded codestream
+packets, err := jpeg2000.ExtractPackets(codestream)
+
+// Or build a zero-copy index for memory-mapped files
+index, err := jpeg2000.BuildPacketIndex(codestream)
+pkt, err := index.GetPacket(addr)
+addrs := index.AllAddresses()
 ```
 
 ### Encoding Options
@@ -199,12 +246,15 @@ jpeg2000/
 ├── decoder.go           # JP2/J2K decoding, colorspace detection
 ├── encoder.go           # JP2/J2K encoding
 ├── colorspace.go        # Color conversion functions
+├── floatimage.go        # FloatImage type for HDR output
+├── progressive.go       # ProgressiveDecoder for incremental decode
+├── packets.go           # Packet extraction and indexing
 └── internal/
     ├── bio/             # Bit I/O utilities
     ├── box/             # JP2 file format box handling
     ├── codestream/      # J2K codestream marker parsing
     ├── dwt/             # Discrete Wavelet Transform (5-3, 9-7)
-    ├── entropy/         # MQ coder and EBCOT tier-1
+    ├── entropy/         # MQ coder, EBCOT tier-1, HTJ2K (cleanup + SPP/MRP)
     ├── mct/             # Multi-Component Transform (RCT, ICT)
     └── tcd/             # Tile Coder/Decoder, tier-2
 ```
@@ -219,7 +269,7 @@ jpeg2000/
 | 9-7 DWT (Lossy) | ✅ Complete | 100% | Irreversible wavelet |
 | MCT (Color Transform) | ✅ Complete | 100% | RCT and ICT |
 | MQ Coder | ✅ Complete | 95.7% | Arithmetic coding |
-| HTJ2K (Part 15) | ✅ Complete | 90%+ | High-Throughput encoding/decoding |
+| HTJ2K (Part 15) | ✅ Complete | 90%+ | Cleanup + SPP/MRP refinement passes |
 | EBCOT (Tier-1) | ✅ Complete | 91.9% | All coding passes |
 | Packet Assembly (Tier-2) | ✅ Complete | 91.9% | All progression orders |
 | Colorspace Conversion | ✅ Complete | 92.8% | All 19 colorspaces |
@@ -234,6 +284,7 @@ jpeg2000/
 - `image.Gray` / `image.Gray16` - Grayscale
 - `image.RGBA` / `image.RGBA64` - RGB with alpha
 - `image.NRGBA` / `image.NRGBA64` - Non-premultiplied RGBA
+- `jpeg2000.FloatImage` - Planar float32 components (via `DecodeFloat`)
 
 ### Encoding Input
 - `image.Gray` / `image.Gray16`
