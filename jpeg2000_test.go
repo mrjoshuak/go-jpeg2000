@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"image"
 	"image/color"
+	"os"
 	"testing"
 )
 
@@ -2913,5 +2914,44 @@ func TestDecode_JP2_BoxExtendsToEOF(t *testing.T) {
 	bounds := decoded.Bounds()
 	if bounds.Dx() != 8 || bounds.Dy() != 8 {
 		t.Errorf("Decoded size = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
+	}
+}
+
+// TestDecode_JP2_Issue2_RealFile tests decoding a real-world JP2 file from
+// issue #2 where the jp2c (codestream) box has length=0, meaning it extends
+// to EOF. This is the actual file provided by the reporter.
+func TestDecode_JP2_Issue2_RealFile(t *testing.T) {
+	data, err := os.ReadFile("testdata/8bit_GRAY_DWT.jp2")
+	if err != nil {
+		t.Skip("test file not available:", err)
+	}
+
+	// Verify this file actually has a length=0 box (the condition we're testing)
+	// jp2c box is at offset 0x4d with length=0
+	if len(data) < 0x51 || data[0x4d] != 0 || data[0x4e] != 0 || data[0x4f] != 0 || data[0x50] != 0 {
+		t.Fatal("test file does not have expected length=0 jp2c box")
+	}
+
+	decoded, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	// File is 800x600 (0x320 x 0x258) 8-bit grayscale
+	if bounds.Dx() != 800 || bounds.Dy() != 600 {
+		t.Errorf("Decoded size = %dx%d, want 800x600", bounds.Dx(), bounds.Dy())
+	}
+
+	// Verify metadata
+	meta, err := DecodeMetadata(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("DecodeMetadata() error: %v", err)
+	}
+	if meta.NumComponents != 1 {
+		t.Errorf("NumComponents = %d, want 1", meta.NumComponents)
+	}
+	if meta.BitsPerComponent[0] != 8 {
+		t.Errorf("BitsPerComponent = %d, want 8", meta.BitsPerComponent[0])
 	}
 }
