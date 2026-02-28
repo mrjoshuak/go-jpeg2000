@@ -24,11 +24,11 @@ type encoder struct {
 	options *Options
 
 	// Image parameters
-	width         int
-	height        int
-	numComponents int
-	precision     int
-	signed        bool
+	width              int
+	height             int
+	numComponents      int
+	componentPrecision []int
+	componentSigned    []bool
 
 	// Component data
 	componentData [][]int32
@@ -36,6 +36,17 @@ type encoder struct {
 	// Float encoding state
 	isFloat  bool
 	floatImg *FloatImage
+}
+
+// maxPrecision returns the maximum precision across all components.
+func (e *encoder) maxPrecision() int {
+	m := 0
+	for _, p := range e.componentPrecision {
+		if p > m {
+			m = p
+		}
+	}
+	return m
 }
 
 // newEncoder creates a new encoder.
@@ -88,7 +99,8 @@ func (e *encoder) extractImageData() error {
 	switch img := e.img.(type) {
 	case *image.Gray:
 		e.numComponents = 1
-		e.precision = 8
+		e.componentPrecision = []int{8}
+		e.componentSigned = []bool{false}
 		e.componentData = make([][]int32, 1)
 		e.componentData[0] = make([]int32, e.width*e.height)
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -100,7 +112,8 @@ func (e *encoder) extractImageData() error {
 
 	case *image.Gray16:
 		e.numComponents = 1
-		e.precision = 16
+		e.componentPrecision = []int{16}
+		e.componentSigned = []bool{false}
 		e.componentData = make([][]int32, 1)
 		e.componentData[0] = make([]int32, e.width*e.height)
 		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -112,7 +125,8 @@ func (e *encoder) extractImageData() error {
 
 	case *image.RGBA:
 		e.numComponents = 4
-		e.precision = 8
+		e.componentPrecision = []int{8, 8, 8, 8}
+		e.componentSigned = []bool{false, false, false, false}
 		e.componentData = make([][]int32, 4)
 		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
@@ -130,7 +144,8 @@ func (e *encoder) extractImageData() error {
 
 	case *image.RGBA64:
 		e.numComponents = 4
-		e.precision = 16
+		e.componentPrecision = []int{16, 16, 16, 16}
+		e.componentSigned = []bool{false, false, false, false}
 		e.componentData = make([][]int32, 4)
 		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
@@ -148,7 +163,8 @@ func (e *encoder) extractImageData() error {
 
 	case *image.NRGBA:
 		e.numComponents = 4
-		e.precision = 8
+		e.componentPrecision = []int{8, 8, 8, 8}
+		e.componentSigned = []bool{false, false, false, false}
 		e.componentData = make([][]int32, 4)
 		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
@@ -166,7 +182,8 @@ func (e *encoder) extractImageData() error {
 
 	case *image.NRGBA64:
 		e.numComponents = 4
-		e.precision = 16
+		e.componentPrecision = []int{16, 16, 16, 16}
+		e.componentSigned = []bool{false, false, false, false}
 		e.componentData = make([][]int32, 4)
 		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
@@ -185,7 +202,8 @@ func (e *encoder) extractImageData() error {
 	default:
 		// Generic fallback - convert to RGBA
 		e.numComponents = 4
-		e.precision = 8
+		e.componentPrecision = []int{8, 8, 8, 8}
+		e.componentSigned = []bool{false, false, false, false}
 		e.componentData = make([][]int32, 4)
 		for c := 0; c < 4; c++ {
 			e.componentData[c] = make([]int32, e.width*e.height)
@@ -203,18 +221,19 @@ func (e *encoder) extractImageData() error {
 	}
 
 	// Apply precision override if specified
-	if e.options.Precision > 0 && e.options.Precision <= 16 && e.options.Precision != e.precision {
+	if e.options.Precision > 0 && e.options.Precision <= 16 {
 		targetPrecision := e.options.Precision
-		srcMax := int32((1 << e.precision) - 1)
 		dstMax := int32((1 << targetPrecision) - 1)
-
 		for c := 0; c < e.numComponents; c++ {
+			if e.componentPrecision[c] == targetPrecision {
+				continue
+			}
+			srcMax := int32((1 << e.componentPrecision[c]) - 1)
 			for i := range e.componentData[c] {
-				// Scale from source precision to target precision
 				e.componentData[c][i] = e.componentData[c][i] * dstMax / srcMax
 			}
+			e.componentPrecision[c] = targetPrecision
 		}
-		e.precision = targetPrecision
 	}
 
 	return nil
@@ -223,10 +242,14 @@ func (e *encoder) extractImageData() error {
 // extractFloatData extracts pixel data from a FloatImage, reinterpreting
 // IEEE 754 float32 bits as int32 values for the integer wavelet pipeline.
 func (e *encoder) extractFloatData() error {
-	e.precision = 32
-	e.signed = true
 	e.isFloat = true
 	e.numComponents = len(e.floatImg.Components)
+	e.componentPrecision = make([]int, e.numComponents)
+	e.componentSigned = make([]bool, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		e.componentPrecision[c] = 32
+		e.componentSigned[c] = true
+	}
 	e.width = e.floatImg.Width
 	e.height = e.floatImg.Height
 
@@ -276,17 +299,17 @@ func (e *encoder) preprocess() error {
 		}
 	}
 
-	// Apply DC level shift (skip for signed data, which includes float)
-	if !e.signed {
-		for c := 0; c < e.numComponents; c++ {
-			mct.DCLevelShiftForward(e.componentData[c], e.precision)
+	// Apply DC level shift per component (skip signed components)
+	for c := 0; c < e.numComponents; c++ {
+		if !e.componentSigned[c] {
+			mct.DCLevelShiftForward(e.componentData[c], e.componentPrecision[c])
 		}
 	}
 
 	// Apply MCT if we have 3+ components
 	if e.numComponents >= 3 {
 		if e.options.Lossless {
-			if e.precision > 16 {
+			if e.maxPrecision() > 16 {
 				mct.ForwardRCT32(e.componentData[0], e.componentData[1], e.componentData[2])
 			} else {
 				mct.ForwardRCT(e.componentData[0], e.componentData[1], e.componentData[2])
@@ -321,7 +344,7 @@ func (e *encoder) preprocess() error {
 
 	for c := 0; c < e.numComponents; c++ {
 		if e.options.Lossless {
-			if e.precision > 16 {
+			if e.maxPrecision() > 16 {
 				dwt.DecomposeMultiLevel53_32bit(e.componentData[c], e.width, e.height, numLevels)
 			} else {
 				dwt.DecomposeMultiLevel53(e.componentData[c], e.width, e.height, numLevels)
@@ -447,8 +470,8 @@ func (e *encoder) generateSIZ() []byte {
 	for c := 0; c < numComp; c++ {
 		offset := 40 + c*3
 		// Ssiz: bit depth (precision - 1, with sign bit)
-		ssiz := uint8(e.precision - 1)
-		if e.signed {
+		ssiz := uint8(e.componentPrecision[c] - 1)
+		if e.componentSigned[c] {
 			ssiz |= 0x80
 		}
 		buf[offset] = ssiz
@@ -576,8 +599,9 @@ func (e *encoder) generateQCD() []byte {
 		binary.BigEndian.PutUint16(buf[2:4], uint16(length))
 
 		// Sqcd: no quantization, guard bits
+		maxPrec := e.maxPrecision()
 		guardBits := uint8(0)
-		if e.precision > 16 {
+		if maxPrec > 16 {
 			guardBits = 2 // need more guard bits for 32-bit
 		}
 		buf[4] = codestream.QuantizationNone | (guardBits << 5)
@@ -585,7 +609,7 @@ func (e *encoder) generateQCD() []byte {
 		// SPqcd: one exponent per subband
 		for i := 0; i < numBands; i++ {
 			// Default exponent based on subband level
-			exp := e.precision + i/3
+			exp := maxPrec + i/3
 			if exp > 31 {
 				exp = 31 // clamp to 5-bit range
 			}
@@ -664,7 +688,11 @@ func (e *encoder) generateNLT() []byte {
 		binary.BigEndian.PutUint16(marker[0:2], uint16(codestream.NLT))
 		binary.BigEndian.PutUint16(marker[2:4], 5) // length
 		marker[4] = uint8(c)                       // component index
-		marker[5] = 0x9F                           // signed, 32-bit (0x80 | 31)
+		bdnlt := uint8(e.componentPrecision[c] - 1)
+		if e.componentSigned[c] {
+			bdnlt |= 0x80
+		}
+		marker[5] = bdnlt
 		marker[6] = 3                              // NLT type 3
 		buf = append(buf, marker...)
 	}
@@ -696,9 +724,10 @@ type codeBlockJob struct {
 
 // codeBlockResult holds the encoded result.
 type codeBlockResult struct {
-	index   int
-	encoded []byte
-	numBPS  int
+	index       int
+	encoded     []byte
+	numBPS      int
+	truncPoints []int // byte position after each complete bit-plane
 }
 
 // cbMeta holds per-code-block metadata for the tile data table.
@@ -794,6 +823,59 @@ func buildTileData(metas []cbMeta, encoded []byte) []byte {
 	return tileData
 }
 
+// buildMultiLayerTileData constructs tile data with per-layer cumulative byte
+// counts for each code-block. Format:
+//
+//	uint16:  numCodeBlocks
+//	uint8:   numLayers
+//	Per CB:  uint8 numBPS + numLayers*uint32 cumulativeLen
+//	Then:    concatenated encoded bytes
+//
+// Each cumulativeLen[i] gives the number of bytes from this code-block
+// that belong to layers 0..i. Bit-planes are distributed evenly across
+// layers, with earlier layers getting the most significant bit-planes.
+func buildMultiLayerTileData(metas []cbMeta, truncPoints [][]int, encoded []byte, numLayers int) []byte {
+	numCB := len(metas)
+	tableSize := 2 + 1 + numCB*(1+numLayers*4)
+	tileData := make([]byte, tableSize+len(encoded))
+	tileData[0] = byte(numCB >> 8)
+	tileData[1] = byte(numCB)
+	tileData[2] = byte(numLayers)
+	for i, m := range metas {
+		off := 3 + i*(1+numLayers*4)
+		tileData[off] = m.numBPS
+		nbps := int(m.numBPS)
+		tp := truncPoints[i]
+		for lay := 0; lay < numLayers; lay++ {
+			var cumLen uint32
+			if nbps == 0 {
+				cumLen = 0
+			} else {
+				// Distribute bit-planes across layers proportionally.
+				bpCount := (lay + 1) * nbps / numLayers
+				if bpCount < 1 {
+					bpCount = 1 // always include at least the MSB
+				}
+				if bpCount > nbps {
+					bpCount = nbps
+				}
+				if bpCount > 0 && len(tp) >= bpCount {
+					cumLen = uint32(tp[bpCount-1])
+				} else if bpCount > 0 {
+					cumLen = m.dataLen
+				}
+			}
+			loff := off + 1 + lay*4
+			tileData[loff] = byte(cumLen >> 24)
+			tileData[loff+1] = byte(cumLen >> 16)
+			tileData[loff+2] = byte(cumLen >> 8)
+			tileData[loff+3] = byte(cumLen)
+		}
+	}
+	copy(tileData[tableSize:], encoded)
+	return tileData
+}
+
 // encodeTile encodes a single tile using parallel code-block encoding.
 func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	// Collect all code-block jobs
@@ -877,10 +959,16 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 		}
 	}
 
+	numLayers := e.options.NumLayers
+	if numLayers <= 0 {
+		numLayers = 1
+	}
+
 	// Sequential encoding for small job counts or single-threaded mode
 	// Set GOMAXPROCS=1 to force single-threaded encoding
 	if len(jobs) <= 4 || runtime.GOMAXPROCS(0) == 1 {
 		var metas []cbMeta
+		var allTruncPoints [][]int
 		var allEncoded []byte
 		t1 := entropy.GetT1(64, 64)
 		for _, job := range jobs {
@@ -889,10 +977,19 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 			t1.SetData(job.data)
 			encoded := t1.Encode(job.bandType)
 			metas = append(metas, cbMeta{numBPS: uint8(numBPS), dataLen: uint32(len(encoded))})
+			tp := t1.TruncationPoints()
+			tpCopy := make([]int, len(tp))
+			copy(tpCopy, tp)
+			allTruncPoints = append(allTruncPoints, tpCopy)
 			allEncoded = append(allEncoded, encoded...)
 		}
 		entropy.PutT1(t1)
-		tileData := buildTileData(metas, allEncoded)
+		var tileData []byte
+		if numLayers > 1 {
+			tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
+		} else {
+			tileData = buildTileData(metas, allEncoded)
+		}
 		return e.createTileHeader(tileIdx, tileData), nil
 	}
 
@@ -928,10 +1025,14 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 				encodedCopy := make([]byte, len(encoded))
 				copy(encodedCopy, encoded)
 				entropy.PutT1(t1)
+				tp := t1.TruncationPoints()
+				tpCopy := make([]int, len(tp))
+				copy(tpCopy, tp)
 				resultChan <- codeBlockResult{
-					index:   job.index,
-					encoded: encodedCopy,
-					numBPS:  numBPS,
+					index:       job.index,
+					encoded:     encodedCopy,
+					numBPS:      numBPS,
+					truncPoints: tpCopy,
 				}
 			}
 		}()
@@ -946,9 +1047,11 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	// Collect results in order
 	metas := make([]cbMeta, len(jobs))
 	encodedBlocks := make([][]byte, len(jobs))
+	allTruncPoints := make([][]int, len(jobs))
 	for result := range resultChan {
 		metas[result.index] = cbMeta{numBPS: uint8(result.numBPS), dataLen: uint32(len(result.encoded))}
 		encodedBlocks[result.index] = result.encoded
+		allTruncPoints[result.index] = result.truncPoints
 	}
 
 	// Build tile data with metadata table + encoded bytes
@@ -956,7 +1059,12 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	for _, encoded := range encodedBlocks {
 		allEncoded = append(allEncoded, encoded...)
 	}
-	tileData := buildTileData(metas, allEncoded)
+	var tileData []byte
+	if numLayers > 1 {
+		tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
+	} else {
+		tileData = buildTileData(metas, allEncoded)
+	}
 	return e.createTileHeader(tileIdx, tileData), nil
 }
 
@@ -1079,7 +1187,7 @@ func (e *encoder) writeJP2(codestream []byte) error {
 		uint32(e.width),
 		uint32(e.height),
 		uint16(e.numComponents),
-		uint8(e.precision-1),
+		uint8(e.maxPrecision()-1),
 		colorspace,
 	)
 	if err := boxWriter.WriteBox(jp2hBox); err != nil {

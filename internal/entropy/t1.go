@@ -119,6 +119,11 @@ type T1 struct {
 	mqBuf      []byte
 	mqBp       int
 	mqContexts [NumContexts]uint8
+
+	// Truncation points: byte position after each complete bit-plane.
+	// truncPoints[i] is the byte count after encoding bit-plane (numBPS-1-i).
+	// Length equals numBPS after encoding.
+	truncPoints []int
 }
 
 // Band type constants.
@@ -141,6 +146,14 @@ func NewT1(width, height int) *T1 {
 	}
 	t.mqBuf[0] = 0
 	return t
+}
+
+// TruncationPoints returns the byte position after each complete bit-plane.
+// truncPoints[i] is the cumulative byte count after encoding bit-plane i
+// (in encoding order, MSB first). Length equals numBPS after encoding.
+// Returns nil if encoding produced no data.
+func (t *T1) TruncationPoints() []int {
+	return t.truncPoints
 }
 
 // Reset resets the T1 state for a new code-block.
@@ -937,18 +950,28 @@ func (t *T1) EncodeSafe(bandType int) []byte {
 		}
 	}
 	if maxVal == 0 {
+		t.truncPoints = nil
 		return nil
 	}
 	t.numBPS = int(math.Ceil(math.Log2(float64(maxVal + 1))))
+
+	// Track truncation points per bit-plane
+	t.truncPoints = make([]int, t.numBPS)
 
 	// Encode each bit-plane
 	for bp := t.numBPS - 1; bp >= 0; bp-- {
 		t.encodeSignificancePassInlined(bp)
 		t.encodeMagnitudeRefinementPassInlined(bp)
 		t.encodeCleanupPassInlined(bp)
+		t.truncPoints[t.numBPS-1-bp] = t.mqBp
 	}
 
-	return t.mqFlushInlined()
+	result := t.mqFlushInlined()
+	// Fix the last truncation point to the actual flushed length
+	if len(t.truncPoints) > 0 {
+		t.truncPoints[len(t.truncPoints)-1] = len(result)
+	}
+	return result
 }
 
 // encodeSignificancePass encodes the significance propagation pass.

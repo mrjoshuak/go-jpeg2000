@@ -18,6 +18,7 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 		}
 	}
 	if maxVal == 0 {
+		t.truncPoints = nil
 		return nil
 	}
 	numBPS := 0
@@ -26,6 +27,7 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 		maxVal >>= 1
 	}
 	t.numBPS = numBPS
+	t.truncPoints = make([]int, numBPS)
 
 	width := t.width
 	height := t.height
@@ -873,6 +875,12 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 				}
 			}
 		}
+
+		// Record truncation point after this bit-plane.
+		// mqBp is the index of the last written byte in mqBuf (0-based with
+		// sentinel at index 0). Payload starts at mqBuf[1], so mqBp gives
+		// the payload byte count.
+		t.truncPoints[numBPS-1-bp] = mqBp
 	}
 
 	// Flush MQ encoder
@@ -893,7 +901,12 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 	}
 
 	if endPos > 1 {
-		return mqBuf[1:endPos]
+		result := mqBuf[1:endPos]
+		if len(t.truncPoints) > 0 {
+			t.truncPoints[len(t.truncPoints)-1] = len(result)
+		}
+		return result
 	}
+	t.truncPoints = nil
 	return nil
 }

@@ -266,14 +266,20 @@ func TestMultiLayer_ProgressiveQuality(t *testing.T) {
 		t.Logf("Layer %d: MSE=%.2f, PSNR=%.2f dB", layer, mse, psnr)
 	}
 
-	// Quality should never decrease as layers increase.
-	// Currently all layers produce identical output due to the simplified
-	// decoder, so we only verify non-degradation (MSE must not increase).
+	// Quality should generally improve as layers increase. Small non-monotonic
+	// fluctuations (< 1%) are acceptable due to approximate MQ truncation
+	// points at bit-plane boundaries. The overall trend must be improving.
 	for i := 1; i < 8; i++ {
-		if mseByLayer[i] > mseByLayer[i-1]+1e-6 {
-			t.Errorf("Quality decreased at layer %d: MSE %.2f > layer %d MSE %.2f",
-				i+1, mseByLayer[i], i, mseByLayer[i-1])
+		tolerance := mseByLayer[i-1] * 0.01 // 1% tolerance
+		if mseByLayer[i] > mseByLayer[i-1]+tolerance {
+			t.Errorf("Quality decreased at layer %d: MSE %.2f > layer %d MSE %.2f (tolerance %.2f)",
+				i+1, mseByLayer[i], i, mseByLayer[i-1], tolerance)
 		}
+	}
+	// Overall improvement: last layer must be substantially better than first
+	if mseByLayer[7] > mseByLayer[0]*0.5 {
+		t.Errorf("Overall quality did not improve: layer 1 MSE=%.2f, layer 8 MSE=%.2f",
+			mseByLayer[0], mseByLayer[7])
 	}
 }
 

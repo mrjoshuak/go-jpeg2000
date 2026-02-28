@@ -377,7 +377,11 @@ func (d *decoder) decodeTile(
 	}
 
 	// Decode tile data from codestream (fill subband coefficients)
-	if err := d.decodeTileData(tile, tileIdx); err != nil {
+	qualityLimit := 0
+	if cfg != nil && cfg.QualityLayers > 0 {
+		qualityLimit = cfg.QualityLayers
+	}
+	if err := d.decodeTileData(tile, tileIdx, qualityLimit); err != nil {
 		return fmt.Errorf("decoding tile data: %w", err)
 	}
 
@@ -468,7 +472,10 @@ func (d *decoder) findTileData(tileIdx int) []byte {
 // This only works for codestreams produced by our encoder, which uses a
 // custom metadata table format. For external codestreams (T2 packets),
 // the function validates the format and returns nil if it doesn't match.
-func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int) error {
+//
+// qualityLimit > 0 limits decoding to that many quality layers (V2 format
+// only; V1 format ignores this since it has no layer structure).
+func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) error {
 	tileData := d.findTileData(tileIdx)
 	if tileData == nil || len(tileData) < 2 {
 		return nil // No tile data
@@ -511,25 +518,61 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int) error {
 		}
 	}
 
-	// Parse metadata table
+	// Parse metadata table — detect V1 vs V2 format.
 	numCB := int(binary.BigEndian.Uint16(tileData[0:2]))
 	if numCB != expectedCB {
 		return nil // Not our format (likely T2 packets from external encoder)
 	}
-	metaSize := 2 + numCB*5
-	if len(tileData) < metaSize {
-		return nil // Not our format
-	}
+
+	// Check if this is V2 format (multi-layer): the header's NumLayers > 1
+	// and a numLayers byte follows numCB.
+	headerNumLayers := int(h.CodingStyle.NumLayers)
+	isV2 := headerNumLayers > 1
 
 	type decodeMeta struct {
 		numBPS  int
-		dataLen int
+		dataLen int // bytes to decode (may be truncated by quality limit)
+		fullLen int // total bytes in the stream (for advancing dataPos)
 	}
 	metas := make([]decodeMeta, numCB)
-	for i := 0; i < numCB; i++ {
-		off := 2 + i*5
-		metas[i].numBPS = int(tileData[off])
-		metas[i].dataLen = int(binary.BigEndian.Uint32(tileData[off+1 : off+5]))
+	var metaSize int
+
+	if isV2 {
+		if len(tileData) < 3 {
+			return nil
+		}
+		numLayers := int(tileData[2])
+		metaSize = 3 + numCB*(1+numLayers*4)
+		if len(tileData) < metaSize {
+			return nil
+		}
+		// Determine effective layer limit
+		effLayer := numLayers
+		if qualityLimit > 0 && qualityLimit < numLayers {
+			effLayer = qualityLimit
+		}
+		for i := 0; i < numCB; i++ {
+			off := 3 + i*(1+numLayers*4)
+			metas[i].numBPS = int(tileData[off])
+			// Effective layer cumulative length (what we decode)
+			loff := off + 1 + (effLayer-1)*4
+			metas[i].dataLen = int(binary.BigEndian.Uint32(tileData[loff : loff+4]))
+			// Full data length (last layer, for advancing dataPos)
+			foff := off + 1 + (numLayers-1)*4
+			metas[i].fullLen = int(binary.BigEndian.Uint32(tileData[foff : foff+4]))
+		}
+	} else {
+		metaSize = 2 + numCB*5
+		if len(tileData) < metaSize {
+			return nil
+		}
+		for i := 0; i < numCB; i++ {
+			off := 2 + i*5
+			metas[i].numBPS = int(tileData[off])
+			dl := int(binary.BigEndian.Uint32(tileData[off+1 : off+5]))
+			metas[i].dataLen = dl
+			metas[i].fullLen = dl
+		}
 	}
 
 	// Iterate code-blocks in the same order as the encoder:
@@ -609,7 +652,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int) error {
 							}
 						}
 
-						dataPos += meta.dataLen
+						dataPos += meta.fullLen
 						cbIdx++
 					}
 				}
