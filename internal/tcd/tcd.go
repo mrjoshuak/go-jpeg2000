@@ -479,7 +479,12 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 
 	if h.WaveletTransform == 1 {
 		// 5-3 reversible
-		dwt.ReconstructMultiLevel53(tc.Data, width, height, numLevels)
+		// Use overflow-safe 32-bit DWT when precision > 16 (e.g. float data via NLT)
+		if d.needs32BitDWT() {
+			dwt.ReconstructMultiLevel53_32bit(tc.Data, width, height, numLevels)
+		} else {
+			dwt.ReconstructMultiLevel53(tc.Data, width, height, numLevels)
+		}
 	} else {
 		// 9-7 irreversible
 		tc.DataFloat = make([]float64, len(tc.Data))
@@ -491,6 +496,16 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 			tc.Data[i] = int32(v + 0.5)
 		}
 	}
+}
+
+// needs32BitDWT returns true if 32-bit-safe DWT arithmetic is required.
+func (d *TileDecoder) needs32BitDWT() bool {
+	for _, ci := range d.header.ComponentInfo {
+		if ci.Precision() > 16 {
+			return true
+		}
+	}
+	return false
 }
 
 // TileEncoder encodes a single tile.

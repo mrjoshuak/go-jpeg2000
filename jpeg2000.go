@@ -335,6 +335,23 @@ func Encode(w io.Writer, m image.Image, o *Options) error {
 	return e.encode()
 }
 
+// EncodeFloat writes a FloatImage to w in JPEG 2000 format.
+// Float encoding is always lossless (5/3 reversible wavelet).
+// IEEE 754 float bits are reinterpreted as int32 and an NLT Type 3
+// marker signals the codec to apply a sign-magnitude transform.
+func EncodeFloat(w io.Writer, img *FloatImage, o *Options) error {
+	if o == nil {
+		o = DefaultOptions()
+	}
+	o.Lossless = true // float encoding is always lossless
+	e := &encoder{
+		w:        w,
+		options:  o,
+		floatImg: img,
+	}
+	return e.encodeFloat()
+}
+
 // DecodeFloat reads a JPEG 2000 image and returns it as a FloatImage,
 // preserving float precision from the wavelet transform pipeline.
 func DecodeFloat(r io.Reader) (*FloatImage, error) {

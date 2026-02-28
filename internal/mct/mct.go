@@ -37,7 +37,35 @@ func ForwardRCT(r, g, b []int32) {
 	}
 }
 
+// ForwardRCT32 applies the reversible color transform with overflow-safe
+// 64-bit intermediate arithmetic for 32-bit data.
+func ForwardRCT32(r, g, b []int32) {
+	for i := range r {
+		y := int32((int64(r[i]) + 2*int64(g[i]) + int64(b[i])) >> 2)
+		u := b[i] - g[i]
+		v := r[i] - g[i]
+
+		r[i] = y
+		g[i] = u
+		b[i] = v
+	}
+}
+
 // Inverse transforms
+
+// InverseRCT32 applies the inverse reversible color transform with
+// overflow-safe 64-bit intermediate arithmetic for 32-bit data.
+func InverseRCT32(y, u, v []int32) {
+	for i := range y {
+		g := int32(int64(y[i]) - (int64(u[i])+int64(v[i]))>>2)
+		r := v[i] + g
+		b := u[i] + g
+
+		y[i] = r
+		u[i] = g
+		v[i] = b
+	}
+}
 
 // InverseICT applies the inverse irreversible color transform (YCbCr to RGB).
 func InverseICT(y, cb, cr []float64) {

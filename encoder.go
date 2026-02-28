@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"runtime"
 	"sync"
 
@@ -31,6 +32,10 @@ type encoder struct {
 
 	// Component data
 	componentData [][]int32
+
+	// Float encoding state
+	isFloat  bool
+	floatImg *FloatImage
 }
 
 // newEncoder creates a new encoder.
@@ -212,17 +217,77 @@ func (e *encoder) extractImageData() error {
 	return nil
 }
 
+// extractFloatData extracts pixel data from a FloatImage, reinterpreting
+// IEEE 754 float32 bits as int32 values for the integer wavelet pipeline.
+func (e *encoder) extractFloatData() error {
+	e.precision = 32
+	e.signed = true
+	e.isFloat = true
+	e.numComponents = len(e.floatImg.Components)
+	e.width = e.floatImg.Width
+	e.height = e.floatImg.Height
+
+	e.componentData = make([][]int32, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		e.componentData[c] = make([]int32, e.width*e.height)
+		for i, f := range e.floatImg.Components[c] {
+			e.componentData[c][i] = int32(math.Float32bits(f))
+		}
+	}
+
+	return nil
+}
+
+// encodeFloat encodes a FloatImage.
+func (e *encoder) encodeFloat() error {
+	if err := e.extractFloatData(); err != nil {
+		return fmt.Errorf("extracting float data: %w", err)
+	}
+
+	if err := e.preprocess(); err != nil {
+		return fmt.Errorf("preprocessing: %w", err)
+	}
+
+	cs, err := e.generateCodestream()
+	if err != nil {
+		return fmt.Errorf("generating codestream: %w", err)
+	}
+
+	switch e.options.Format {
+	case FormatJP2:
+		return e.writeJP2(cs)
+	case FormatJ2K:
+		_, err := e.w.Write(cs)
+		return err
+	default:
+		return fmt.Errorf("unsupported format: %s", e.options.Format)
+	}
+}
+
 // preprocess applies preprocessing transforms.
 func (e *encoder) preprocess() error {
-	// Apply DC level shift
-	for c := 0; c < e.numComponents; c++ {
-		mct.DCLevelShiftForward(e.componentData[c], e.precision)
+	// For float data, apply NLT Type 3 before anything else
+	if e.isFloat {
+		for c := 0; c < e.numComponents; c++ {
+			nltType3(e.componentData[c])
+		}
+	}
+
+	// Apply DC level shift (skip for signed data, which includes float)
+	if !e.signed {
+		for c := 0; c < e.numComponents; c++ {
+			mct.DCLevelShiftForward(e.componentData[c], e.precision)
+		}
 	}
 
 	// Apply MCT if we have 3+ components
 	if e.numComponents >= 3 {
 		if e.options.Lossless {
-			mct.ForwardRCT(e.componentData[0], e.componentData[1], e.componentData[2])
+			if e.precision > 16 {
+				mct.ForwardRCT32(e.componentData[0], e.componentData[1], e.componentData[2])
+			} else {
+				mct.ForwardRCT(e.componentData[0], e.componentData[1], e.componentData[2])
+			}
 		} else {
 			// Convert to float for ICT
 			compFloat := make([][]float64, 3)
@@ -253,7 +318,11 @@ func (e *encoder) preprocess() error {
 
 	for c := 0; c < e.numComponents; c++ {
 		if e.options.Lossless {
-			dwt.DecomposeMultiLevel53(e.componentData[c], e.width, e.height, numLevels)
+			if e.precision > 16 {
+				dwt.DecomposeMultiLevel53_32bit(e.componentData[c], e.width, e.height, numLevels)
+			} else {
+				dwt.DecomposeMultiLevel53(e.componentData[c], e.width, e.height, numLevels)
+			}
 		} else {
 			// Convert to float for 9-7 transform
 			dataFloat := make([]float64, len(e.componentData[c]))
@@ -304,6 +373,12 @@ func (e *encoder) generateCodestream() ([]byte, error) {
 	// QCD marker
 	qcd := e.generateQCD()
 	buf = append(buf, qcd...)
+
+	// NLT markers (for float encoding)
+	if e.isFloat {
+		nlt := e.generateNLT()
+		buf = append(buf, nlt...)
+	}
 
 	// Comment marker (optional)
 	if e.options.Comment != "" {
@@ -497,13 +572,21 @@ func (e *encoder) generateQCD() []byte {
 		binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.QCD))
 		binary.BigEndian.PutUint16(buf[2:4], uint16(length))
 
-		// Sqcd: no quantization, 0 guard bits
-		buf[4] = codestream.QuantizationNone
+		// Sqcd: no quantization, guard bits
+		guardBits := uint8(0)
+		if e.precision > 16 {
+			guardBits = 2 // need more guard bits for 32-bit
+		}
+		buf[4] = codestream.QuantizationNone | (guardBits << 5)
 
 		// SPqcd: one exponent per subband
 		for i := 0; i < numBands; i++ {
 			// Default exponent based on subband level
-			buf[5+i] = uint8(e.precision + i/3) << 3
+			exp := e.precision + i/3
+			if exp > 31 {
+				exp = 31 // clamp to 5-bit range
+			}
+			buf[5+i] = uint8(exp) << 3
 		}
 	} else {
 		// Scalar derived quantization
@@ -564,6 +647,27 @@ func (e *encoder) generateCAP() []byte {
 	return buf
 }
 
+// generateNLT generates NLT marker segments for float encoding.
+// One NLT marker is written per component.
+func (e *encoder) generateNLT() []byte {
+	var buf []byte
+	for c := 0; c < e.numComponents; c++ {
+		// NLT marker: 0xFF73
+		// Length: 5 (includes length field itself)
+		// Cnlt: component index (1 byte)
+		// BDnlt: bit depth (1 byte) - 0x9F = signed (bit 7) + 31 (32-1)
+		// Tnlt: transform type (1 byte) - 3 = type 3
+		marker := make([]byte, 7)
+		binary.BigEndian.PutUint16(marker[0:2], uint16(codestream.NLT))
+		binary.BigEndian.PutUint16(marker[2:4], 5) // length
+		marker[4] = uint8(c)                       // component index
+		marker[5] = 0x9F                           // signed, 32-bit (0x80 | 31)
+		marker[6] = 3                              // NLT type 3
+		buf = append(buf, marker...)
+	}
+	return buf
+}
+
 // generateTiles generates tile data.
 func (e *encoder) generateTiles() ([]byte, error) {
 	var buf []byte
@@ -580,17 +684,111 @@ func (e *encoder) generateTiles() ([]byte, error) {
 
 // codeBlockJob represents a code-block encoding job for parallel processing.
 type codeBlockJob struct {
-	index       int    // Order in output
-	data        []int32
-	width       int
-	height      int
-	bandType    int
+	index    int // Order in output
+	data     []int32
+	width    int
+	height   int
+	bandType int
 }
 
 // codeBlockResult holds the encoded result.
 type codeBlockResult struct {
 	index   int
 	encoded []byte
+	numBPS  int
+}
+
+// cbMeta holds per-code-block metadata for the tile data table.
+type cbMeta struct {
+	numBPS  uint8
+	dataLen uint32
+}
+
+// computeNumBPS computes the number of bit-planes from absolute values.
+func computeNumBPS(data []int32) int {
+	maxVal := int32(0)
+	for _, v := range data {
+		abs := v
+		if abs < 0 {
+			if abs == math.MinInt32 {
+				abs = math.MaxInt32
+			} else {
+				abs = -abs
+			}
+		}
+		if abs > maxVal {
+			maxVal = abs
+		}
+	}
+	if maxVal == 0 {
+		return 0
+	}
+	numBPS := 0
+	for maxVal > 0 {
+		numBPS++
+		maxVal >>= 1
+	}
+	return numBPS
+}
+
+// subbandOffset computes the (x, y) offset of a subband within the
+// DWT-decomposed data array for a given resolution and band type.
+func (e *encoder) subbandOffset(res, bandType int) (int, int) {
+	numRes := e.options.NumResolutions
+	if numRes <= 0 {
+		numRes = 6
+	}
+	return computeSubbandOffset(e.width, e.height, numRes, res, bandType)
+}
+
+// computeSubbandOffset computes the (x, y) offset of a subband within the
+// DWT-decomposed data array. Used by both encoder and decoder.
+func computeSubbandOffset(width, height, numRes, res, bandType int) (int, int) {
+	if res == 0 {
+		return 0, 0
+	}
+	decompLevel := numRes - 1 - res
+	w, h := width, height
+	for i := 0; i < decompLevel; i++ {
+		w = (w + 1) / 2
+		h = (h + 1) / 2
+	}
+	halfW := (w + 1) / 2
+	halfH := (h + 1) / 2
+	switch bandType {
+	case entropy.BandHL:
+		return halfW, 0
+	case entropy.BandLH:
+		return 0, halfH
+	case entropy.BandHH:
+		return halfW, halfH
+	default:
+		return 0, 0
+	}
+}
+
+// buildTileData constructs tile data with a metadata table followed by
+// concatenated code-block encoded data. Format:
+//
+//	uint16:  numCodeBlocks
+//	Per CB:  uint8 numBPS + uint32 dataLen
+//	Then:    concatenated encoded bytes
+func buildTileData(metas []cbMeta, encoded []byte) []byte {
+	numCB := len(metas)
+	tableSize := 2 + numCB*5
+	tileData := make([]byte, tableSize+len(encoded))
+	tileData[0] = byte(numCB >> 8)
+	tileData[1] = byte(numCB)
+	for i, m := range metas {
+		off := 2 + i*5
+		tileData[off] = m.numBPS
+		tileData[off+1] = byte(m.dataLen >> 24)
+		tileData[off+2] = byte(m.dataLen >> 16)
+		tileData[off+3] = byte(m.dataLen >> 8)
+		tileData[off+4] = byte(m.dataLen)
+	}
+	copy(tileData[tableSize:], encoded)
+	return tileData
 }
 
 // encodeTile encodes a single tile using parallel code-block encoding.
@@ -603,14 +801,18 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 		numRes = 6
 	}
 
-	cbWidth := 1 << (e.options.CodeBlockSize.X + 2)
-	cbHeight := 1 << (e.options.CodeBlockSize.Y + 2)
-	if cbWidth <= 0 {
-		cbWidth = 64
+	// Compute code-block size from options (must match generateCOD).
+	// CodeBlockSize.X/Y are the log2 exponent of the actual block size.
+	cbWidthExp := e.options.CodeBlockSize.X
+	cbHeightExp := e.options.CodeBlockSize.Y
+	if cbWidthExp <= 0 {
+		cbWidthExp = 6 // default: 2^6 = 64
 	}
-	if cbHeight <= 0 {
-		cbHeight = 64
+	if cbHeightExp <= 0 {
+		cbHeightExp = 6
 	}
+	cbWidth := 1 << cbWidthExp
+	cbHeight := 1 << cbHeightExp
 
 	// First pass: collect all code-block jobs
 	for c := 0; c < e.numComponents; c++ {
@@ -675,15 +877,19 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	// Sequential encoding for small job counts or single-threaded mode
 	// Set GOMAXPROCS=1 to force single-threaded encoding
 	if len(jobs) <= 4 || runtime.GOMAXPROCS(0) == 1 {
-		var tileData []byte
+		var metas []cbMeta
+		var allEncoded []byte
 		t1 := entropy.GetT1(64, 64)
 		for _, job := range jobs {
+			numBPS := computeNumBPS(job.data)
 			t1.Resize(job.width, job.height)
 			t1.SetData(job.data)
 			encoded := t1.Encode(job.bandType)
-			tileData = append(tileData, encoded...)
+			metas = append(metas, cbMeta{numBPS: uint8(numBPS), dataLen: uint32(len(encoded))})
+			allEncoded = append(allEncoded, encoded...)
 		}
 		entropy.PutT1(t1)
+		tileData := buildTileData(metas, allEncoded)
 		return e.createTileHeader(tileIdx, tileData), nil
 	}
 
@@ -709,13 +915,20 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
+				numBPS := computeNumBPS(job.data)
 				t1 := entropy.GetT1(job.width, job.height)
 				t1.SetData(job.data)
 				encoded := t1.Encode(job.bandType)
+				// Copy encoded bytes before returning T1 to pool.
+				// Encode returns a slice of the T1's internal mqBuf,
+				// which would be overwritten when the T1 is reused.
+				encodedCopy := make([]byte, len(encoded))
+				copy(encodedCopy, encoded)
 				entropy.PutT1(t1)
 				resultChan <- codeBlockResult{
 					index:   job.index,
-					encoded: encoded,
+					encoded: encodedCopy,
+					numBPS:  numBPS,
 				}
 			}
 		}()
@@ -728,17 +941,19 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	}()
 
 	// Collect results in order
-	results := make([][]byte, len(jobs))
+	metas := make([]cbMeta, len(jobs))
+	encodedBlocks := make([][]byte, len(jobs))
 	for result := range resultChan {
-		results[result.index] = result.encoded
+		metas[result.index] = cbMeta{numBPS: uint8(result.numBPS), dataLen: uint32(len(result.encoded))}
+		encodedBlocks[result.index] = result.encoded
 	}
 
-	// Combine results in order
-	var tileData []byte
-	for _, encoded := range results {
-		tileData = append(tileData, encoded...)
+	// Build tile data with metadata table + encoded bytes
+	var allEncoded []byte
+	for _, encoded := range encodedBlocks {
+		allEncoded = append(allEncoded, encoded...)
 	}
-
+	tileData := buildTileData(metas, allEncoded)
 	return e.createTileHeader(tileIdx, tileData), nil
 }
 
@@ -759,9 +974,9 @@ func (e *encoder) createTileHeader(tileIdx int, tileData []byte) []byte {
 	return append(header, tileData...)
 }
 
-// extractCodeBlockData extracts data for a code-block.
+// extractCodeBlockData extracts data for a code-block from the
+// DWT-decomposed component data, accounting for subband offsets.
 func (e *encoder) extractCodeBlockData(comp, res, bandType, cbx, cby, cbWidth, cbHeight, bandWidth, bandHeight int) []int32 {
-	// Calculate actual code-block size (may be smaller at edges)
 	actualWidth := cbWidth
 	actualHeight := cbHeight
 	startX := cbx * cbWidth
@@ -774,14 +989,14 @@ func (e *encoder) extractCodeBlockData(comp, res, bandType, cbx, cby, cbWidth, c
 		actualHeight = bandHeight - startY
 	}
 
-	data := make([]int32, actualWidth*actualHeight)
+	// Get subband offset in the DWT-decomposed data array
+	xOff, yOff := e.subbandOffset(res, bandType)
 
-	// Extract from component data
-	// This is simplified - actual implementation would need proper subband addressing
+	data := make([]int32, actualWidth*actualHeight)
 	for y := 0; y < actualHeight; y++ {
 		for x := 0; x < actualWidth; x++ {
-			srcX := startX + x
-			srcY := startY + y
+			srcX := xOff + startX + x
+			srcY := yOff + startY + y
 			if srcX < e.width && srcY < e.height {
 				srcIdx := srcY*e.width + srcX
 				if srcIdx < len(e.componentData[comp]) {

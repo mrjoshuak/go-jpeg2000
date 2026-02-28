@@ -106,6 +106,10 @@ func (p *Parser) ReadHeader() (*Header, error) {
 			if err := p.readCAP(); err != nil {
 				return nil, fmt.Errorf("failed to read CAP marker: %w", err)
 			}
+		case NLT:
+			if err := p.readNLT(); err != nil {
+				return nil, fmt.Errorf("failed to read NLT marker: %w", err)
+			}
 		case SOT:
 			// Start of tile-part header - main header is complete
 			p.state = stateMainHeader
@@ -882,6 +886,43 @@ func (p *Parser) readCAP() error {
 	}
 
 	p.header.Capabilities = cap
+	return nil
+}
+
+// readNLT reads the NLT (Non-Linearity point Transform) marker segment.
+func (p *Parser) readNLT() error {
+	length, err := p.readUint16()
+	if err != nil {
+		return err
+	}
+	if length < 5 {
+		return fmt.Errorf("NLT marker too short: %d bytes", length)
+	}
+
+	nlt := NLTMarker{}
+
+	// Read Cnlt (component index)
+	cnlt, err := p.readByte()
+	if err != nil {
+		return err
+	}
+	nlt.ComponentIndex = cnlt
+
+	// Read BDnlt (bit depth)
+	bdnlt, err := p.readByte()
+	if err != nil {
+		return err
+	}
+	nlt.BitDepth = bdnlt
+
+	// Read Tnlt (transform type)
+	tnlt, err := p.readByte()
+	if err != nil {
+		return err
+	}
+	nlt.TransformType = tnlt
+
+	p.header.NLTMarkers = append(p.header.NLTMarkers, nlt)
 	return nil
 }
 

@@ -295,7 +295,12 @@ func (t *T1) SetData(data []int32) {
 	copy(t.data, data)
 	for i, v := range t.data {
 		if v < 0 {
-			t.data[i] = -v
+			// math.MinInt32 cannot be negated in int32; clamp to MaxInt32
+			if v == math.MinInt32 {
+				t.data[i] = math.MaxInt32
+			} else {
+				t.data[i] = -v
+			}
 			// Inline setFlag for performance
 			idx := (i/width+1)*(width+2) + (i%width + 1)
 			flags[idx] |= T1SignNeg

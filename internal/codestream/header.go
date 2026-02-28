@@ -38,6 +38,9 @@ type Header struct {
 	// CAP marker data (extended capabilities)
 	Capabilities *CapabilitiesMarker
 
+	// NLT markers (non-linearity point transform)
+	NLTMarkers []NLTMarker
+
 	// Optional markers
 	ProgressionOrderChanges []ProgressionOrderChange
 	TileLengths            []TileLength
@@ -218,6 +221,25 @@ func (c *CapabilitiesMarker) IsHTJ2K() bool {
 		return false
 	}
 	return c.Pcap&CapPcapHTJ2K != 0
+}
+
+// NLTMarker holds data from an NLT (Non-Linearity point Transform) marker.
+// NLT Type 3 is used for IEEE 754 float data encoded as int32 bit patterns,
+// applying a sign-magnitude to two's complement transform.
+type NLTMarker struct {
+	ComponentIndex uint8
+	BitDepth       uint8 // BDnlt: bit 7 = signed, bits 0-6 = depth-1
+	TransformType  uint8 // Tnlt: 3 = DC level shift (type used for float)
+}
+
+// HasNLT returns true if the given component has an NLT marker.
+func (h *Header) HasNLT(component int) bool {
+	for _, nlt := range h.NLTMarkers {
+		if int(nlt.ComponentIndex) == component {
+			return true
+		}
+	}
+	return false
 }
 
 // TilePartHeader represents a tile-part header.

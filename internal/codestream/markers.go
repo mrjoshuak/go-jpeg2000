@@ -38,6 +38,7 @@ const (
 
 	// Part 2 extensions
 	CAP Marker = 0xFF50 // Extended capabilities
+	NLT Marker = 0xFF73 // Non-linearity point transform
 	CBD Marker = 0xFF78 // Component bit depth
 	MCT Marker = 0xFF74 // Multiple component transform collection
 	MCC Marker = 0xFF75 // Multiple component transform component
@@ -92,6 +93,8 @@ func (m Marker) String() string {
 		return "COM"
 	case CAP:
 		return "CAP"
+	case NLT:
+		return "NLT"
 	case CBD:
 		return "CBD"
 	case MCT:

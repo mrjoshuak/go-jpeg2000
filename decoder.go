@@ -2,13 +2,16 @@ package jpeg2000
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
 	"io"
+	"math"
 
 	"github.com/mrjoshuak/go-jpeg2000/internal/box"
 	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
 	"github.com/mrjoshuak/go-jpeg2000/internal/mct"
 	"github.com/mrjoshuak/go-jpeg2000/internal/tcd"
 )
@@ -329,10 +332,23 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 		}
 	}
 
+	// Check if any component has NLT (float mode)
+	hasNLT := false
+	for c := 0; c < numComp; c++ {
+		if h.HasNLT(c) {
+			hasNLT = true
+			break
+		}
+	}
+
 	// Apply inverse MCT if needed
 	if h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
 		if h.CodingStyle.IsReversible() {
-			mct.InverseRCT(componentData[0], componentData[1], componentData[2])
+			if hasNLT && precision > 16 {
+				mct.InverseRCT32(componentData[0], componentData[1], componentData[2])
+			} else {
+				mct.InverseRCT(componentData[0], componentData[1], componentData[2])
+			}
 		} else {
 			// Convert to float for ICT
 			compFloat := make([][]float64, 3)
@@ -355,6 +371,15 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	for c := 0; c < numComp; c++ {
 		if !h.ComponentInfo[c].IsSigned() {
 			mct.DCLevelShiftInverse(componentData[c], h.ComponentInfo[c].Precision())
+		}
+	}
+
+	// Apply inverse NLT after DC shift
+	if hasNLT {
+		for c := 0; c < numComp; c++ {
+			if h.HasNLT(c) {
+				nltType3(componentData[c])
+			}
 		}
 	}
 
@@ -388,12 +413,17 @@ func (d *decoder) decodeTile(
 		return fmt.Errorf("tile %d not initialized", tileIdx)
 	}
 
+	// Decode tile data from codestream (fill subband coefficients)
+	if err := d.decodeTileData(tile, tileIdx); err != nil {
+		return fmt.Errorf("decoding tile data: %w", err)
+	}
+
 	// Compute image offset at reduced resolution
 	reduce := tileDecoder.ReduceResolution()
 	imgXOff := reducedDimension(int(h.ImageXOffset), reduce)
 	imgYOff := reducedDimension(int(h.ImageYOffset), reduce)
 
-	// Copy tile data to output
+	// Apply inverse DWT and copy tile data to output
 	for c := 0; c < len(tile.Components) && c < len(componentData); c++ {
 		tc := tile.Components[c]
 		if tc == nil {
@@ -413,6 +443,211 @@ func (d *decoder) decodeTile(
 					dstIdx := dstY*imgWidth + dstX
 					if srcIdx < len(tc.Data) {
 						componentData[c][dstIdx] = tc.Data[srcIdx]
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// findTileData locates the tile data bytes for a given tile index
+// within the codestream. Returns nil if not found.
+func (d *decoder) findTileData(tileIdx int) []byte {
+	cs := d.codestream
+	for i := 0; i < len(cs)-13; i++ {
+		// Look for SOT marker (0xFF90)
+		if cs[i] != 0xFF || cs[i+1] != 0x90 {
+			continue
+		}
+		if i+14 > len(cs) {
+			break
+		}
+		// Verify Lsot = 10
+		lsot := binary.BigEndian.Uint16(cs[i+2 : i+4])
+		if lsot != 10 {
+			continue
+		}
+		// Check tile index
+		isot := binary.BigEndian.Uint16(cs[i+4 : i+6])
+		if int(isot) != tileIdx {
+			continue
+		}
+		// Read tile-part length
+		psot := binary.BigEndian.Uint32(cs[i+6 : i+10])
+		// Verify SOD marker at i+12
+		if cs[i+12] != 0xFF || cs[i+13] != 0x93 {
+			continue
+		}
+		dataStart := i + 14
+		dataEnd := dataStart
+		if psot > 0 {
+			dataEnd = i + int(psot)
+		} else {
+			dataEnd = len(cs)
+		}
+		if dataEnd > len(cs) {
+			dataEnd = len(cs)
+		}
+		if dataStart >= dataEnd {
+			return nil
+		}
+		return cs[dataStart:dataEnd]
+	}
+	return nil
+}
+
+// decodeTileData parses the tile data metadata table, decodes each
+// code-block via T1, and places decoded coefficients into the tile
+// component data arrays at the correct subband positions.
+//
+// This only works for codestreams produced by our encoder, which uses a
+// custom metadata table format. For external codestreams (T2 packets),
+// the function validates the format and returns nil if it doesn't match.
+func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int) error {
+	tileData := d.findTileData(tileIdx)
+	if tileData == nil || len(tileData) < 2 {
+		return nil // No tile data
+	}
+
+	h := d.header
+	numRes := int(h.CodingStyle.NumDecompositions) + 1
+	// Use same code-block size as encoder writes to COD
+	cbWidth := h.CodingStyle.CodeBlockWidth()
+	cbHeight := h.CodingStyle.CodeBlockHeight()
+
+	// Compute expected number of code blocks to validate format
+	expectedCB := 0
+	for c := 0; c < len(tile.Components); c++ {
+		tc := tile.Components[c]
+		if tc == nil {
+			continue
+		}
+		tcWidth := tc.X1 - tc.X0
+		tcHeight := tc.Y1 - tc.Y0
+		for r := 0; r < numRes; r++ {
+			numBands := 1
+			if r > 0 {
+				numBands = 3
+			}
+			for b := 0; b < numBands; b++ {
+				scale := 1 << (numRes - 1 - r)
+				bandW := (tcWidth + scale - 1) / scale
+				bandH := (tcHeight + scale - 1) / scale
+				if r > 0 {
+					bandW = (bandW + 1) / 2
+					bandH = (bandH + 1) / 2
+				}
+				for cby := 0; cby*cbHeight < bandH; cby++ {
+					for cbx := 0; cbx*cbWidth < bandW; cbx++ {
+						expectedCB++
+					}
+				}
+			}
+		}
+	}
+
+	// Parse metadata table
+	numCB := int(binary.BigEndian.Uint16(tileData[0:2]))
+	if numCB != expectedCB {
+		return nil // Not our format (likely T2 packets from external encoder)
+	}
+	metaSize := 2 + numCB*5
+	if len(tileData) < metaSize {
+		return nil // Not our format
+	}
+
+	type decodeMeta struct {
+		numBPS  int
+		dataLen int
+	}
+	metas := make([]decodeMeta, numCB)
+	for i := 0; i < numCB; i++ {
+		off := 2 + i*5
+		metas[i].numBPS = int(tileData[off])
+		metas[i].dataLen = int(binary.BigEndian.Uint32(tileData[off+1 : off+5]))
+	}
+
+	// Iterate code-blocks in the same order as the encoder:
+	// component → resolution → band → code-block
+	cbIdx := 0
+	dataPos := metaSize
+
+	for c := 0; c < len(tile.Components); c++ {
+		tc := tile.Components[c]
+		if tc == nil {
+			continue
+		}
+		tcWidth := tc.X1 - tc.X0
+		tcHeight := tc.Y1 - tc.Y0
+
+		for r := 0; r < numRes; r++ {
+			numBands := 1
+			if r > 0 {
+				numBands = 3
+			}
+
+			for b := 0; b < numBands; b++ {
+				bandType := entropy.BandLL
+				if r > 0 {
+					switch b {
+					case 0:
+						bandType = entropy.BandHL
+					case 1:
+						bandType = entropy.BandLH
+					case 2:
+						bandType = entropy.BandHH
+					}
+				}
+
+				// Compute band dimensions (same formula as encoder)
+				scale := 1 << (numRes - 1 - r)
+				bandW := (tcWidth + scale - 1) / scale
+				bandH := (tcHeight + scale - 1) / scale
+				if r > 0 {
+					bandW = (bandW + 1) / 2
+					bandH = (bandH + 1) / 2
+				}
+
+				xOff, yOff := computeSubbandOffset(tcWidth, tcHeight, numRes, r, bandType)
+
+				for cby := 0; cby*cbHeight < bandH; cby++ {
+					for cbx := 0; cbx*cbWidth < bandW; cbx++ {
+						if cbIdx >= numCB {
+							return nil
+						}
+						meta := metas[cbIdx]
+
+						startX := cbx * cbWidth
+						startY := cby * cbHeight
+						actualW := cbWidth
+						actualH := cbHeight
+						if startX+actualW > bandW {
+							actualW = bandW - startX
+						}
+						if startY+actualH > bandH {
+							actualH = bandH - startY
+						}
+
+						if meta.numBPS > 0 && meta.dataLen > 0 && dataPos+meta.dataLen <= len(tileData) {
+							cbData := tileData[dataPos : dataPos+meta.dataLen]
+							t1 := entropy.NewT1(actualW, actualH)
+							decoded := t1.Decode(cbData, meta.numBPS, bandType)
+
+							for y := 0; y < actualH; y++ {
+								for x := 0; x < actualW; x++ {
+									dstX := xOff + startX + x
+									dstY := yOff + startY + y
+									if dstX < tcWidth && dstY < tcHeight {
+										tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
+									}
+								}
+							}
+						}
+
+						dataPos += meta.dataLen
+						cbIdx++
 					}
 				}
 			}
@@ -654,6 +889,15 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 	precision := h.ComponentInfo[0].Precision()
 	signed := h.ComponentInfo[0].IsSigned()
 
+	// Check if any component has NLT (float mode)
+	hasNLT := false
+	for c := 0; c < numComp; c++ {
+		if h.HasNLT(c) {
+			hasNLT = true
+			break
+		}
+	}
+
 	// Decode tiles into int32 component data (same as integer path)
 	componentData := make([][]int32, numComp)
 	for c := 0; c < numComp; c++ {
@@ -675,35 +919,77 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 		}
 	}
 
-	// Build float component data
+	// Apply inverse MCT
+	if h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
+		if h.CodingStyle.IsReversible() {
+			if hasNLT && precision > 16 {
+				mct.InverseRCT32(componentData[0], componentData[1], componentData[2])
+			} else {
+				mct.InverseRCT(componentData[0], componentData[1], componentData[2])
+			}
+		} else {
+			// ICT path
+			compFloat := make([][]float64, 3)
+			for c := 0; c < 3; c++ {
+				compFloat[c] = make([]float64, len(componentData[c]))
+				for i, v := range componentData[c] {
+					compFloat[c][i] = float64(v)
+				}
+			}
+			mct.InverseICT(compFloat[0], compFloat[1], compFloat[2])
+			for c := 0; c < 3; c++ {
+				for i, v := range compFloat[c] {
+					componentData[c][i] = int32(v + 0.5)
+				}
+			}
+		}
+	}
+
+	// Apply DC level shift (skip for signed/float data)
+	for c := 0; c < numComp; c++ {
+		if !h.ComponentInfo[c].IsSigned() {
+			mct.DCLevelShiftInverse(componentData[c], h.ComponentInfo[c].Precision())
+		}
+	}
+
+	// Apply inverse NLT and reinterpret as float
+	if hasNLT {
+		for c := 0; c < numComp; c++ {
+			if h.HasNLT(c) {
+				nltType3(componentData[c])
+			}
+		}
+
+		// Reinterpret int32 bits as float32
+		components := make([][]float32, numComp)
+		for c := 0; c < numComp; c++ {
+			components[c] = make([]float32, width*height)
+			if h.HasNLT(c) {
+				for i, v := range componentData[c] {
+					components[c][i] = math.Float32frombits(uint32(v))
+				}
+			} else {
+				for i, v := range componentData[c] {
+					components[c][i] = float32(v)
+				}
+			}
+		}
+
+		return &FloatImage{
+			Width:      width,
+			Height:     height,
+			Components: components,
+			BitDepth:   32,
+			Signed:     true,
+		}, nil
+	}
+
+	// Non-NLT path: standard float conversion
 	compFloat := make([][]float64, numComp)
 	for c := 0; c < numComp; c++ {
 		compFloat[c] = make([]float64, len(componentData[c]))
 		for i, v := range componentData[c] {
 			compFloat[c][i] = float64(v)
-		}
-	}
-
-	// Apply inverse MCT in float
-	if h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
-		if h.CodingStyle.IsReversible() {
-			// RCT: apply integer RCT then convert
-			mct.InverseRCT(componentData[0], componentData[1], componentData[2])
-			for c := 0; c < 3; c++ {
-				for i, v := range componentData[c] {
-					compFloat[c][i] = float64(v)
-				}
-			}
-		} else {
-			// ICT: apply directly on float data
-			mct.InverseICT(compFloat[0], compFloat[1], compFloat[2])
-		}
-	}
-
-	// Apply DC level shift in float
-	for c := 0; c < numComp; c++ {
-		if !h.ComponentInfo[c].IsSigned() {
-			mct.DCLevelShiftInverseFloat(compFloat[c], h.ComponentInfo[c].Precision())
 		}
 	}
 

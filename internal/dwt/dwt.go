@@ -472,6 +472,131 @@ func Inverse2D97(data []float64, width, height int) {
 	}
 }
 
+// Forward53_32bit performs the forward 5-3 reversible wavelet transform
+// with overflow-safe 64-bit intermediate arithmetic for 32-bit data.
+func Forward53_32bit(data []int32, length int) {
+	if length < 2 {
+		return
+	}
+
+	// Step 1: Update odd samples (high-pass) using int64 intermediates
+	for i := 1; i < length-1; i += 2 {
+		data[i] -= int32((int64(data[i-1]) + int64(data[i+1])) >> 1)
+	}
+	if length&1 == 0 {
+		data[length-1] -= data[length-2]
+	}
+
+	// Step 2: Update even samples (low-pass) using int64 intermediates
+	data[0] += int32((int64(data[1]) + int64(data[1]) + 2) >> 2)
+	for i := 2; i < length-1; i += 2 {
+		data[i] += int32((int64(data[i-1]) + int64(data[i+1]) + 2) >> 2)
+	}
+	if length&1 != 0 {
+		data[length-1] += int32((int64(data[length-2]) + int64(data[length-2]) + 2) >> 2)
+	}
+
+	deinterleave(data, length)
+}
+
+// Inverse53_32bit performs the inverse 5-3 reversible wavelet transform
+// with overflow-safe 64-bit intermediate arithmetic for 32-bit data.
+func Inverse53_32bit(data []int32, length int) {
+	if length < 2 {
+		return
+	}
+
+	interleave(data, length)
+
+	// Step 1: Undo low-pass update
+	data[0] -= int32((int64(data[1]) + int64(data[1]) + 2) >> 2)
+	for i := 2; i < length-1; i += 2 {
+		data[i] -= int32((int64(data[i-1]) + int64(data[i+1]) + 2) >> 2)
+	}
+	if length&1 != 0 {
+		data[length-1] -= int32((int64(data[length-2]) + int64(data[length-2]) + 2) >> 2)
+	}
+
+	// Step 2: Undo high-pass update
+	for i := 1; i < length-1; i += 2 {
+		data[i] += int32((int64(data[i-1]) + int64(data[i+1])) >> 1)
+	}
+	if length&1 == 0 {
+		data[length-1] += data[length-2]
+	}
+}
+
+// Forward2D53_32bit performs a 2D forward 5-3 wavelet transform
+// with overflow-safe arithmetic for 32-bit data.
+func Forward2D53_32bit(data []int32, width, height int) {
+	// Transform rows
+	for y := 0; y < height; y++ {
+		Forward53_32bit(data[y*width:(y+1)*width], width)
+	}
+
+	// Transform columns
+	col := getIntBuf(height)
+	for x := 0; x < width; x++ {
+		for y := 0; y < height; y++ {
+			col[y] = data[y*width+x]
+		}
+		Forward53_32bit(col[:height], height)
+		for y := 0; y < height; y++ {
+			data[y*width+x] = col[y]
+		}
+	}
+	putIntBuf(col)
+}
+
+// Inverse2D53_32bit performs a 2D inverse 5-3 wavelet transform
+// with overflow-safe arithmetic for 32-bit data.
+func Inverse2D53_32bit(data []int32, width, height int) {
+	// Transform columns first (reverse order of forward)
+	col := getIntBuf(height)
+	for x := 0; x < width; x++ {
+		for y := 0; y < height; y++ {
+			col[y] = data[y*width+x]
+		}
+		Inverse53_32bit(col[:height], height)
+		for y := 0; y < height; y++ {
+			data[y*width+x] = col[y]
+		}
+	}
+	putIntBuf(col)
+
+	// Transform rows
+	for y := 0; y < height; y++ {
+		Inverse53_32bit(data[y*width:(y+1)*width], width)
+	}
+}
+
+// DecomposeMultiLevel53_32bit performs multi-level 2D wavelet decomposition
+// with overflow-safe arithmetic for 32-bit data.
+func DecomposeMultiLevel53_32bit(data []int32, width, height, levels int) {
+	w, h := width, height
+	for level := 0; level < levels; level++ {
+		Forward2D53_32bit(data, w, h)
+		w = (w + 1) / 2
+		h = (h + 1) / 2
+	}
+}
+
+// ReconstructMultiLevel53_32bit performs multi-level 2D wavelet reconstruction
+// with overflow-safe arithmetic for 32-bit data.
+func ReconstructMultiLevel53_32bit(data []int32, width, height, levels int) {
+	dims := make([]struct{ w, h int }, levels)
+	w, h := width, height
+	for level := 0; level < levels; level++ {
+		dims[level] = struct{ w, h int }{w, h}
+		w = (w + 1) / 2
+		h = (h + 1) / 2
+	}
+
+	for level := levels - 1; level >= 0; level-- {
+		Inverse2D53_32bit(data, dims[level].w, dims[level].h)
+	}
+}
+
 // SubbandBounds calculates the bounds for each subband at a resolution level.
 // Returns the x0, y0, x1, y1 for LL, HL, LH, HH subbands.
 type SubbandBounds struct {
