@@ -894,43 +894,6 @@ func TestClampInt32(t *testing.T) {
 	}
 }
 
-// Test byteReader
-func TestByteReader(t *testing.T) {
-	data := []byte{1, 2, 3, 4, 5}
-	r := &byteReader{data: data}
-
-	// Read partial
-	buf := make([]byte, 3)
-	n, err := r.Read(buf)
-	if err != nil {
-		t.Fatalf("Read() error: %v", err)
-	}
-	if n != 3 {
-		t.Errorf("Read() returned %d, want 3", n)
-	}
-	if buf[0] != 1 || buf[1] != 2 || buf[2] != 3 {
-		t.Errorf("Read() data mismatch")
-	}
-
-	// Read remaining
-	n, err = r.Read(buf)
-	if err != nil {
-		t.Fatalf("Read() error: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("Read() returned %d, want 2", n)
-	}
-
-	// Read at EOF
-	n, err = r.Read(buf)
-	if err == nil {
-		t.Error("Read() at EOF should return error")
-	}
-	if n != 0 {
-		t.Errorf("Read() at EOF returned %d, want 0", n)
-	}
-}
-
 // Test error cases
 func TestDecode_InvalidFormat(t *testing.T) {
 	// Invalid data (not J2K or JP2)

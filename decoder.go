@@ -2,6 +2,7 @@ package jpeg2000
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"image"
@@ -88,46 +89,8 @@ func (d *decoder) readMetadata() (*Metadata, error) {
 	}
 
 	// Get color space from JP2 header if available
+	m.ColorSpace = d.getColorSpace()
 	if d.jp2Header != nil && d.jp2Header.ColorSpec != nil {
-		switch d.jp2Header.ColorSpec.EnumeratedColorspace {
-		case box.CSBilevel1, box.CSBilevel2:
-			m.ColorSpace = ColorSpaceBilevel
-		case box.CSGray:
-			m.ColorSpace = ColorSpaceGray
-		case box.CSSRGB:
-			m.ColorSpace = ColorSpaceSRGB
-		case box.CSYCbCr1, box.CSsYCC:
-			m.ColorSpace = ColorSpaceSYCC
-		case box.CSYCbCr2:
-			m.ColorSpace = ColorSpaceYCbCr2
-		case box.CSYCbCr3:
-			m.ColorSpace = ColorSpaceYCbCr3
-		case box.CSPhotoYCC:
-			m.ColorSpace = ColorSpacePhotoYCC
-		case box.CSCMY:
-			m.ColorSpace = ColorSpaceCMY
-		case box.CSCMYK:
-			m.ColorSpace = ColorSpaceCMYK
-		case box.CSYCCK:
-			m.ColorSpace = ColorSpaceYCCK
-		case box.CSCIELab:
-			m.ColorSpace = ColorSpaceCIELab
-		case box.CSCIEJab:
-			m.ColorSpace = ColorSpaceCIEJab
-		case box.CSeSRGB:
-			m.ColorSpace = ColorSpaceESRGB
-		case box.CSROMMRGB:
-			m.ColorSpace = ColorSpaceROMMRGB
-		case box.CSYPbPr1125:
-			m.ColorSpace = ColorSpaceYPbPr60
-		case box.CSYPbPr1250:
-			m.ColorSpace = ColorSpaceYPbPr50
-		case box.CSeSYCC:
-			m.ColorSpace = ColorSpaceEYCC
-		default:
-			// Unknown enumcs value - not supported
-			m.ColorSpace = ColorSpaceUnknown
-		}
 		m.ICCProfile = d.jp2Header.ColorSpec.ICCProfile
 	}
 
@@ -272,7 +235,7 @@ func (d *decoder) parseCodestream() error {
 		return fmt.Errorf("no codestream available")
 	}
 
-	parser := codestream.NewParser(&byteReader{data: d.codestream})
+	parser := codestream.NewParser(bytes.NewReader(d.codestream))
 	header, err := parser.ReadHeader()
 	if err != nil {
 		return err
@@ -840,21 +803,6 @@ func clampInt32(v, min, max int32) int32 {
 		return max
 	}
 	return v
-}
-
-// byteReader wraps a byte slice as an io.Reader.
-type byteReader struct {
-	data []byte
-	pos  int
-}
-
-func (r *byteReader) Read(p []byte) (int, error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
 }
 
 // decodeFloat decodes the image as a FloatImage.

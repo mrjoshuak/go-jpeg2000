@@ -1,6 +1,7 @@
 package jpeg2000
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
@@ -166,7 +167,7 @@ func (idx *PacketIndex) Len() int {
 // parseMainHeader parses the main header from a raw J2K codestream byte slice.
 // Returns the parsed header and the byte offset where the first tile-part begins.
 func parseMainHeader(cs []byte) (*codestream.Header, int, error) {
-	parser := codestream.NewParser(&byteReader{data: cs})
+	parser := codestream.NewParser(bytes.NewReader(cs))
 	header, err := parser.ReadHeader()
 	if err != nil {
 		return nil, 0, err
@@ -227,10 +228,10 @@ func (idx *PacketIndex) indexTilePackets(
 	tileX := int(tileIndex) % int(header.NumTilesX)
 	tileY := int(tileIndex) / int(header.NumTilesX)
 
-	tx0 := maxInt(int(header.TileXOffset)+tileX*int(header.TileWidth), int(header.ImageXOffset))
-	ty0 := maxInt(int(header.TileYOffset)+tileY*int(header.TileHeight), int(header.ImageYOffset))
-	tx1 := minInt(int(header.TileXOffset)+(tileX+1)*int(header.TileWidth), int(header.ImageWidth))
-	ty1 := minInt(int(header.TileYOffset)+(tileY+1)*int(header.TileHeight), int(header.ImageHeight))
+	tx0 := max(int(header.TileXOffset)+tileX*int(header.TileWidth), int(header.ImageXOffset))
+	ty0 := max(int(header.TileYOffset)+tileY*int(header.TileHeight), int(header.ImageYOffset))
+	tx1 := min(int(header.TileXOffset)+(tileX+1)*int(header.TileWidth), int(header.ImageWidth))
+	ty1 := min(int(header.TileYOffset)+(tileY+1)*int(header.TileHeight), int(header.ImageHeight))
 
 	tileWidth := tx1 - tx0
 	tileHeight := ty1 - ty0
@@ -496,18 +497,4 @@ func ceilDivInt(a, b int) int {
 		return 0
 	}
 	return (a + b - 1) / b
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

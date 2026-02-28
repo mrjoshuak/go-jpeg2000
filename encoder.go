@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
-	"image/color"
+
 	"io"
 	"math"
 	"runtime"
@@ -111,7 +111,7 @@ func (e *encoder) extractImageData() error {
 		}
 
 	case *image.RGBA:
-		e.numComponents = 3 // We'll ignore alpha for now
+		e.numComponents = 3 // Alpha channel not encoded
 		e.precision = 8
 		e.componentData = make([][]int32, 3)
 		for c := 0; c < 3; c++ {
@@ -1092,9 +1092,3 @@ func (e *encoder) writeJP2(codestream []byte) error {
 	return nil
 }
 
-// Ensure encoder implements required interfaces
-var _ color.Model = (*encoder)(nil).colorModel()
-
-func (e *encoder) colorModel() color.Model {
-	return nil
-}

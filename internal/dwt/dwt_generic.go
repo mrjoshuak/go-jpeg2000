@@ -2,9 +2,6 @@
 
 package dwt
 
-// useSIMD indicates SIMD is not available on this platform
-const useSIMD = false
-
 // Forward53Fast falls back to the standard implementation on non-SIMD platforms.
 func Forward53Fast(data []int32, length int) {
 	Forward53(data, length)

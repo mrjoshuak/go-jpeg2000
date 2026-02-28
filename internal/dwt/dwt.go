@@ -644,8 +644,7 @@ func Dequantize(data []int32, stepSize float64) []float64 {
 	return result
 }
 
-// DecomposeMultiLevel performs multi-level 2D wavelet decomposition.
-// Returns coefficient data organized by resolution level.
+// DecomposeMultiLevel53 performs multi-level 2D 5/3 wavelet decomposition in-place.
 func DecomposeMultiLevel53(data []int32, width, height, levels int) {
 	w, h := width, height
 	for level := 0; level < levels; level++ {

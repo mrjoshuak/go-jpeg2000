@@ -19,9 +19,6 @@ func liftStep2_53_avx(data []int32, length int)
 //go:noescape
 func clearInt32Slice_avx(data []int32)
 
-// useSIMD indicates SIMD is available on this platform
-const useSIMD = true
-
 // Forward53Fast performs optimized forward 5-3 transform using AVX.
 func Forward53Fast(data []int32, length int) {
 	if length < 2 {

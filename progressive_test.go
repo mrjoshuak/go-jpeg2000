@@ -54,7 +54,7 @@ func makeGrayImage(w, h int) *image.Gray {
 func makeRGBImage(w, h int) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
-		for x := 0; x < 16; x++ {
+		for x := 0; x < w; x++ {
 			img.SetRGBA(x, y, color.RGBA{
 				R: uint8(x * 16),
 				G: uint8(y * 16),

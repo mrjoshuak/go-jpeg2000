@@ -15,5 +15,3 @@ func clearFlagsFast(flags []T1Flags) {
 	clearFlags_neon(flags)
 }
 
-// useSIMD indicates SIMD is available for entropy coding
-const useSIMD = true

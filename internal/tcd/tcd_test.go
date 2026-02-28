@@ -33,50 +33,6 @@ func TestCeilDiv(t *testing.T) {
 	}
 }
 
-// TestMin tests the min helper function.
-func TestMin(t *testing.T) {
-	tests := []struct {
-		a, b     int
-		expected int
-	}{
-		{1, 2, 1},
-		{2, 1, 1},
-		{0, 0, 0},
-		{-1, 1, -1},
-		{100, 50, 50},
-		{-100, -50, -100},
-	}
-
-	for _, tt := range tests {
-		result := min(tt.a, tt.b)
-		if result != tt.expected {
-			t.Errorf("min(%d, %d) = %d; want %d", tt.a, tt.b, result, tt.expected)
-		}
-	}
-}
-
-// TestMax tests the max helper function.
-func TestMax(t *testing.T) {
-	tests := []struct {
-		a, b     int
-		expected int
-	}{
-		{1, 2, 2},
-		{2, 1, 2},
-		{0, 0, 0},
-		{-1, 1, 1},
-		{100, 50, 100},
-		{-100, -50, -50},
-	}
-
-	for _, tt := range tests {
-		result := max(tt.a, tt.b)
-		if result != tt.expected {
-			t.Errorf("max(%d, %d) = %d; want %d", tt.a, tt.b, result, tt.expected)
-		}
-	}
-}
-
 // TestNewTagTree tests TagTree creation.
 func TestNewTagTree(t *testing.T) {
 	tests := []struct {

@@ -9,5 +9,3 @@ func clearFlagsFast(flags []T1Flags) {
 	}
 }
 
-// useSIMD indicates SIMD is not available for entropy coding
-const useSIMD = false

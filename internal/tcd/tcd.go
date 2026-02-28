@@ -629,17 +629,3 @@ func (e *TileEncoder) EncodeCodeBlock(cb *CodeBlock, data []int32, bandType int)
 func ceilDiv(a, b int) int {
 	return (a + b - 1) / b
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
