@@ -129,8 +129,18 @@ func (r *Reader) ReadBox() (*Box, error) {
 		headerLen = 16
 		r.offset += 8
 	} else if length == 0 {
-		// Box extends to end of file - we can't handle this without seeking
-		return nil, errors.New("box extends to EOF not supported")
+		// Box extends to end of file — read all remaining data
+		contents, err := io.ReadAll(r.r)
+		if err != nil {
+			return nil, fmt.Errorf("reading box to EOF: %w", err)
+		}
+		totalLen := uint64(8) + uint64(len(contents))
+		r.offset += int64(len(contents))
+		return &Box{
+			Type:     boxType,
+			Length:   totalLen,
+			Contents: contents,
+		}, nil
 	}
 
 	if length < headerLen {

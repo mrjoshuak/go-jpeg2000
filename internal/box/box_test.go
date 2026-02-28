@@ -427,15 +427,44 @@ func TestReader_ReadBox_TruncatedHeader(t *testing.T) {
 }
 
 func TestReader_ReadBox_ZeroLength(t *testing.T) {
-	// Length = 0 means box extends to EOF (not supported)
+	// Length = 0 means box extends to EOF
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint32(0)) // Length = 0
+	binary.Write(&buf, binary.BigEndian, uint32(TypeFileType))
+	buf.Write([]byte{0x01, 0x02, 0x03, 0x04}) // Remaining data
+
+	r := NewReader(&buf)
+	box, err := r.ReadBox()
+	if err != nil {
+		t.Fatalf("ReadBox() error: %v", err)
+	}
+	if box.Type != TypeFileType {
+		t.Errorf("Type = %v, want %v", box.Type, TypeFileType)
+	}
+	if box.Length != 12 { // 8 (header) + 4 (contents)
+		t.Errorf("Length = %d, want 12", box.Length)
+	}
+	if len(box.Contents) != 4 {
+		t.Errorf("Contents length = %d, want 4", len(box.Contents))
+	}
+}
+
+func TestReader_ReadBox_ZeroLengthEmpty(t *testing.T) {
+	// Length = 0 with no remaining data after header
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.BigEndian, uint32(0)) // Length = 0
 	binary.Write(&buf, binary.BigEndian, uint32(TypeFileType))
 
 	r := NewReader(&buf)
-	_, err := r.ReadBox()
-	if err == nil {
-		t.Error("ReadBox() expected error for zero length box")
+	box, err := r.ReadBox()
+	if err != nil {
+		t.Fatalf("ReadBox() error: %v", err)
+	}
+	if box.Length != 8 { // header only
+		t.Errorf("Length = %d, want 8", box.Length)
+	}
+	if len(box.Contents) != 0 {
+		t.Errorf("Contents length = %d, want 0", len(box.Contents))
 	}
 }
 
