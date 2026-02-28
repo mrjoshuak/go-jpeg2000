@@ -272,29 +272,44 @@ func TestConvertEYCCToRGB(t *testing.T) {
 func TestColorConversionEdgeCases(t *testing.T) {
 	t.Run("empty_data", func(t *testing.T) {
 		componentData := [][]int32{}
-		// Should not panic
 		convertSYCCToRGB(componentData, 8)
 		convertCMYToRGB(componentData, 8)
 		convertCMYKToRGB(componentData, 8)
+		if len(componentData) != 0 {
+			t.Error("empty data should remain empty")
+		}
 	})
 
 	t.Run("insufficient_components", func(t *testing.T) {
 		componentData := [][]int32{{128}, {128}} // Only 2 components
-		// Should not panic, just return without conversion
 		convertSYCCToRGB(componentData, 8)
+		if componentData[0][0] != 128 || componentData[1][0] != 128 {
+			t.Error("insufficient components: data should be unchanged")
+		}
 		convertCMYToRGB(componentData, 8)
+		if componentData[0][0] != 128 || componentData[1][0] != 128 {
+			t.Error("insufficient components: data should be unchanged")
+		}
 	})
 
 	t.Run("16bit_precision", func(t *testing.T) {
+		// sYCC neutral at 16-bit: Y=32768, Cb=32768, Cr=32768
+		// Neutral gray should produce R≈G≈B≈32768
 		componentData := [][]int32{
-			{32768}, // Mid value for 16-bit
+			{32768},
 			{32768},
 			{32768},
 		}
 		convertSYCCToRGB(componentData, 16)
-		// Should handle 16-bit precision
-		if componentData[0][0] < 0 || componentData[0][0] > 65535 {
-			t.Errorf("R = %d, want 0-65535", componentData[0][0])
+		r, g, b := componentData[0][0], componentData[1][0], componentData[2][0]
+		if abs(r-32768) > 100 {
+			t.Errorf("R = %d, want ~32768", r)
+		}
+		if abs(g-32768) > 100 {
+			t.Errorf("G = %d, want ~32768", g)
+		}
+		if abs(b-32768) > 100 {
+			t.Errorf("B = %d, want ~32768", b)
 		}
 	})
 }
@@ -391,7 +406,10 @@ func TestSRGBInverseGamma(t *testing.T) {
 func TestConvertPhotoYCCToRGB(t *testing.T) {
 	precision := 8
 
-	// PhotoYCC with neutral values (Y=128, C1=156, C2=156 is neutral)
+	// PhotoYCC neutral: Y=128, C1=156 (offset), C2=156 (offset)
+	// c1 = 128/1*1 - 156 = -28, c2 = 128/1*1 - 156 = -28
+	// Actually at neutral: C1=C2=156 means c1=0, c2=0 after offset
+	// So R = G = B = Y = 128
 	componentData := [][]int32{
 		{128}, // Y
 		{156}, // C1 (neutral offset)
@@ -400,37 +418,48 @@ func TestConvertPhotoYCCToRGB(t *testing.T) {
 
 	convertPhotoYCCToRGB(componentData, precision)
 
-	// Result should be valid RGB values
-	if componentData[0][0] < 0 || componentData[0][0] > 255 {
-		t.Errorf("R = %d, want 0-255", componentData[0][0])
+	r, g, b := componentData[0][0], componentData[1][0], componentData[2][0]
+	// Neutral PhotoYCC should yield approximately equal R, G, B
+	if abs(r-128) > 5 {
+		t.Errorf("R = %d, want ~128 for neutral PhotoYCC", r)
 	}
-	if componentData[1][0] < 0 || componentData[1][0] > 255 {
-		t.Errorf("G = %d, want 0-255", componentData[1][0])
+	if abs(g-128) > 5 {
+		t.Errorf("G = %d, want ~128 for neutral PhotoYCC", g)
 	}
-	if componentData[2][0] < 0 || componentData[2][0] > 255 {
-		t.Errorf("B = %d, want 0-255", componentData[2][0])
+	if abs(b-128) > 5 {
+		t.Errorf("B = %d, want ~128 for neutral PhotoYCC", b)
+	}
+	// R, G, B should be nearly equal for a gray input
+	if abs(r-g) > 3 {
+		t.Errorf("R-G = %d, neutral should be gray", r-g)
 	}
 }
 
 func TestConvertYCCKToRGB(t *testing.T) {
 	precision := 8
 
-	// YCCK with neutral YCC and no black
+	// YCCK neutral with K=0: same as PhotoYCC neutral → R≈G≈B≈128
 	componentData := [][]int32{
 		{128}, // Y
-		{156}, // C1
-		{156}, // C2
+		{156}, // C1 (neutral offset)
+		{156}, // C2 (neutral offset)
 		{0},   // K (no black)
 	}
 
 	convertYCCKToRGB(componentData, precision)
 
-	// Result should be valid RGB values
-	if componentData[0][0] < 0 || componentData[0][0] > 255 {
-		t.Errorf("R = %d, want 0-255", componentData[0][0])
+	r, g, b := componentData[0][0], componentData[1][0], componentData[2][0]
+	if abs(r-128) > 5 {
+		t.Errorf("R = %d, want ~128 for neutral YCCK K=0", r)
+	}
+	if abs(g-128) > 5 {
+		t.Errorf("G = %d, want ~128 for neutral YCCK K=0", g)
+	}
+	if abs(b-128) > 5 {
+		t.Errorf("B = %d, want ~128 for neutral YCCK K=0", b)
 	}
 
-	// With K=255 (full black), should give black
+	// K=255 (full black): all channels should be 0
 	componentData = [][]int32{
 		{128},
 		{156},
@@ -441,14 +470,21 @@ func TestConvertYCCKToRGB(t *testing.T) {
 	convertYCCKToRGB(componentData, precision)
 
 	if componentData[0][0] != 0 {
-		t.Errorf("R = %d, want 0 (black)", componentData[0][0])
+		t.Errorf("R = %d, want 0 (full black)", componentData[0][0])
+	}
+	if componentData[1][0] != 0 {
+		t.Errorf("G = %d, want 0 (full black)", componentData[1][0])
+	}
+	if componentData[2][0] != 0 {
+		t.Errorf("B = %d, want 0 (full black)", componentData[2][0])
 	}
 }
 
 func TestConvertCIEJabToRGB(t *testing.T) {
 	precision := 8
 
-	// CIEJab with neutral values
+	// CIEJab neutral: J=128 (≈50% lightness), a=128 (0 after offset), b=128 (0 after offset)
+	// Should produce approximately neutral gray: R≈G≈B
 	componentData := [][]int32{
 		{128}, // J
 		{128}, // a (neutral)
@@ -457,24 +493,25 @@ func TestConvertCIEJabToRGB(t *testing.T) {
 
 	convertCIEJabToRGB(componentData, precision)
 
-	// Result should be approximately gray
 	r := componentData[0][0]
 	g := componentData[1][0]
 	b := componentData[2][0]
 
-	if r < 0 || r > 255 {
-		t.Errorf("R = %d, want 0-255", r)
+	// R, G, B should all be similar (neutral gray)
+	// CIEJab→RGB is an approximation (simplified CIECAM02), so allow wider tolerance
+	if abs(r-g) > 25 {
+		t.Errorf("R=%d G=%d differ by %d, neutral CIEJab should be gray", r, g, abs(r-g))
 	}
-	if g < 0 || g > 255 {
-		t.Errorf("G = %d, want 0-255", g)
+	if abs(g-b) > 25 {
+		t.Errorf("G=%d B=%d differ by %d, neutral CIEJab should be gray", g, b, abs(g-b))
 	}
-	if b < 0 || b > 255 {
-		t.Errorf("B = %d, want 0-255", b)
+	// Mid-lightness should produce mid-range values (not black or white)
+	if r < 50 || r > 200 {
+		t.Errorf("R = %d, mid-lightness CIEJab should be mid-range", r)
 	}
 }
 
 func TestColorConversionInsufficientComponents(t *testing.T) {
-	// Test that functions handle insufficient components gracefully
 	precision := 8
 
 	tests := []struct {
@@ -490,16 +527,24 @@ func TestColorConversionInsufficientComponents(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name+"_empty", func(t *testing.T) {
 			componentData := [][]int32{}
-			tt.conv(componentData, precision) // Should not panic
+			tt.conv(componentData, precision)
+			if len(componentData) != 0 {
+				t.Error("empty data should remain empty after guard return")
+			}
 		})
 
 		t.Run(tt.name+"_insufficient", func(t *testing.T) {
-			// Create data with one less component than needed
 			componentData := make([][]int32, tt.need-1)
 			for i := range componentData {
 				componentData[i] = []int32{128}
 			}
-			tt.conv(componentData, precision) // Should not panic
+			tt.conv(componentData, precision)
+			// Data should be unchanged when guard triggers early return
+			for i, comp := range componentData {
+				if comp[0] != 128 {
+					t.Errorf("component %d changed from 128 to %d; should be unchanged", i, comp[0])
+				}
+			}
 		})
 	}
 }

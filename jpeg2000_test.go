@@ -74,7 +74,6 @@ func TestProgressionOrder_String(t *testing.T) {
 }
 
 func TestEncodeGray(t *testing.T) {
-	// Create a simple 8x8 grayscale image
 	img := image.NewGray(image.Rect(0, 0, 8, 8))
 	for y := 0; y < 8; y++ {
 		for x := 0; x < 8; x++ {
@@ -85,19 +84,35 @@ func TestEncodeGray(t *testing.T) {
 	var buf bytes.Buffer
 	opts := DefaultOptions()
 	opts.Lossless = true
+	opts.Format = FormatJ2K
 
-	err := Encode(&buf, img, opts)
-	if err != nil {
+	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
 
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Fatalf("decoded dimensions = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
+	}
+
+	// Lossless roundtrip: every pixel must match
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			origR, _, _, _ := img.At(x, y).RGBA()
+			decR, _, _, _ := decoded.At(x, y).RGBA()
+			if origR != decR {
+				t.Errorf("pixel (%d,%d): got %d, want %d", x, y, decR>>8, origR>>8)
+			}
+		}
 	}
 }
 
 func TestEncodeRGBA(t *testing.T) {
-	// Create a simple 8x8 RGBA image
 	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
 	for y := 0; y < 8; y++ {
 		for x := 0; x < 8; x++ {
@@ -112,14 +127,33 @@ func TestEncodeRGBA(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
+	opts.Lossless = true
 
-	err := Encode(&buf, img, opts)
-	if err != nil {
+	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
 
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Fatalf("decoded dimensions = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
+	}
+
+	// Verify lossless RGB roundtrip
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			oR, oG, oB, _ := img.At(x, y).RGBA()
+			dR, dG, dB, _ := decoded.At(x, y).RGBA()
+			if oR != dR || oG != dG || oB != dB {
+				t.Errorf("pixel (%d,%d): got (%d,%d,%d), want (%d,%d,%d)",
+					x, y, dR>>8, dG>>8, dB>>8, oR>>8, oG>>8, oB>>8)
+			}
+		}
 	}
 }
 
@@ -130,15 +164,22 @@ func TestEncode_J2KFormat(t *testing.T) {
 	opts := DefaultOptions()
 	opts.Format = FormatJ2K
 
-	err := Encode(&buf, img, opts)
-	if err != nil {
+	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
 
-	// J2K starts with SOC marker (0xFF 0x4F)
 	data := buf.Bytes()
-	if len(data) < 2 || data[0] != 0xFF || data[1] != 0x4F {
+	// J2K starts with SOC marker (0xFF4F)
+	if len(data) < 4 || data[0] != 0xFF || data[1] != 0x4F {
 		t.Error("J2K output should start with SOC marker")
+	}
+	// J2K ends with EOC marker (0xFFD9)
+	if data[len(data)-2] != 0xFF || data[len(data)-1] != 0xD9 {
+		t.Error("J2K output should end with EOC marker")
+	}
+	// SIZ marker (0xFF51) should follow SOC
+	if data[2] != 0xFF || data[3] != 0x51 {
+		t.Error("SIZ marker should follow SOC")
 	}
 }
 
@@ -149,20 +190,23 @@ func TestEncode_JP2Format(t *testing.T) {
 	opts := DefaultOptions()
 	opts.Format = FormatJP2
 
-	err := Encode(&buf, img, opts)
-	if err != nil {
+	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
 
-	// JP2 starts with signature box
 	data := buf.Bytes()
-	if len(data) < 12 {
+	if len(data) < 20 {
 		t.Fatal("JP2 output too short")
 	}
 
-	// Check JP2 signature
+	// JP2 signature box: 12-byte box with "jP  " type
 	if data[4] != 'j' || data[5] != 'P' || data[6] != ' ' || data[7] != ' ' {
 		t.Error("JP2 output should have jP signature box")
+	}
+	// File type box follows signature: type = "ftyp"
+	// First box length is 12, so ftyp starts at offset 12
+	if data[16] != 'f' || data[17] != 't' || data[18] != 'y' || data[19] != 'p' {
+		t.Error("JP2 output should have ftyp box after signature")
 	}
 }
 
@@ -174,58 +218,101 @@ func TestEncode_WithComment(t *testing.T) {
 	opts.Format = FormatJ2K
 	opts.Comment = "Test comment"
 
-	err := Encode(&buf, img, opts)
-	if err != nil {
+	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
 
-	// Comment should be in the output
-	if !bytes.Contains(buf.Bytes(), []byte("Test comment")) {
-		t.Error("Output should contain comment")
+	data := buf.Bytes()
+	// Find COM marker (0xFF64) in the codestream
+	comFound := false
+	for i := 0; i < len(data)-1; i++ {
+		if data[i] == 0xFF && data[i+1] == 0x64 {
+			comFound = true
+			// COM marker body should contain the comment text
+			if i+4 < len(data) {
+				comLen := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
+				comBody := data[i+4 : i+2+comLen]
+				// Registration value is 2 bytes, then the comment text
+				if len(comBody) >= 2 && !bytes.Contains(comBody[2:], []byte("Test comment")) {
+					t.Error("COM marker body does not contain expected comment text")
+				}
+			}
+			break
+		}
+	}
+	if !comFound {
+		t.Error("COM marker (0xFF64) not found in codestream")
 	}
 }
 
 func TestEncode_LosslessOption(t *testing.T) {
-	img := image.NewGray(image.Rect(0, 0, 8, 8))
+	img := image.NewGray(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetGray(x, y, color.Gray{Y: uint8((x*17 + y*31) % 256)})
+		}
+	}
 
-	// Lossless encoding
+	// Lossless: roundtrip must be perfect
 	var lossless bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.Lossless = true
-	err := Encode(&lossless, img, opts)
-	if err != nil {
+	if err := Encode(&lossless, img, opts); err != nil {
 		t.Fatalf("Lossless Encode() error: %v", err)
 	}
 
-	// Lossy encoding
+	decoded, err := Decode(bytes.NewReader(lossless.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			oR, _, _, _ := img.At(x, y).RGBA()
+			dR, _, _, _ := decoded.At(x, y).RGBA()
+			if oR != dR {
+				t.Fatalf("lossless pixel (%d,%d) mismatch: got %d, want %d", x, y, dR>>8, oR>>8)
+			}
+		}
+	}
+
+	// Lossy and lossless should produce different encoded sizes
 	var lossy bytes.Buffer
 	opts.Lossless = false
 	opts.Quality = 50
-	err = Encode(&lossy, img, opts)
-	if err != nil {
+	if err := Encode(&lossy, img, opts); err != nil {
 		t.Fatalf("Lossy Encode() error: %v", err)
 	}
 
-	// Both should produce output
-	if lossless.Len() == 0 {
-		t.Error("Lossless encoding produced empty output")
-	}
-	if lossy.Len() == 0 {
-		t.Error("Lossy encoding produced empty output")
+	if lossless.Len() == lossy.Len() {
+		t.Errorf("lossless (%d bytes) and lossy (%d bytes) should differ in size",
+			lossless.Len(), lossy.Len())
 	}
 }
 
 func TestEncodeNilOptions(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.SetGray(x, y, color.Gray{Y: uint8(x + y*8)})
+		}
+	}
 
 	var buf bytes.Buffer
-	err := Encode(&buf, img, nil)
-	if err != nil {
+	if err := Encode(&buf, img, nil); err != nil {
 		t.Fatalf("Encode() with nil options error: %v", err)
 	}
 
-	if buf.Len() == 0 {
-		t.Error("Encode() with nil options produced empty output")
+	// Nil options should use defaults (JP2 format, lossless=false by default)
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Errorf("decoded dimensions = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
 	}
 }
 
@@ -676,13 +763,22 @@ func TestEncode_Gray16(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	meta, err := DecodeMetadata(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("DecodeMetadata() error: %v", err)
+	}
+	if meta.BitsPerComponent[0] != 16 {
+		t.Errorf("BitsPerComponent = %d, want 16", meta.BitsPerComponent[0])
+	}
+	if meta.NumComponents != 1 {
+		t.Errorf("NumComponents = %d, want 1", meta.NumComponents)
 	}
 }
 
@@ -701,13 +797,22 @@ func TestEncode_RGBA64(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	meta, err := DecodeMetadata(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("DecodeMetadata() error: %v", err)
+	}
+	if meta.NumComponents != 3 {
+		t.Errorf("NumComponents = %d, want 3", meta.NumComponents)
+	}
+	if meta.BitsPerComponent[0] != 16 {
+		t.Errorf("BitsPerComponent = %d, want 16", meta.BitsPerComponent[0])
 	}
 }
 
@@ -726,30 +831,45 @@ func TestEncode_NRGBA(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Errorf("decoded dimensions = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
 	}
 }
 
 // Test generic image type (non-standard)
 func TestEncode_GenericImage(t *testing.T) {
-	// Use image.YCbCr as a generic image type that falls through to default
 	img := image.NewYCbCr(image.Rect(0, 0, 8, 8), image.YCbCrSubsampleRatio444)
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Errorf("decoded dimensions = %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
 	}
 }
 
@@ -844,14 +964,23 @@ func TestEncode_WithTileSize(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.TileSize = image.Point{X: 32, Y: 32}
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	meta, err := DecodeMetadata(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("DecodeMetadata() error: %v", err)
+	}
+	if meta.TileWidth != 32 || meta.TileHeight != 32 {
+		t.Errorf("tile dimensions = %dx%d, want 32x32", meta.TileWidth, meta.TileHeight)
+	}
+	if meta.NumTilesX != 2 || meta.NumTilesY != 2 {
+		t.Errorf("tile grid = %dx%d, want 2x2", meta.NumTilesX, meta.NumTilesY)
 	}
 }
 
@@ -860,6 +989,7 @@ func TestEncode_WithSOPEPH(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.EnableSOP = true
 	opts.EnableEPH = true
 	opts.Lossless = true
@@ -867,8 +997,15 @@ func TestEncode_WithSOPEPH(t *testing.T) {
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	// SOP and EPH should be decodable — verify roundtrip
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+	if decoded.Bounds().Dx() != 8 || decoded.Bounds().Dy() != 8 {
+		t.Errorf("decoded dimensions = %dx%d, want 8x8",
+			decoded.Bounds().Dx(), decoded.Bounds().Dy())
 	}
 }
 
@@ -876,54 +1013,81 @@ func TestEncode_WithDifferentProgressionOrders(t *testing.T) {
 	orders := []ProgressionOrder{LRCP, RLCP, RPCL, PCRL, CPRL}
 
 	for _, order := range orders {
-		img := image.NewGray(image.Rect(0, 0, 8, 8))
+		t.Run(order.String(), func(t *testing.T) {
+			img := image.NewGray(image.Rect(0, 0, 8, 8))
 
-		var buf bytes.Buffer
-		opts := DefaultOptions()
-		opts.ProgressionOrder = order
-		opts.Lossless = true
+			var buf bytes.Buffer
+			opts := DefaultOptions()
+			opts.Format = FormatJ2K
+			opts.ProgressionOrder = order
+			opts.Lossless = true
 
-		if err := Encode(&buf, img, opts); err != nil {
-			t.Fatalf("Encode() with %s error: %v", order, err)
-		}
-		if buf.Len() == 0 {
-			t.Errorf("Encode() with %s produced empty output", order)
-		}
+			if err := Encode(&buf, img, opts); err != nil {
+				t.Fatalf("Encode() error: %v", err)
+			}
+
+			// Verify the COD marker records the correct progression order
+			progOrder, found := findCODProgressionOrder(buf.Bytes())
+			if !found {
+				t.Fatal("COD marker not found")
+			}
+			if progOrder != int(order) {
+				t.Errorf("COD progression order = %d, want %d", progOrder, int(order))
+			}
+		})
 	}
 }
 
 func TestEncode_WithNumResolutions(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 64, 64))
 
-	// Test different resolution levels
 	for numRes := 1; numRes <= 4; numRes++ {
 		var buf bytes.Buffer
 		opts := DefaultOptions()
+		opts.Format = FormatJ2K
 		opts.NumResolutions = numRes
 		opts.Lossless = true
 
 		if err := Encode(&buf, img, opts); err != nil {
 			t.Fatalf("Encode() with NumResolutions=%d error: %v", numRes, err)
 		}
-		if buf.Len() == 0 {
-			t.Errorf("Encode() with NumResolutions=%d produced empty output", numRes)
+
+		meta, err := DecodeMetadata(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("DecodeMetadata() error: %v", err)
+		}
+		if meta.NumResolutions != numRes {
+			t.Errorf("NumResolutions=%d: metadata reports %d", numRes, meta.NumResolutions)
 		}
 	}
 }
 
 func TestEncode_WithCodeBlockSize(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			img.SetGray(x, y, color.Gray{Y: uint8((x + y) % 256)})
+		}
+	}
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.CodeBlockSize = image.Point{X: 5, Y: 5} // 32x32 code blocks
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	// Verify roundtrip with non-default code block size
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode() error: %v", err)
+	}
+	if decoded.Bounds().Dx() != 64 || decoded.Bounds().Dy() != 64 {
+		t.Errorf("decoded dimensions = %dx%d, want 64x64",
+			decoded.Bounds().Dx(), decoded.Bounds().Dy())
 	}
 }
 
@@ -932,39 +1096,59 @@ func TestEncode_WithNumLayers(t *testing.T) {
 
 	var buf bytes.Buffer
 	opts := DefaultOptions()
+	opts.Format = FormatJ2K
 	opts.NumLayers = 3
 	opts.Lossless = true
 
 	if err := Encode(&buf, img, opts); err != nil {
 		t.Fatalf("Encode() error: %v", err)
 	}
-	if buf.Len() == 0 {
-		t.Error("Encode() produced empty output")
+
+	meta, err := DecodeMetadata(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("DecodeMetadata() error: %v", err)
+	}
+	if meta.NumQualityLayers != 3 {
+		t.Errorf("NumQualityLayers = %d, want 3", meta.NumQualityLayers)
 	}
 }
 
 // Test lossy encoding with different quality values
 func TestEncode_LossyQuality(t *testing.T) {
-	img := image.NewGray(image.Rect(0, 0, 8, 8))
-	for y := 0; y < 8; y++ {
-		for x := 0; x < 8; x++ {
-			img.SetGray(x, y, color.Gray{Y: uint8(x*16 + y*16)})
+	img := image.NewGray(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			img.SetGray(x, y, color.Gray{Y: uint8((x*17 + y*31) % 256)})
 		}
 	}
 
 	qualities := []int{10, 50, 90}
-	for _, q := range qualities {
+	sizes := make([]int, len(qualities))
+	for i, q := range qualities {
 		var buf bytes.Buffer
 		opts := DefaultOptions()
+		opts.Format = FormatJ2K
 		opts.Lossless = false
 		opts.Quality = q
 
 		if err := Encode(&buf, img, opts); err != nil {
 			t.Fatalf("Encode() with quality=%d error: %v", q, err)
 		}
-		if buf.Len() == 0 {
-			t.Errorf("Encode() with quality=%d produced empty output", q)
+		sizes[i] = buf.Len()
+
+		// Verify decodable
+		decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("Decode() with quality=%d error: %v", q, err)
 		}
+		if decoded.Bounds().Dx() != 32 || decoded.Bounds().Dy() != 32 {
+			t.Errorf("quality=%d: decoded dimensions wrong", q)
+		}
+	}
+
+	// Higher quality should produce larger (or equal) output
+	if sizes[2] < sizes[0] {
+		t.Errorf("quality 90 (%d bytes) should be >= quality 10 (%d bytes)", sizes[2], sizes[0])
 	}
 }
 

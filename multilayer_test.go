@@ -313,7 +313,7 @@ func TestMultiLayer_RateDistribution(t *testing.T) {
 }
 
 // TestMultiLayer_ValidProgressiveBitstream verifies that truncated
-// codestreams can still be decoded without error.
+// codestreams can still be decoded and produce valid image dimensions.
 func TestMultiLayer_ValidProgressiveBitstream(t *testing.T) {
 	original := createTestGrayImage(64, 64)
 
@@ -349,11 +349,18 @@ func TestMultiLayer_ValidProgressiveBitstream(t *testing.T) {
 	}
 
 	dataLen := eocPos - sodPos
-	t.Logf("Tile data: %d bytes (from offset %d to %d)", dataLen, sodPos, eocPos)
 
-	// Truncate at various points and verify the decoder doesn't crash.
-	// The current decoder has a simplified tile decode path, so truncation
-	// is tolerated because it doesn't actually parse the tile data bytes.
+	// Full decode should succeed and match dimensions
+	fullDecoded, err := Decode(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatalf("Full decode error: %v", err)
+	}
+	if fullDecoded.Bounds().Dx() != 64 || fullDecoded.Bounds().Dy() != 64 {
+		t.Fatalf("Full decode dimensions = %dx%d, want 64x64",
+			fullDecoded.Bounds().Dx(), fullDecoded.Bounds().Dy())
+	}
+
+	// Truncated streams should either decode with correct dimensions or return an error
 	truncPoints := []float64{0.25, 0.50, 0.75}
 	for _, frac := range truncPoints {
 		truncLen := sodPos + int(float64(dataLen)*frac)
@@ -362,13 +369,14 @@ func TestMultiLayer_ValidProgressiveBitstream(t *testing.T) {
 		truncated[truncLen] = 0xFF
 		truncated[truncLen+1] = 0xD9
 
-		_, err := Decode(bytes.NewReader(truncated))
+		decoded, err := Decode(bytes.NewReader(truncated))
 		if err != nil {
-			// Log but don't fail - truncation tolerance depends on
-			// how much of the T2 decode path is implemented.
-			t.Logf("Decode at %.0f%% truncation: %v", frac*100, err)
-		} else {
-			t.Logf("Decode at %.0f%% truncation: OK", frac*100)
+			continue // truncation error is acceptable
+		}
+		// If it decodes, dimensions must still be correct
+		if decoded.Bounds().Dx() != 64 || decoded.Bounds().Dy() != 64 {
+			t.Errorf("Truncated %.0f%%: decoded dimensions = %dx%d, want 64x64",
+				frac*100, decoded.Bounds().Dx(), decoded.Bounds().Dy())
 		}
 	}
 }
@@ -487,11 +495,11 @@ func TestMultiLayer_DefaultLayerCount(t *testing.T) {
 }
 
 // TestMultiLayer_EncodeSizeVaries verifies that different layer counts
-// produce different encoded sizes (since the COD header differs).
+// produce different COD NumLayers values in the encoded bitstream.
 func TestMultiLayer_EncodeSizeVaries(t *testing.T) {
 	img := createTestGrayImage(32, 32)
 
-	encode := func(numLayers int) int {
+	encodeBytes := func(numLayers int) []byte {
 		var buf bytes.Buffer
 		opts := DefaultOptions()
 		opts.Format = FormatJ2K
@@ -500,20 +508,29 @@ func TestMultiLayer_EncodeSizeVaries(t *testing.T) {
 		if err := Encode(&buf, img, opts); err != nil {
 			t.Fatalf("Encode(NumLayers=%d) error: %v", numLayers, err)
 		}
-		return buf.Len()
+		return buf.Bytes()
 	}
 
-	size1 := encode(1)
-	size4 := encode(4)
+	data1 := encodeBytes(1)
+	data4 := encodeBytes(4)
 
-	t.Logf("Size with 1 layer: %d bytes", size1)
-	t.Logf("Size with 4 layers: %d bytes", size4)
-
-	// Both should produce valid output
-	if size1 == 0 {
-		t.Error("1-layer encoding produced empty output")
+	if len(data1) == 0 {
+		t.Fatal("1-layer encoding produced empty output")
 	}
-	if size4 == 0 {
-		t.Error("4-layer encoding produced empty output")
+	if len(data4) == 0 {
+		t.Fatal("4-layer encoding produced empty output")
+	}
+
+	// Verify COD markers report correct layer counts
+	nl1, ok1 := findCODNumLayers(data1)
+	nl4, ok4 := findCODNumLayers(data4)
+	if !ok1 || !ok4 {
+		t.Fatal("COD marker not found")
+	}
+	if nl1 != 1 {
+		t.Errorf("COD NumLayers = %d, want 1", nl1)
+	}
+	if nl4 != 4 {
+		t.Errorf("COD NumLayers = %d, want 4", nl4)
 	}
 }

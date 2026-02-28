@@ -113,58 +113,71 @@ func TestT1_EncodeSafe_AllZeros(t *testing.T) {
 func TestMQEncoder_Bytes(t *testing.T) {
 	enc := NewMQEncoder()
 
-	// Test with no data
 	if enc.Bytes() != nil {
 		t.Error("Bytes should return nil when bp=0")
 	}
 
-	// Encode some data
+	// Encode a known pattern
 	for i := 0; i < 100; i++ {
 		enc.Encode(0, i%2)
 	}
 
-	// Check bytes without flushing
-	bytes := enc.Bytes()
-	if bytes == nil {
-		t.Error("Bytes should return data after encoding")
+	b := enc.Bytes()
+	if b == nil {
+		t.Fatal("Bytes should return data after encoding")
+	}
+	if len(b) < 1 {
+		t.Error("encoded data should have at least 1 byte")
 	}
 }
 
-// Test MQEncoder byteOut with 0xFF handling
+// Test MQEncoder byteOut with 0xFF handling — verify roundtrip of all-1 bits
 func TestMQEncoder_ByteOut_0xFF(t *testing.T) {
-	// Create encoder and force situations that produce 0xFF bytes
 	enc := NewMQEncoder()
 
-	// Encode lots of 1s to generate 0xFF bytes
 	for i := 0; i < 500; i++ {
 		enc.Encode(0, 1)
 	}
 
 	data := enc.Flush()
 	if len(data) == 0 {
-		t.Error("expected encoded data")
+		t.Fatal("expected encoded data")
 	}
 
-	// Verify we can decode it
+	// Decode and verify all 500 bits are 1
 	dec := NewMQDecoder(data)
 	for i := 0; i < 500; i++ {
-		dec.Decode(0)
+		bit := dec.Decode(0)
+		if bit != 1 {
+			t.Errorf("bit %d: got %d, want 1", i, bit)
+			break
+		}
 	}
 }
 
-// Test MQEncoder byteOut with carry propagation
+// Test MQEncoder byteOut with carry propagation — verify roundtrip
 func TestMQEncoder_ByteOut_Carry(t *testing.T) {
 	enc := NewMQEncoder()
 
-	// Encode a specific pattern to trigger carry
-	// Alternating patterns with different contexts
-	for i := 0; i < 1000; i++ {
-		enc.Encode(i%5, (i*7)%2)
+	pattern := make([]int, 1000)
+	for i := range pattern {
+		pattern[i] = (i * 7) % 2
+		enc.Encode(i%5, pattern[i])
 	}
 
 	data := enc.Flush()
 	if len(data) == 0 {
-		t.Error("expected encoded data")
+		t.Fatal("expected encoded data")
+	}
+
+	// Decode and verify all bits match the pattern
+	dec := NewMQDecoder(data)
+	for i := 0; i < 1000; i++ {
+		bit := dec.Decode(i % 5)
+		if bit != pattern[i] {
+			t.Errorf("bit %d (ctx=%d): got %d, want %d", i, i%5, bit, pattern[i])
+			break
+		}
 	}
 }
 
@@ -185,56 +198,72 @@ func TestMQEncoder_Reset_EmptyCapacity(t *testing.T) {
 	}
 }
 
-// Test MQDecoder with empty data
+// Test MQDecoder with empty data returns deterministic result
 func TestMQDecoder_EmptyData(t *testing.T) {
 	dec := NewMQDecoder([]byte{})
 
-	// Should not panic
+	// Empty data should still return a valid bit (0 or 1)
 	result := dec.Decode(0)
-	// Result is non-deterministic but should not crash
-	_ = result
+	if result != 0 && result != 1 {
+		t.Errorf("Decode with empty data returned %d, want 0 or 1", result)
+	}
+
+	// Multiple decodes from empty should be consistent
+	result2 := dec.Decode(0)
+	if result2 != 0 && result2 != 1 {
+		t.Errorf("second Decode returned %d, want 0 or 1", result2)
+	}
 }
 
 // Test MQDecoder byteIn with 0xFF marker handling
 func TestMQDecoder_ByteIn_Marker(t *testing.T) {
-	// Data with 0xFF followed by marker (>0x8F)
+	// Data with 0xFF followed by marker (>0x8F) — decoder should stop reading
 	data := []byte{0xFF, 0x90, 0x00, 0x01}
 	dec := NewMQDecoder(data)
 
-	// Decode some bits - should handle marker properly
+	// Decode bits — each must be valid (0 or 1)
 	for i := 0; i < 20; i++ {
-		dec.Decode(0)
+		bit := dec.Decode(0)
+		if bit != 0 && bit != 1 {
+			t.Errorf("bit %d: got %d, want 0 or 1", i, bit)
+		}
 	}
 }
 
 // Test MQDecoder byteIn with 0xFF non-marker handling
 func TestMQDecoder_ByteIn_NonMarker(t *testing.T) {
-	// Data with 0xFF followed by non-marker (<= 0x8F)
+	// Data with 0xFF followed by non-marker (<= 0x8F) — decoder should continue
 	data := []byte{0xFF, 0x80, 0x00, 0x01}
 	dec := NewMQDecoder(data)
 
-	// Decode some bits
 	for i := 0; i < 20; i++ {
-		dec.Decode(0)
+		bit := dec.Decode(0)
+		if bit != 0 && bit != 1 {
+			t.Errorf("bit %d: got %d, want 0 or 1", i, bit)
+		}
 	}
 }
 
-// Test RawDecoder with 0xFF handling
+// Test RawDecoder with 0xFF handling — verify decoded bits are valid
 func TestRawDecoder_0xFF_Handling(t *testing.T) {
-	// Create data with 0xFF bytes
 	data := []byte{0xFF, 0x90, 0x00, 0x01}
 	dec := NewRawDecoder(data)
 
-	// Decode bits
 	for i := 0; i < 32; i++ {
-		dec.DecodeBit()
+		bit := dec.DecodeBit()
+		if bit != 0 && bit != 1 {
+			t.Errorf("bit %d: got %d, want 0 or 1", i, bit)
+		}
 	}
 
 	// Test path where c is 0xFF and next byte is marker
 	dec2 := NewRawDecoder(data)
 	dec2.c = 0xFF
 	dec2.ct = 0
-	dec2.DecodeBit()
+	bit := dec2.DecodeBit()
+	if bit != 0 && bit != 1 {
+		t.Errorf("marker path: got %d, want 0 or 1", bit)
+	}
 }
 
 // Test RawDecoder with 0xFF followed by non-marker
@@ -243,17 +272,33 @@ func TestRawDecoder_0xFF_NonMarker(t *testing.T) {
 	dec := NewRawDecoder(data)
 	dec.c = 0xFF
 	dec.ct = 0
-	dec.DecodeBit()
+	bit := dec.DecodeBit()
+	if bit != 0 && bit != 1 {
+		t.Errorf("non-marker path: got %d, want 0 or 1", bit)
+	}
 }
 
-// Test RawDecoder end of data
+// Test RawDecoder end of data — bits past end should still be valid 0/1
 func TestRawDecoder_EndOfData(t *testing.T) {
+	// 0x55 = 01010101 in binary
 	data := []byte{0x55}
 	dec := NewRawDecoder(data)
 
-	// Read all bits and past end
-	for i := 0; i < 24; i++ {
-		dec.DecodeBit()
+	// First 8 bits should come from 0x55
+	bits := make([]int, 8)
+	for i := 0; i < 8; i++ {
+		bits[i] = dec.DecodeBit()
+		if bits[i] != 0 && bits[i] != 1 {
+			t.Errorf("bit %d: got %d, want 0 or 1", i, bits[i])
+		}
+	}
+
+	// Past end: should not crash and still return valid bits
+	for i := 0; i < 16; i++ {
+		bit := dec.DecodeBit()
+		if bit != 0 && bit != 1 {
+			t.Errorf("past-end bit %d: got %d, want 0 or 1", i, bit)
+		}
 	}
 }
 
@@ -376,35 +421,54 @@ func TestMqByteOutRare(t *testing.T) {
 	}
 }
 
-// Test getZCContextFast
+// Test getZCContextFast — verify specific known context values from the LUT
 func TestGetZCContextFast(t *testing.T) {
-	// Test all band types with various neighbor configurations
-	bandTypes := []int{BandLL, BandHL, BandLH, BandHH}
+	// Verify specific known context values
+	// No neighbors → context 0 for all band types
+	for _, bt := range []int{BandLL, BandHL, BandLH, BandHH} {
+		ctx := getZCContextFast(0, bt)
+		if ctx != 0 {
+			t.Errorf("getZCContextFast(0, %d) = %d, want 0 (no neighbors)", bt, ctx)
+		}
+	}
 
-	for _, bt := range bandTypes {
+	// Verify LUT consistency: getZCContextFast must match lutZCCtx
+	for _, bt := range []int{BandLL, BandHL, BandLH, BandHH} {
 		for packed := 0; packed < 256; packed++ {
 			ctx := getZCContextFast(uint8(packed), bt)
-			if ctx < 0 || ctx > 8 {
-				t.Errorf("getZCContextFast(%d, %d) = %d, out of range", packed, bt, ctx)
+			expected := int(lutZCCtx[bt*256+packed])
+			if ctx != expected {
+				t.Errorf("getZCContextFast(%d, %d) = %d, lutZCCtx says %d",
+					packed, bt, ctx, expected)
 			}
 		}
 	}
 }
 
-// Test getSCContextFast
+// Test getSCContextFast — verify against LUT and known values
 func TestGetSCContextFast(t *testing.T) {
-	// Test various contribution combinations
-	for h := -3; h <= 3; h++ {
-		for v := -3; v <= 3; v++ {
+	// Verify (0,0) gives CtxSC0 with pred=0
+	ctx, pred := getSCContextFast(0, 0)
+	if ctx != CtxSC0 {
+		t.Errorf("getSCContextFast(0, 0) ctx = %d, want CtxSC0 (%d)", ctx, CtxSC0)
+	}
+	if pred != 0 {
+		t.Errorf("getSCContextFast(0, 0) pred = %d, want 0", pred)
+	}
+
+	// Verify all entries match the LUT
+	for h := -2; h <= 2; h++ {
+		for v := -2; v <= 2; v++ {
 			ctx, pred := getSCContextFast(h, v)
-			// The function returns context values from CtxSC0 to CtxSC4
-			// But because of the way lutSCCtx is built, it stores (ctx << 1) | pred
-			// So the returned ctx should be in range [CtxSC0, CtxSC4]
-			// However looking at the code, it seems ctx can be 0 for certain edge cases
-			// Just verify it doesn't crash and pred is valid
-			_ = ctx
-			if pred != 0 && pred != 1 {
-				t.Errorf("getSCContextFast(%d, %d) pred = %d, invalid", h, v, pred)
+			idx := (h+2)*5 + (v + 2)
+			lutVal := lutSCCtx[idx]
+			expectedCtx := int(lutVal >> 1)
+			expectedPred := int(lutVal & 1)
+			if ctx != expectedCtx {
+				t.Errorf("getSCContextFast(%d, %d) ctx = %d, LUT says %d", h, v, ctx, expectedCtx)
+			}
+			if pred != expectedPred {
+				t.Errorf("getSCContextFast(%d, %d) pred = %d, LUT says %d", h, v, pred, expectedPred)
 			}
 		}
 	}
@@ -1237,30 +1301,37 @@ func TestMQDecoder_ByteIn_AllBranches(t *testing.T) {
 	}
 }
 
-// Test RawDecoder with all branches
+// Test RawDecoder with all branches — verify each returns valid bits
 func TestRawDecoder_AllBranches(t *testing.T) {
-	// Test with 0xFF followed by marker (> 0x8F)
-	data := []byte{0xFF, 0x91}
-	dec := NewRawDecoder(data)
+	// 0xFF followed by marker (> 0x8F): marker stops data read
+	dec := NewRawDecoder([]byte{0xFF, 0x91})
 	dec.c = 0xFF
 	dec.ct = 0
 	dec.pos = 1
 	bit := dec.DecodeBit()
-	_ = bit
+	if bit != 0 && bit != 1 {
+		t.Errorf("marker branch: got %d, want 0 or 1", bit)
+	}
 
-	// Test with 0xFF followed by non-marker
+	// 0xFF followed by non-marker: data continues
 	dec2 := NewRawDecoder([]byte{0xFF, 0x50})
 	dec2.c = 0xFF
 	dec2.ct = 0
 	dec2.pos = 1
-	dec2.DecodeBit()
+	bit2 := dec2.DecodeBit()
+	if bit2 != 0 && bit2 != 1 {
+		t.Errorf("non-marker branch: got %d, want 0 or 1", bit2)
+	}
 
-	// Test normal case with c != 0xFF at end of data
+	// Normal case past end of data: should return valid bit
 	dec3 := NewRawDecoder([]byte{0x55})
 	dec3.c = 0x00
 	dec3.ct = 0
-	dec3.pos = 10 // past end
-	dec3.DecodeBit()
+	dec3.pos = 10
+	bit3 := dec3.DecodeBit()
+	if bit3 != 0 && bit3 != 1 {
+		t.Errorf("past-end branch: got %d, want 0 or 1", bit3)
+	}
 }
 
 // Test mqByteOutInlined branch coverage

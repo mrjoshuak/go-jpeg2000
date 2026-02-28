@@ -5,7 +5,6 @@ import (
 )
 
 func TestT1_Encode(t *testing.T) {
-	// Test that Encode produces valid output
 	data := make([]int32, 16*16)
 	for i := range data {
 		data[i] = int32(i % 128)
@@ -19,12 +18,21 @@ func TestT1_Encode(t *testing.T) {
 	encoded := t1.Encode(BandLL)
 
 	if len(encoded) == 0 {
-		t.Error("Encode returned empty result")
+		t.Fatal("Encode returned empty result")
+	}
+
+	// Decode and verify roundtrip
+	t1Dec := NewT1(16, 16)
+	decoded := t1Dec.Decode(encoded, t1.numBPS, BandLL)
+	for i := range data {
+		if decoded[i] != data[i] {
+			t.Errorf("position %d: got %d, want %d", i, decoded[i], data[i])
+			break
+		}
 	}
 }
 
 func TestT1_Encode_LargerBlock(t *testing.T) {
-	// Test with 64x64 block
 	data := make([]int32, 64*64)
 	for i := range data {
 		data[i] = int32(i % 256)
@@ -38,7 +46,17 @@ func TestT1_Encode_LargerBlock(t *testing.T) {
 	encoded := t1.Encode(BandLL)
 
 	if len(encoded) == 0 {
-		t.Error("Encode returned empty result for 64x64 block")
+		t.Fatal("Encode returned empty result for 64x64 block")
+	}
+
+	// Decode and verify roundtrip
+	t1Dec := NewT1(64, 64)
+	decoded := t1Dec.Decode(encoded, t1.numBPS, BandLL)
+	for i := range data {
+		if decoded[i] != data[i] {
+			t.Errorf("position %d: got %d, want %d", i, decoded[i], data[i])
+			break
+		}
 	}
 }
 
@@ -55,6 +73,17 @@ func TestT1_Encode_AllBandTypes(t *testing.T) {
 		encoded := t1.Encode(bt)
 		if len(encoded) == 0 {
 			t.Errorf("Encode returned empty result for band type %d", bt)
+			continue
+		}
+
+		// Decode and verify roundtrip for each band type
+		t1Dec := NewT1(32, 32)
+		decoded := t1Dec.Decode(encoded, t1.numBPS, bt)
+		for i := range data {
+			if decoded[i] != data[i] {
+				t.Errorf("band %d position %d: got %d, want %d", bt, i, decoded[i], data[i])
+				break
+			}
 		}
 	}
 }
