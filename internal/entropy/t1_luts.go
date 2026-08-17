@@ -7,10 +7,11 @@ package entropy
 // lutZCCtx is the zero-coding context lookup table.
 // Indexed by: bandType*256 + packed neighbor flags
 // Packed neighbor flags bit layout:
-//   bit 0: W significant    bit 4: NW significant
-//   bit 1: E significant    bit 5: NE significant
-//   bit 2: N significant    bit 6: SW significant
-//   bit 3: S significant    bit 7: SE significant
+//
+//	bit 0: W significant    bit 4: NW significant
+//	bit 1: E significant    bit 5: NE significant
+//	bit 2: N significant    bit 6: SW significant
+//	bit 3: S significant    bit 7: SE significant
 //
 // Returns context 0-8 for ZC coding.
 // Band types: 0=LL, 1=HL, 2=LH, 3=HH
@@ -44,9 +45,9 @@ func init() {
 			sw := (packed >> 6) & 1
 			se := (packed >> 7) & 1
 
-			h := w + e              // horizontal count
-			v := n + s              // vertical count
-			d := nw + ne + sw + se  // diagonal count
+			h := w + e             // horizontal count
+			v := n + s             // vertical count
+			d := nw + ne + sw + se // diagonal count
 
 			var ctx int
 			switch bandType {

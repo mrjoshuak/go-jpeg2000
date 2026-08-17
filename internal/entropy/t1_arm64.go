@@ -14,4 +14,3 @@ func clearFlagsFast(flags []T1Flags) {
 	}
 	clearFlags_neon(flags)
 }
-

@@ -24,11 +24,11 @@ func TestSpecYCbCrToRGB(t *testing.T) {
 	//             B = Y + 1.8556*(Cb-128)
 
 	tests := []struct {
-		name       string
-		conv       colorConversion
-		y, cb, cr  int32 // Input YCbCr
-		r, g, b    int32 // Expected RGB (approximate)
-		tolerance  int32
+		name      string
+		conv      colorConversion
+		y, cb, cr int32 // Input YCbCr
+		r, g, b   int32 // Expected RGB (approximate)
+		tolerance int32
 	}{
 		// BT.709 (sYCC) - neutral gray
 		{"sYCC_gray", convertSYCCToRGB, 128, 128, 128, 128, 128, 128, 2},
@@ -80,9 +80,9 @@ func TestSpecCMYToRGB(t *testing.T) {
 	// This is the exact formula, no tolerance needed.
 
 	tests := []struct {
-		name      string
-		c, m, y   int32 // Input CMY
-		r, g, b   int32 // Expected RGB
+		name    string
+		c, m, y int32 // Input CMY
+		r, g, b int32 // Expected RGB
 	}{
 		{"white", 0, 0, 0, 255, 255, 255},
 		{"black", 255, 255, 255, 0, 0, 0},
@@ -120,10 +120,10 @@ func TestSpecCMYKToRGB(t *testing.T) {
 	// CMYK to RGB: R = (1-C)*(1-K)*255, G = (1-M)*(1-K)*255, B = (1-Y)*(1-K)*255
 
 	tests := []struct {
-		name        string
-		c, m, y, k  int32 // Input CMYK (0-255)
-		r, g, b     int32 // Expected RGB
-		tolerance   int32
+		name       string
+		c, m, y, k int32 // Input CMYK (0-255)
+		r, g, b    int32 // Expected RGB
+		tolerance  int32
 	}{
 		{"white", 0, 0, 0, 0, 255, 255, 255, 1},
 		{"black_via_K", 0, 0, 0, 255, 0, 0, 0, 1},
@@ -165,11 +165,11 @@ func TestSpecCIELabToRGB(t *testing.T) {
 	// D50 black: L*=0, a*=0, b*=0 -> R=0, G=0, B=0
 
 	tests := []struct {
-		name      string
-		L, a, b   int32 // Encoded L*a*b* (8-bit)
-		minR      int32 // Minimum expected R
-		maxR      int32 // Maximum expected R
-		isGray    bool  // Should R≈G≈B?
+		name    string
+		L, a, b int32 // Encoded L*a*b* (8-bit)
+		minR    int32 // Minimum expected R
+		maxR    int32 // Maximum expected R
+		isGray  bool  // Should R≈G≈B?
 	}{
 		// Black: L*=0
 		{"black", 0, 128, 128, 0, 5, true},
@@ -211,10 +211,10 @@ func TestSpecYPbPrToRGB(t *testing.T) {
 	// This is used for HD video signals (1080i/p, 720p)
 
 	tests := []struct {
-		name       string
-		y, pb, pr  int32
-		r, g, b    int32
-		tolerance  int32
+		name      string
+		y, pb, pr int32
+		r, g, b   int32
+		tolerance int32
 	}{
 		{"gray", 128, 128, 128, 128, 128, 128, 2},
 		{"black", 0, 128, 128, 0, 0, 0, 2},
@@ -282,9 +282,9 @@ func TestSpecROMMRGBToRGB(t *testing.T) {
 	// Some ROMM colors are outside the sRGB gamut and will be clipped
 
 	tests := []struct {
-		name      string
+		name          string
 		rIn, gIn, bIn int32
-		isValid   bool // Is within sRGB gamut?
+		isValid       bool // Is within sRGB gamut?
 	}{
 		{"black", 0, 0, 0, true},
 		{"white", 255, 255, 255, true},

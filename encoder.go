@@ -705,7 +705,7 @@ func (e *encoder) generateNLT() []byte {
 			bdnlt |= 0x80
 		}
 		marker[5] = bdnlt
-		marker[6] = 3                              // NLT type 3
+		marker[6] = 3 // NLT type 3
 		buf = append(buf, marker...)
 	}
 	return buf
@@ -1217,4 +1217,3 @@ func (e *encoder) writeJP2(codestream []byte) error {
 
 	return nil
 }
-

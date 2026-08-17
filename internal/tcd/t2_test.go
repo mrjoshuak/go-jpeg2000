@@ -1094,9 +1094,9 @@ func TestDecodePacketBodyWithData(t *testing.T) {
 	// Create packet with SOP, header, body data, and EPH
 	data := []byte{
 		0xFF, 0x91, 0x00, 0x04, 0x00, 0x00, // SOP with layer=0
-		0x80,                               // Packet present (1 bit), then padding
-		0xFF, 0x92,                         // EPH marker
-		0xDE, 0xAD, 0xBE, 0xEF,             // Code block data
+		0x80,       // Packet present (1 bit), then padding
+		0xFF, 0x92, // EPH marker
+		0xDE, 0xAD, 0xBE, 0xEF, // Code block data
 	}
 
 	dec := NewPacketDecoder(data)

@@ -148,12 +148,12 @@ func Inverse53(data []int32, length int) {
 
 // 9-7 filter coefficients (from ITU-T Rec. T.800)
 const (
-	alpha97 = -1.586134342059924  // Step 1
-	beta97  = -0.052980118572961  // Step 2
-	gamma97 = 0.882911075530934   // Step 3
-	delta97 = 0.443506852043971   // Step 4
-	k97     = 1.230174104914001   // Scaling factor
-	k97Inv  = 0.812893066115961   // 1/k
+	alpha97 = -1.586134342059924 // Step 1
+	beta97  = -0.052980118572961 // Step 2
+	gamma97 = 0.882911075530934  // Step 3
+	delta97 = 0.443506852043971  // Step 4
+	k97     = 1.230174104914001  // Scaling factor
+	k97Inv  = 0.812893066115961  // 1/k
 )
 
 // Forward97 performs the forward 9-7 irreversible wavelet transform.

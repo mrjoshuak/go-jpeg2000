@@ -17,35 +17,35 @@ import (
 // Box type codes
 const (
 	// Signature and file type
-	TypeJP2Signature  Type = 0x6A502020 // "jP  " - JP2 signature box
-	TypeFileType      Type = 0x66747970 // "ftyp" - File type box
+	TypeJP2Signature Type = 0x6A502020 // "jP  " - JP2 signature box
+	TypeFileType     Type = 0x66747970 // "ftyp" - File type box
 
 	// JP2 header
-	TypeJP2Header     Type = 0x6A703268 // "jp2h" - JP2 header super-box
-	TypeImageHeader   Type = 0x69686472 // "ihdr" - Image header box
-	TypeBitsPerComp   Type = 0x62706363 // "bpcc" - Bits per component box
-	TypeColorSpec     Type = 0x636F6C72 // "colr" - Color specification box
-	TypePalette       Type = 0x70636C72 // "pclr" - Palette box
-	TypeComponentMap  Type = 0x636D6170 // "cmap" - Component mapping box
-	TypeChannelDef    Type = 0x63646566 // "cdef" - Channel definition box
-	TypeResolution    Type = 0x72657320 // "res " - Resolution super-box
-	TypeCaptureRes    Type = 0x72657363 // "resc" - Capture resolution box
-	TypeDisplayRes    Type = 0x72657364 // "resd" - Default display resolution box
+	TypeJP2Header    Type = 0x6A703268 // "jp2h" - JP2 header super-box
+	TypeImageHeader  Type = 0x69686472 // "ihdr" - Image header box
+	TypeBitsPerComp  Type = 0x62706363 // "bpcc" - Bits per component box
+	TypeColorSpec    Type = 0x636F6C72 // "colr" - Color specification box
+	TypePalette      Type = 0x70636C72 // "pclr" - Palette box
+	TypeComponentMap Type = 0x636D6170 // "cmap" - Component mapping box
+	TypeChannelDef   Type = 0x63646566 // "cdef" - Channel definition box
+	TypeResolution   Type = 0x72657320 // "res " - Resolution super-box
+	TypeCaptureRes   Type = 0x72657363 // "resc" - Capture resolution box
+	TypeDisplayRes   Type = 0x72657364 // "resd" - Default display resolution box
 
 	// Codestream
 	TypeContCodestream Type = 0x6A703263 // "jp2c" - Contiguous codestream box
-	TypeCodestreamH   Type = 0x6A706368 // "jpch" - Codestream header box
-	TypeTilePartH     Type = 0x6A707468 // "jpth" - Tile-part header box
+	TypeCodestreamH    Type = 0x6A706368 // "jpch" - Codestream header box
+	TypeTilePartH      Type = 0x6A707468 // "jpth" - Tile-part header box
 
 	// Metadata
-	TypeXML           Type = 0x786D6C20 // "xml " - XML box
-	TypeUUID          Type = 0x75756964 // "uuid" - UUID box
-	TypeUUIDInfo      Type = 0x75696E66 // "uinf" - UUID info super-box
-	TypeUUIDList      Type = 0x756C7374 // "ulst" - UUID list box
-	TypeURL           Type = 0x75726C20 // "url " - URL box
+	TypeXML      Type = 0x786D6C20 // "xml " - XML box
+	TypeUUID     Type = 0x75756964 // "uuid" - UUID box
+	TypeUUIDInfo Type = 0x75696E66 // "uinf" - UUID info super-box
+	TypeUUIDList Type = 0x756C7374 // "ulst" - UUID list box
+	TypeURL      Type = 0x75726C20 // "url " - URL box
 
 	// IPR
-	TypeIPR           Type = 0x6A703269 // "jp2i" - IPR box
+	TypeIPR Type = 0x6A703269 // "jp2i" - IPR box
 )
 
 // Type represents a 4-byte box type code.
@@ -201,24 +201,24 @@ func (w *Writer) WriteSignature() error {
 
 // JP2Header represents the JP2 header box contents.
 type JP2Header struct {
-	ImageHeader *ImageHeaderBox
-	BitsPerComp *BitsPerCompBox
-	ColorSpec   *ColorSpecBox
-	Palette     *PaletteBox
+	ImageHeader  *ImageHeaderBox
+	BitsPerComp  *BitsPerCompBox
+	ColorSpec    *ColorSpecBox
+	Palette      *PaletteBox
 	ComponentMap *ComponentMapBox
-	ChannelDef  *ChannelDefBox
-	Resolution  *ResolutionBox
+	ChannelDef   *ChannelDefBox
+	Resolution   *ResolutionBox
 }
 
 // ImageHeaderBox represents the image header box.
 type ImageHeaderBox struct {
-	Height           uint32
-	Width            uint32
-	NumComponents    uint16
-	BitsPerComponent uint8 // 7-bit value or 0xFF for BPC box
-	CompressionType  uint8 // Always 7 for JP2
+	Height            uint32
+	Width             uint32
+	NumComponents     uint16
+	BitsPerComponent  uint8 // 7-bit value or 0xFF for BPC box
+	CompressionType   uint8 // Always 7 for JP2
 	UnknownColorspace uint8
-	IPR              uint8
+	IPR               uint8
 }
 
 // Parse parses the image header box contents.
@@ -263,34 +263,34 @@ func (b *BitsPerCompBox) Parse(data []byte) error {
 
 // ColorSpecBox represents color specification.
 type ColorSpecBox struct {
-	Method             uint8
-	Precedence         uint8
-	Approximation      uint8
+	Method               uint8
+	Precedence           uint8
+	Approximation        uint8
 	EnumeratedColorspace uint32
-	ICCProfile         []byte
+	ICCProfile           []byte
 }
 
 // Enumerated colorspace values per ISO/IEC 15444-1 Annex M
 const (
-	CSBilevel1    = 0  // Bi-level (black and white)
-	CSYCbCr1      = 1  // YCbCr(1) - ITU-R BT.709-5 based (sRGB primaries)
-	CSYCbCr2      = 3  // YCbCr(2) - ITU-R BT.601-5 for 625-line systems
-	CSYCbCr3      = 4  // YCbCr(3) - ITU-R BT.601-5 for 525-line systems
-	CSPhotoYCC    = 9  // PhotoYCC (Kodak Photo CD)
-	CSCMY         = 11 // CMY (Cyan, Magenta, Yellow)
-	CSCMYK        = 12 // CMYK (Cyan, Magenta, Yellow, Key/Black)
-	CSYCCK        = 13 // YCCK (PhotoYCC with Key/Black)
-	CSCIELab      = 14 // CIELab (D50 illuminant)
-	CSBilevel2    = 15 // Bi-level(2) - alternative bi-level encoding
-	CSSRGB        = 16 // sRGB (IEC 61966-2-1)
-	CSGray        = 17 // Grayscale
-	CSsYCC        = 18 // sYCC (IEC 61966-2-1 Annex G)
-	CSCIEJab      = 19 // CIEJab (CIECAM02-based)
-	CSeSRGB       = 20 // e-sRGB (extended sRGB, IEC 61966-2-1 Amendment 1)
-	CSROMMRGB     = 21 // ROMM-RGB (Reference Output Medium Metric, ISO 22028-2)
-	CSYPbPr1125   = 22 // YPbPr for 1125/60 systems (SMPTE 274M)
-	CSYPbPr1250   = 23 // YPbPr for 1250/50 systems (ITU-R BT.1361)
-	CSeSYCC       = 24 // e-sYCC (extended sYCC gamut)
+	CSBilevel1  = 0  // Bi-level (black and white)
+	CSYCbCr1    = 1  // YCbCr(1) - ITU-R BT.709-5 based (sRGB primaries)
+	CSYCbCr2    = 3  // YCbCr(2) - ITU-R BT.601-5 for 625-line systems
+	CSYCbCr3    = 4  // YCbCr(3) - ITU-R BT.601-5 for 525-line systems
+	CSPhotoYCC  = 9  // PhotoYCC (Kodak Photo CD)
+	CSCMY       = 11 // CMY (Cyan, Magenta, Yellow)
+	CSCMYK      = 12 // CMYK (Cyan, Magenta, Yellow, Key/Black)
+	CSYCCK      = 13 // YCCK (PhotoYCC with Key/Black)
+	CSCIELab    = 14 // CIELab (D50 illuminant)
+	CSBilevel2  = 15 // Bi-level(2) - alternative bi-level encoding
+	CSSRGB      = 16 // sRGB (IEC 61966-2-1)
+	CSGray      = 17 // Grayscale
+	CSsYCC      = 18 // sYCC (IEC 61966-2-1 Annex G)
+	CSCIEJab    = 19 // CIEJab (CIECAM02-based)
+	CSeSRGB     = 20 // e-sRGB (extended sRGB, IEC 61966-2-1 Amendment 1)
+	CSROMMRGB   = 21 // ROMM-RGB (Reference Output Medium Metric, ISO 22028-2)
+	CSYPbPr1125 = 22 // YPbPr for 1125/60 systems (SMPTE 274M)
+	CSYPbPr1250 = 23 // YPbPr for 1250/50 systems (ITU-R BT.1361)
+	CSeSYCC     = 24 // e-sYCC (extended sYCC gamut)
 )
 
 // Parse parses the color specification box.
@@ -349,8 +349,8 @@ type ComponentMapBox struct {
 
 // ComponentMapping maps a channel to a component.
 type ComponentMapping struct {
-	Component uint16
-	MappingType uint8
+	Component     uint16
+	MappingType   uint8
 	PaletteColumn uint8
 }
 
@@ -361,17 +361,17 @@ type ChannelDefBox struct {
 
 // ChannelDefinition describes a channel.
 type ChannelDefinition struct {
-	Channel    uint16
-	Type       uint16 // 0=color, 1=opacity, 2=premultiplied opacity
+	Channel     uint16
+	Type        uint16 // 0=color, 1=opacity, 2=premultiplied opacity
 	Association uint16 // Component association
 }
 
 // ResolutionBox contains resolution information.
 type ResolutionBox struct {
-	CaptureResX    uint32
-	CaptureResY    uint32
-	DisplayResX    uint32
-	DisplayResY    uint32
+	CaptureResX uint32
+	CaptureResY uint32
+	DisplayResX uint32
+	DisplayResY uint32
 }
 
 // FileTypeBox represents the ftyp box.
@@ -472,13 +472,13 @@ func (r *byteReader) Read(p []byte) (int, error) {
 func CreateJP2Header(width, height uint32, numComponents uint16, bitsPerComponent uint8, colorspace uint32) *Box {
 	// Create image header
 	ihdr := &ImageHeaderBox{
-		Width:            width,
-		Height:           height,
-		NumComponents:    numComponents,
-		BitsPerComponent: bitsPerComponent,
-		CompressionType:  7, // JP2
+		Width:             width,
+		Height:            height,
+		NumComponents:     numComponents,
+		BitsPerComponent:  bitsPerComponent,
+		CompressionType:   7, // JP2
 		UnknownColorspace: 0,
-		IPR:              0,
+		IPR:               0,
 	}
 	ihdrBox := &Box{
 		Type:     TypeImageHeader,
@@ -488,9 +488,9 @@ func CreateJP2Header(width, height uint32, numComponents uint16, bitsPerComponen
 
 	// Create color specification
 	colr := &ColorSpecBox{
-		Method:             1, // Enumerated
-		Precedence:         0,
-		Approximation:      0,
+		Method:               1, // Enumerated
+		Precedence:           0,
+		Approximation:        0,
 		EnumeratedColorspace: colorspace,
 	}
 	colrBox := &Box{

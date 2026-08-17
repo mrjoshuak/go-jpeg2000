@@ -134,7 +134,7 @@ func TestHTJ2KRoundTrip(t *testing.T) {
 			// Create test data
 			data := make([]int32, size.width*size.height)
 			for i := range data {
-				data[i] = int32((i * 37) % 256) - 128 // Mix of positive and negative
+				data[i] = int32((i*37)%256) - 128 // Mix of positive and negative
 			}
 
 			// Encode with HT encoder

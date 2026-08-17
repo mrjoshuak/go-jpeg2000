@@ -30,8 +30,8 @@ const (
 // NewParser creates a new codestream parser.
 func NewParser(r io.Reader) *Parser {
 	return &Parser{
-		r:      r,
-		buf:    make([]byte, 4096),
+		r:   r,
+		buf: make([]byte, 4096),
 		header: &Header{
 			ComponentCodingStyles: make(map[uint16]CodingStyleComponent),
 			ComponentQuantization: make(map[uint16]QuantizationComponent),

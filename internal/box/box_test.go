@@ -177,13 +177,13 @@ func TestWriter_WriteSignature(t *testing.T) {
 
 func TestImageHeaderBox_Parse(t *testing.T) {
 	data := make([]byte, 14)
-	binary.BigEndian.PutUint32(data[0:4], 100)  // Height
-	binary.BigEndian.PutUint32(data[4:8], 200)  // Width
-	binary.BigEndian.PutUint16(data[8:10], 3)   // Components
-	data[10] = 7                                 // BPC
-	data[11] = 7                                 // Compression
-	data[12] = 0                                 // Unknown colorspace
-	data[13] = 0                                 // IPR
+	binary.BigEndian.PutUint32(data[0:4], 100) // Height
+	binary.BigEndian.PutUint32(data[4:8], 200) // Width
+	binary.BigEndian.PutUint16(data[8:10], 3)  // Components
+	data[10] = 7                               // BPC
+	data[11] = 7                               // Compression
+	data[12] = 0                               // Unknown colorspace
+	data[13] = 0                               // IPR
 
 	b := &ImageHeaderBox{}
 	err := b.Parse(data)
@@ -224,9 +224,9 @@ func TestImageHeaderBox_Bytes(t *testing.T) {
 
 func TestColorSpecBox_Parse_Enumerated(t *testing.T) {
 	data := make([]byte, 7)
-	data[0] = 1                                    // Method = enumerated
-	data[1] = 0                                    // Precedence
-	data[2] = 0                                    // Approximation
+	data[0] = 1                                   // Method = enumerated
+	data[1] = 0                                   // Precedence
+	data[2] = 0                                   // Approximation
 	binary.BigEndian.PutUint32(data[3:7], CSSRGB) // sRGB
 
 	b := &ColorSpecBox{}
@@ -267,7 +267,7 @@ func TestColorSpecBox_Parse_ICC(t *testing.T) {
 
 func TestColorSpecBox_Bytes(t *testing.T) {
 	b := &ColorSpecBox{
-		Method:             1,
+		Method:               1,
 		EnumeratedColorspace: CSSRGB,
 	}
 	data := b.Bytes()
@@ -282,8 +282,8 @@ func TestColorSpecBox_Bytes(t *testing.T) {
 
 func TestFileTypeBox_Parse(t *testing.T) {
 	data := make([]byte, 12)
-	binary.BigEndian.PutUint32(data[0:4], uint32(0x6A703220)) // "jp2 "
-	binary.BigEndian.PutUint32(data[4:8], 0)                  // Minor version
+	binary.BigEndian.PutUint32(data[0:4], uint32(0x6A703220))  // "jp2 "
+	binary.BigEndian.PutUint32(data[4:8], 0)                   // Minor version
 	binary.BigEndian.PutUint32(data[8:12], uint32(0x6A703220)) // Compatibility
 
 	b := &FileTypeBox{}
@@ -302,8 +302,8 @@ func TestFileTypeBox_Parse(t *testing.T) {
 
 func TestFileTypeBox_Bytes(t *testing.T) {
 	b := &FileTypeBox{
-		Brand:        0x6A703220,
-		MinorVersion: 0,
+		Brand:         0x6A703220,
+		MinorVersion:  0,
 		Compatibility: []Type{0x6A703220},
 	}
 	data := b.Bytes()
@@ -659,9 +659,9 @@ func TestFileTypeBox_Parse_NoCompatibility(t *testing.T) {
 
 func TestFileTypeBox_Parse_MultipleCompatibility(t *testing.T) {
 	data := make([]byte, 16)
-	binary.BigEndian.PutUint32(data[0:4], uint32(0x6A703220))  // "jp2 "
-	binary.BigEndian.PutUint32(data[4:8], 0)                   // Minor version
-	binary.BigEndian.PutUint32(data[8:12], uint32(0x6A703220)) // "jp2 "
+	binary.BigEndian.PutUint32(data[0:4], uint32(0x6A703220))   // "jp2 "
+	binary.BigEndian.PutUint32(data[4:8], 0)                    // Minor version
+	binary.BigEndian.PutUint32(data[8:12], uint32(0x6A703220))  // "jp2 "
 	binary.BigEndian.PutUint32(data[12:16], uint32(0x6A707820)) // "jpx "
 
 	b := &FileTypeBox{}
@@ -681,13 +681,13 @@ func TestParseJP2Header(t *testing.T) {
 
 	// Image header box
 	ihdr := &ImageHeaderBox{
-		Height:           480,
-		Width:            640,
-		NumComponents:    3,
-		BitsPerComponent: 8,
-		CompressionType:  7,
+		Height:            480,
+		Width:             640,
+		NumComponents:     3,
+		BitsPerComponent:  8,
+		CompressionType:   7,
 		UnknownColorspace: 0,
-		IPR:              0,
+		IPR:               0,
 	}
 	ihdrBox := &Box{
 		Type:     TypeImageHeader,
@@ -698,7 +698,7 @@ func TestParseJP2Header(t *testing.T) {
 
 	// Color specification box
 	colr := &ColorSpecBox{
-		Method:             1,
+		Method:               1,
 		EnumeratedColorspace: CSSRGB,
 	}
 	colrBox := &Box{
@@ -761,7 +761,7 @@ func TestParseJP2Header_WithBitsPerComp(t *testing.T) {
 
 	// Color specification box
 	colr := &ColorSpecBox{
-		Method:             1,
+		Method:               1,
 		EnumeratedColorspace: CSSRGB,
 	}
 	colrBox := &Box{
@@ -839,13 +839,13 @@ func TestRoundtrip_Box(t *testing.T) {
 
 func TestRoundtrip_ImageHeaderBox(t *testing.T) {
 	original := &ImageHeaderBox{
-		Height:           1080,
-		Width:            1920,
-		NumComponents:    4,
-		BitsPerComponent: 16,
-		CompressionType:  7,
+		Height:            1080,
+		Width:             1920,
+		NumComponents:     4,
+		BitsPerComponent:  16,
+		CompressionType:   7,
 		UnknownColorspace: 1,
-		IPR:              1,
+		IPR:               1,
 	}
 
 	data := original.Bytes()
@@ -880,9 +880,9 @@ func TestRoundtrip_ImageHeaderBox(t *testing.T) {
 
 func TestRoundtrip_ColorSpecBox_Enumerated(t *testing.T) {
 	original := &ColorSpecBox{
-		Method:             1,
-		Precedence:         0,
-		Approximation:      1,
+		Method:               1,
+		Precedence:           0,
+		Approximation:        1,
 		EnumeratedColorspace: CSGray,
 	}
 
@@ -932,8 +932,8 @@ func TestRoundtrip_ColorSpecBox_ICC(t *testing.T) {
 
 func TestRoundtrip_FileTypeBox(t *testing.T) {
 	original := &FileTypeBox{
-		Brand:        0x6A703220,
-		MinorVersion: 1,
+		Brand:         0x6A703220,
+		MinorVersion:  1,
 		Compatibility: []Type{0x6A703220, 0x6A707820, 0x6A703268},
 	}
 
@@ -1394,9 +1394,9 @@ func TestParseJP2Header_UnknownBoxType(t *testing.T) {
 func TestReader_ReadBox_TooLarge(t *testing.T) {
 	// Create a box header that claims the content is > 1GB
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, uint32(1))                    // Extended length marker
-	binary.Write(&buf, binary.BigEndian, uint32(TypeContCodestream))   // Type
-	binary.Write(&buf, binary.BigEndian, uint64(0x50000000))           // Extended length: ~1.3GB
+	binary.Write(&buf, binary.BigEndian, uint32(1))                  // Extended length marker
+	binary.Write(&buf, binary.BigEndian, uint32(TypeContCodestream)) // Type
+	binary.Write(&buf, binary.BigEndian, uint64(0x50000000))         // Extended length: ~1.3GB
 
 	r := NewReader(&buf)
 	_, err := r.ReadBox()

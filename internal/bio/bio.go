@@ -8,8 +8,8 @@ import (
 // Reader provides bit-level reading from a byte stream.
 type Reader struct {
 	r   io.Reader
-	buf byte   // Current byte buffer
-	cnt uint8  // Number of valid bits in buf (0-8)
+	buf byte  // Current byte buffer
+	cnt uint8 // Number of valid bits in buf (0-8)
 }
 
 // NewReader creates a new bit reader.
@@ -52,8 +52,8 @@ func (r *Reader) Align() {
 // Writer provides bit-level writing to a byte stream.
 type Writer struct {
 	w   io.Writer
-	buf byte   // Current byte buffer
-	cnt uint8  // Number of valid bits in buf (0-7)
+	buf byte  // Current byte buffer
+	cnt uint8 // Number of valid bits in buf (0-7)
 }
 
 // NewWriter creates a new bit writer.
@@ -104,10 +104,10 @@ func (w *Writer) Flush() error {
 
 // ByteStuffingReader handles JPEG 2000 byte stuffing (0xFF followed by 0x00).
 type ByteStuffingReader struct {
-	r      io.Reader
-	buf    byte
-	cnt    uint8
-	sawFF  bool
+	r     io.Reader
+	buf   byte
+	cnt   uint8
+	sawFF bool
 }
 
 // NewByteStuffingReader creates a reader that handles byte stuffing.

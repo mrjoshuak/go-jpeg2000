@@ -7,9 +7,9 @@ import (
 
 func TestGetColorConversion(t *testing.T) {
 	tests := []struct {
-		cs       ColorSpace
-		hasConv  bool
-		name     string
+		cs      ColorSpace
+		hasConv bool
+		name    string
 	}{
 		{ColorSpaceUnknown, false, "Unknown"},
 		{ColorSpaceUnspecified, false, "Unspecified"},

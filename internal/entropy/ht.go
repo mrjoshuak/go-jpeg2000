@@ -42,36 +42,36 @@ type HTDecoder struct {
 
 // melState holds the MEL decoder state.
 type melState struct {
-	data    []byte  // MEL bitstream data
-	pos     int     // Current position in data
-	tmp     uint64  // Temporary buffer for bits
-	bits    int     // Number of bits in tmp
-	size    int     // Remaining bytes in MEL segment
-	unstuff bool    // True if next bit needs unstuffing
-	k       int     // MEL state (0-12)
-	numRuns int     // Number of decoded runs in queue
-	runs    uint64  // Queue of decoded runs (7 bits each)
+	data    []byte // MEL bitstream data
+	pos     int    // Current position in data
+	tmp     uint64 // Temporary buffer for bits
+	bits    int    // Number of bits in tmp
+	size    int    // Remaining bytes in MEL segment
+	unstuff bool   // True if next bit needs unstuffing
+	k       int    // MEL state (0-12)
+	numRuns int    // Number of decoded runs in queue
+	runs    uint64 // Queue of decoded runs (7 bits each)
 }
 
 // revBitstream reads a backward-growing bitstream (VLC, MRP).
 type revBitstream struct {
-	data    []byte  // Bitstream data
-	pos     int     // Current position (reading backward)
-	tmp     uint64  // Temporary buffer
-	bits    uint32  // Number of bits in tmp
-	size    int     // Remaining bytes
-	unstuff bool    // True if last byte was > 0x8F
+	data    []byte // Bitstream data
+	pos     int    // Current position (reading backward)
+	tmp     uint64 // Temporary buffer
+	bits    uint32 // Number of bits in tmp
+	size    int    // Remaining bytes
+	unstuff bool   // True if last byte was > 0x8F
 }
 
 // frwdBitstream reads a forward-growing bitstream (MagSgn, SPP).
 type frwdBitstream struct {
-	data    []byte  // Bitstream data
-	pos     int     // Current position
-	tmp     uint64  // Temporary buffer
-	bits    uint32  // Number of bits in tmp
-	unstuff bool    // True if next bit needs unstuffing
-	size    int     // Remaining bytes
-	x       uint32  // Value to feed when exhausted (0 or 0xFF)
+	data    []byte // Bitstream data
+	pos     int    // Current position
+	tmp     uint64 // Temporary buffer
+	bits    uint32 // Number of bits in tmp
+	unstuff bool   // True if next bit needs unstuffing
+	size    int    // Remaining bytes
+	x       uint32 // Value to feed when exhausted (0 or 0xFF)
 }
 
 // NewHTDecoder creates a new HTJ2K block decoder.
@@ -937,29 +937,29 @@ type HTEncoder struct {
 
 // melEncState holds the MEL encoder state.
 type melEncState struct {
-	data []byte  // Output buffer
-	tmp  uint64  // Temporary buffer
-	bits int     // Number of bits in tmp
-	k    int     // MEL state (0-12)
-	run  int     // Current run length
+	data []byte // Output buffer
+	tmp  uint64 // Temporary buffer
+	bits int    // Number of bits in tmp
+	k    int    // MEL state (0-12)
+	run  int    // Current run length
 }
 
 // revBitWriter writes bits to a backward-growing stream.
 type revBitWriter struct {
-	data    []byte  // Output buffer
-	pos     int     // Current write position (backward)
-	tmp     uint64  // Temporary buffer
-	bits    int     // Number of bits in tmp
+	data     []byte // Output buffer
+	pos      int    // Current write position (backward)
+	tmp      uint64 // Temporary buffer
+	bits     int    // Number of bits in tmp
 	lastByte byte   // Last byte written (for unstuffing check)
 }
 
 // frwdBitWriter writes bits to a forward-growing stream.
 type frwdBitWriter struct {
-	data     []byte  // Output buffer
-	pos      int     // Current write position
-	tmp      uint64  // Temporary buffer
-	bits     int     // Number of bits in tmp
-	lastByte byte    // Last byte written (for unstuffing)
+	data     []byte // Output buffer
+	pos      int    // Current write position
+	tmp      uint64 // Temporary buffer
+	bits     int    // Number of bits in tmp
+	lastByte byte   // Last byte written (for unstuffing)
 }
 
 // NewHTEncoder creates a new HTJ2K block encoder.

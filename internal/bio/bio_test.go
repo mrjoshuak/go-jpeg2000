@@ -419,9 +419,9 @@ func TestWriter_WriteBits_Error(t *testing.T) {
 
 func TestWriter_Flush(t *testing.T) {
 	tests := []struct {
-		name      string
-		bits      []int
-		expected  []byte
+		name     string
+		bits     []int
+		expected []byte
 	}{
 		{
 			name:     "flush partial byte with 1 bit",
@@ -571,12 +571,12 @@ func TestRoundTrip_MixedBitLengths(t *testing.T) {
 		n   uint
 	}
 	items := []item{
-		{1, 1},      // 1 bit
-		{5, 3},      // 3 bits
-		{0xAB, 8},   // 8 bits
-		{0x3, 2},    // 2 bits
+		{1, 1},       // 1 bit
+		{5, 3},       // 3 bits
+		{0xAB, 8},    // 8 bits
+		{0x3, 2},     // 2 bits
 		{0x1234, 16}, // 16 bits
-		{7, 5},      // 5 bits
+		{7, 5},       // 5 bits
 	}
 
 	// Write

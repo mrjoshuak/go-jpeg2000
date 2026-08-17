@@ -7,27 +7,27 @@ import (
 // Header represents the main header of a JPEG 2000 codestream.
 type Header struct {
 	// SIZ marker data
-	Profile            uint16
-	ImageWidth         uint32
-	ImageHeight        uint32
-	ImageXOffset       uint32
-	ImageYOffset       uint32
-	TileWidth          uint32
-	TileHeight         uint32
-	TileXOffset        uint32
-	TileYOffset        uint32
-	NumComponents      uint16
-	ComponentInfo      []ComponentInfo
+	Profile       uint16
+	ImageWidth    uint32
+	ImageHeight   uint32
+	ImageXOffset  uint32
+	ImageYOffset  uint32
+	TileWidth     uint32
+	TileHeight    uint32
+	TileXOffset   uint32
+	TileYOffset   uint32
+	NumComponents uint16
+	ComponentInfo []ComponentInfo
 
 	// Derived values
 	NumTilesX uint32
 	NumTilesY uint32
 
 	// COD marker data (default coding style)
-	CodingStyle        CodingStyleDefault
+	CodingStyle CodingStyleDefault
 
 	// QCD marker data (default quantization)
-	Quantization       QuantizationDefault
+	Quantization QuantizationDefault
 
 	// Optional per-component coding styles (COC markers)
 	ComponentCodingStyles map[uint16]CodingStyleComponent
@@ -43,11 +43,11 @@ type Header struct {
 
 	// Optional markers
 	ProgressionOrderChanges []ProgressionOrderChange
-	TileLengths            []TileLength
-	PacketLengths          []uint32
-	PackedPacketHeaders    []byte
-	Comment                string
-	CommentType            uint16
+	TileLengths             []TileLength
+	PacketLengths           []uint32
+	PackedPacketHeaders     []byte
+	Comment                 string
+	CommentType             uint16
 }
 
 // ComponentInfo holds per-component size information from the SIZ marker.
@@ -185,12 +185,12 @@ type QuantizationComponent struct {
 
 // ProgressionOrderChange holds data from a POC marker.
 type ProgressionOrderChange struct {
-	ResolutionStart   uint8
-	ComponentStart    uint16
-	LayerEnd          uint16
-	ResolutionEnd     uint8
-	ComponentEnd      uint16
-	ProgressionOrder  uint8
+	ResolutionStart  uint8
+	ComponentStart   uint16
+	LayerEnd         uint16
+	ResolutionEnd    uint8
+	ComponentEnd     uint16
+	ProgressionOrder uint8
 }
 
 // TileLength holds tile-part length information from TLM marker.
@@ -244,18 +244,18 @@ func (h *Header) HasNLT(component int) bool {
 
 // TilePartHeader represents a tile-part header.
 type TilePartHeader struct {
-	TileIndex       uint16
-	TilePartLength  uint32
-	TilePartIndex   uint8
-	NumTileParts    uint8
+	TileIndex      uint16
+	TilePartLength uint32
+	TilePartIndex  uint8
+	NumTileParts   uint8
 
 	// Optional tile-specific coding parameters
-	CodingStyle           *CodingStyleDefault
-	ComponentCodingStyles map[uint16]CodingStyleComponent
-	Quantization          *QuantizationDefault
-	ComponentQuantization map[uint16]QuantizationComponent
+	CodingStyle             *CodingStyleDefault
+	ComponentCodingStyles   map[uint16]CodingStyleComponent
+	Quantization            *QuantizationDefault
+	ComponentQuantization   map[uint16]QuantizationComponent
 	ProgressionOrderChanges []ProgressionOrderChange
-	PackedPacketHeaders   []byte
+	PackedPacketHeaders     []byte
 }
 
 // IsHTJ2K returns true if this header indicates HTJ2K (High-Throughput) mode.

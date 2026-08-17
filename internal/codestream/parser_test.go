@@ -10,8 +10,8 @@ import (
 
 // errorReader returns an error after reading n bytes
 type errorReader struct {
-	data []byte
-	pos  int
+	data  []byte
+	pos   int
 	errAt int
 }
 
@@ -484,14 +484,14 @@ func addCOD(buf *bytes.Buffer, withPrecincts bool) {
 		binary.Write(buf, binary.BigEndian, uint16(12))
 		buf.WriteByte(0) // Scod
 	}
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Layers
-	buf.WriteByte(0)                                // MCT
-	buf.WriteByte(5)                                // Decomposition levels
-	buf.WriteByte(4)                                // Code-block width
-	buf.WriteByte(4)                                // Code-block height
-	buf.WriteByte(0)                                // Code-block style
-	buf.WriteByte(1)                                // Wavelet transform
+	buf.WriteByte(0)                               // MCT
+	buf.WriteByte(5)                               // Decomposition levels
+	buf.WriteByte(4)                               // Code-block width
+	buf.WriteByte(4)                               // Code-block height
+	buf.WriteByte(0)                               // Code-block style
+	buf.WriteByte(1)                               // Wavelet transform
 	if withPrecincts {
 		buf.WriteByte(0x55) // PPx=5, PPy=5
 		buf.WriteByte(0x66) // PPx=6, PPy=6
@@ -527,13 +527,13 @@ func TestParser_ReadCOC(t *testing.T) {
 	// Add COC marker
 	binary.Write(buf, binary.BigEndian, uint16(COC))
 	binary.Write(buf, binary.BigEndian, uint16(9)) // Length
-	buf.WriteByte(1)                                // Component index (1 byte for <257 components)
-	buf.WriteByte(0)                                // Scoc
-	buf.WriteByte(4)                                // NumDecompositions
-	buf.WriteByte(3)                                // CodeBlockWidthExp
-	buf.WriteByte(3)                                // CodeBlockHeightExp
-	buf.WriteByte(0)                                // CodeBlockStyle
-	buf.WriteByte(0)                                // WaveletTransform
+	buf.WriteByte(1)                               // Component index (1 byte for <257 components)
+	buf.WriteByte(0)                               // Scoc
+	buf.WriteByte(4)                               // NumDecompositions
+	buf.WriteByte(3)                               // CodeBlockWidthExp
+	buf.WriteByte(3)                               // CodeBlockHeightExp
+	buf.WriteByte(0)                               // CodeBlockStyle
+	buf.WriteByte(0)                               // WaveletTransform
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -565,15 +565,15 @@ func TestParser_ReadCOCWithPrecincts(t *testing.T) {
 	// We need numPrecinct = length - baseLen = 9 - 7 = 2, so length = 9
 	binary.Write(buf, binary.BigEndian, uint16(COC))
 	binary.Write(buf, binary.BigEndian, uint16(9)) // Length
-	buf.WriteByte(2)                                // Component index
-	buf.WriteByte(CodingStylePrecincts)             // Scoc with precincts
-	buf.WriteByte(4)                                // NumDecompositions
-	buf.WriteByte(3)                                // CodeBlockWidthExp
-	buf.WriteByte(3)                                // CodeBlockHeightExp
-	buf.WriteByte(0)                                // CodeBlockStyle
-	buf.WriteByte(0)                                // WaveletTransform
-	buf.WriteByte(0x44)                             // Precinct size 1
-	buf.WriteByte(0x55)                             // Precinct size 2
+	buf.WriteByte(2)                               // Component index
+	buf.WriteByte(CodingStylePrecincts)            // Scoc with precincts
+	buf.WriteByte(4)                               // NumDecompositions
+	buf.WriteByte(3)                               // CodeBlockWidthExp
+	buf.WriteByte(3)                               // CodeBlockHeightExp
+	buf.WriteByte(0)                               // CodeBlockStyle
+	buf.WriteByte(0)                               // WaveletTransform
+	buf.WriteByte(0x44)                            // Precinct size 1
+	buf.WriteByte(0x55)                            // Precinct size 2
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -597,10 +597,10 @@ func TestParser_ReadQCC(t *testing.T) {
 	// Add QCC marker with no quantization
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
 	binary.Write(buf, binary.BigEndian, uint16(6)) // Length
-	buf.WriteByte(1)                                // Component index
-	buf.WriteByte(0x40 | QuantizationNone)          // Sqcc
-	buf.WriteByte(0x48)                             // exponent
-	buf.WriteByte(0x50)                             // exponent
+	buf.WriteByte(1)                               // Component index
+	buf.WriteByte(0x40 | QuantizationNone)         // Sqcc
+	buf.WriteByte(0x48)                            // exponent
+	buf.WriteByte(0x50)                            // exponent
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -622,7 +622,7 @@ func TestParser_ReadQCCScalarDerived(t *testing.T) {
 
 	// Add QCC marker with scalar derived
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
-	binary.Write(buf, binary.BigEndian, uint16(5)) // Length
+	binary.Write(buf, binary.BigEndian, uint16(5))  // Length
 	buf.WriteByte(0)                                // Component index
 	buf.WriteByte(0x40 | QuantizationScalarDerived) // Sqcc
 	binary.Write(buf, binary.BigEndian, uint16(0x5000))
@@ -650,8 +650,8 @@ func TestParser_ReadQCCScalarExpounded(t *testing.T) {
 	// For <257 components: headerBytes=3, then 1 byte sqcc, then step sizes
 	// Length = headerBytes(3) + 1(sqcc) + 4(2 step sizes) = 8
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
-	binary.Write(buf, binary.BigEndian, uint16(8)) // Length
-	buf.WriteByte(2)                                 // Component index
+	binary.Write(buf, binary.BigEndian, uint16(8))    // Length
+	buf.WriteByte(2)                                  // Component index
 	buf.WriteByte(0x40 | QuantizationScalarExpounded) // Sqcc
 	binary.Write(buf, binary.BigEndian, uint16(0x4800))
 	binary.Write(buf, binary.BigEndian, uint16(0x5000))
@@ -680,12 +680,12 @@ func TestParser_ReadPOC(t *testing.T) {
 	binary.Write(buf, binary.BigEndian, uint16(POC))
 	binary.Write(buf, binary.BigEndian, uint16(9)) // Length = 2 + 7*1
 	// Entry 1
-	buf.WriteByte(0)                                // ResolutionStart
-	buf.WriteByte(0)                                // ComponentStart (1 byte for <257 components)
+	buf.WriteByte(0)                               // ResolutionStart
+	buf.WriteByte(0)                               // ComponentStart (1 byte for <257 components)
 	binary.Write(buf, binary.BigEndian, uint16(1)) // LayerEnd
-	buf.WriteByte(5)                                // ResolutionEnd
-	buf.WriteByte(3)                                // ComponentEnd
-	buf.WriteByte(uint8(RLCP))                      // ProgressionOrder
+	buf.WriteByte(5)                               // ResolutionEnd
+	buf.WriteByte(3)                               // ComponentEnd
+	buf.WriteByte(uint8(RLCP))                     // ProgressionOrder
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -714,10 +714,10 @@ func TestParser_ReadTLM(t *testing.T) {
 	// ST=1 (1 byte tile index), SP=0 (2 byte length)
 	binary.Write(buf, binary.BigEndian, uint16(TLM))
 	binary.Write(buf, binary.BigEndian, uint16(7)) // Length = 4 + 3*1
-	buf.WriteByte(0)                                // Ztlm
-	buf.WriteByte(0x10)                             // Stlm: ST=1, SP=0
+	buf.WriteByte(0)                               // Ztlm
+	buf.WriteByte(0x10)                            // Stlm: ST=1, SP=0
 	// Entry
-	buf.WriteByte(0)                                // Tile index
+	buf.WriteByte(0)                                 // Tile index
 	binary.Write(buf, binary.BigEndian, uint16(100)) // Length
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
@@ -744,8 +744,8 @@ func TestParser_ReadTLMWithDifferentSizes(t *testing.T) {
 
 	binary.Write(buf, binary.BigEndian, uint16(TLM))
 	binary.Write(buf, binary.BigEndian, uint16(10)) // Length = 4 + 6*1
-	buf.WriteByte(0)                                 // Ztlm
-	buf.WriteByte(0x60)                              // Stlm: ST=2, SP=1
+	buf.WriteByte(0)                                // Ztlm
+	buf.WriteByte(0x60)                             // Stlm: ST=2, SP=1
 	// Entry
 	binary.Write(buf, binary.BigEndian, uint16(1))      // Tile index (2 bytes)
 	binary.Write(buf, binary.BigEndian, uint32(100000)) // Length (4 bytes)
@@ -777,8 +777,8 @@ func TestParser_ReadTLMImplicitIndex(t *testing.T) {
 
 	binary.Write(buf, binary.BigEndian, uint16(TLM))
 	binary.Write(buf, binary.BigEndian, uint16(8)) // Length = 4 + 2*2
-	buf.WriteByte(0)                                // Ztlm
-	buf.WriteByte(0x00)                             // Stlm: ST=0, SP=0
+	buf.WriteByte(0)                               // Ztlm
+	buf.WriteByte(0x00)                            // Stlm: ST=0, SP=0
 	// Two entries with implicit indexes
 	binary.Write(buf, binary.BigEndian, uint16(50))
 	binary.Write(buf, binary.BigEndian, uint16(60))
@@ -810,7 +810,7 @@ func TestParser_ReadPLM(t *testing.T) {
 	// Add PLM marker with variable-length encoded values
 	binary.Write(buf, binary.BigEndian, uint16(PLM))
 	binary.Write(buf, binary.BigEndian, uint16(6)) // Length
-	buf.WriteByte(0)                                // Zplm
+	buf.WriteByte(0)                               // Zplm
 	// Variable length encoded values: 0x05 (single byte), 0x81 0x00 (two bytes = 128)
 	buf.WriteByte(0x05)
 	buf.WriteByte(0x81)
@@ -843,7 +843,7 @@ func TestParser_ReadPPM(t *testing.T) {
 	// Add PPM marker
 	binary.Write(buf, binary.BigEndian, uint16(PPM))
 	binary.Write(buf, binary.BigEndian, uint16(7)) // Length
-	buf.WriteByte(0)                                // Zppm
+	buf.WriteByte(0)                               // Zppm
 	buf.Write([]byte{0x01, 0x02, 0x03, 0x04})      // Packed data
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
@@ -894,8 +894,8 @@ func TestParser_ReadCOMBinary(t *testing.T) {
 
 	// Add COM marker with binary data
 	binary.Write(buf, binary.BigEndian, uint16(COM))
-	binary.Write(buf, binary.BigEndian, uint16(8))              // Length
-	binary.Write(buf, binary.BigEndian, uint16(CommentBinary))  // Rcom
+	binary.Write(buf, binary.BigEndian, uint16(8))             // Length
+	binary.Write(buf, binary.BigEndian, uint16(CommentBinary)) // Rcom
 	buf.Write([]byte{0x00, 0x01, 0x02, 0x03})
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
@@ -951,8 +951,8 @@ func createCodestreamWithTilePart() []byte {
 	binary.Write(buf, binary.BigEndian, uint16(10))   // Lsot
 	binary.Write(buf, binary.BigEndian, uint16(0))    // Isot (tile index)
 	binary.Write(buf, binary.BigEndian, uint32(1000)) // Psot (tile-part length)
-	buf.WriteByte(0)                                   // TPsot (tile-part index)
-	buf.WriteByte(1)                                   // TNsot (number of tile-parts)
+	buf.WriteByte(0)                                  // TPsot (tile-part index)
+	buf.WriteByte(1)                                  // TNsot (number of tile-parts)
 
 	// Add SOD marker (start of data)
 	binary.Write(buf, binary.BigEndian, uint16(SOD))
@@ -1007,15 +1007,15 @@ func TestParser_ReadTilePartHeaderWithCOD(t *testing.T) {
 	// Add tile-specific COD
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(1)                                // Progression order (different from default)
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(1)                               // Progression order (different from default)
 	binary.Write(buf, binary.BigEndian, uint16(2)) // Layers
-	buf.WriteByte(1)                                // MCT
-	buf.WriteByte(4)                                // Decomposition levels
-	buf.WriteByte(3)                                // Code-block width
-	buf.WriteByte(3)                                // Code-block height
-	buf.WriteByte(0)                                // Code-block style
-	buf.WriteByte(0)                                // Wavelet transform
+	buf.WriteByte(1)                               // MCT
+	buf.WriteByte(4)                               // Decomposition levels
+	buf.WriteByte(3)                               // Code-block width
+	buf.WriteByte(3)                               // Code-block height
+	buf.WriteByte(0)                               // Code-block style
+	buf.WriteByte(0)                               // Wavelet transform
 
 	binary.Write(buf, binary.BigEndian, uint16(SOD))
 
@@ -1155,12 +1155,12 @@ func TestParser_ReadTilePartHeaderWithPOC(t *testing.T) {
 	// Add tile-specific POC
 	binary.Write(buf, binary.BigEndian, uint16(POC))
 	binary.Write(buf, binary.BigEndian, uint16(9))
-	buf.WriteByte(0)                                // ResolutionStart
-	buf.WriteByte(0)                                // ComponentStart
+	buf.WriteByte(0)                               // ResolutionStart
+	buf.WriteByte(0)                               // ComponentStart
 	binary.Write(buf, binary.BigEndian, uint16(1)) // LayerEnd
-	buf.WriteByte(3)                                // ResolutionEnd
-	buf.WriteByte(3)                                // ComponentEnd
-	buf.WriteByte(uint8(RPCL))                      // ProgressionOrder
+	buf.WriteByte(3)                               // ResolutionEnd
+	buf.WriteByte(3)                               // ComponentEnd
+	buf.WriteByte(uint8(RPCL))                     // ProgressionOrder
 
 	binary.Write(buf, binary.BigEndian, uint16(SOD))
 
@@ -1192,8 +1192,8 @@ func TestParser_ReadTilePartHeaderWithPPT(t *testing.T) {
 	// Add PPT marker
 	binary.Write(buf, binary.BigEndian, uint16(PPT))
 	binary.Write(buf, binary.BigEndian, uint16(6))
-	buf.WriteByte(0)                           // Zppt
-	buf.Write([]byte{0xAA, 0xBB, 0xCC})       // Packed data
+	buf.WriteByte(0)                    // Zppt
+	buf.Write([]byte{0xAA, 0xBB, 0xCC}) // Packed data
 
 	binary.Write(buf, binary.BigEndian, uint16(SOD))
 
@@ -1468,15 +1468,15 @@ func TestParser_TileCOCWithPrecincts(t *testing.T) {
 	// baseLen=7 for <257 components, so numPrecinct = length - baseLen = 9 - 7 = 2
 	binary.Write(buf, binary.BigEndian, uint16(COC))
 	binary.Write(buf, binary.BigEndian, uint16(9)) // baseLen=7 + 2 precincts
-	buf.WriteByte(0)                                // Component index
-	buf.WriteByte(CodingStylePrecincts)             // Scoc with precincts
-	buf.WriteByte(3)                                // NumDecompositions
-	buf.WriteByte(2)                                // CodeBlockWidthExp
-	buf.WriteByte(2)                                // CodeBlockHeightExp
-	buf.WriteByte(0)                                // CodeBlockStyle
-	buf.WriteByte(1)                                // WaveletTransform
-	buf.WriteByte(0x44)                             // Precinct size 1
-	buf.WriteByte(0x55)                             // Precinct size 2
+	buf.WriteByte(0)                               // Component index
+	buf.WriteByte(CodingStylePrecincts)            // Scoc with precincts
+	buf.WriteByte(3)                               // NumDecompositions
+	buf.WriteByte(2)                               // CodeBlockWidthExp
+	buf.WriteByte(2)                               // CodeBlockHeightExp
+	buf.WriteByte(0)                               // CodeBlockStyle
+	buf.WriteByte(1)                               // WaveletTransform
+	buf.WriteByte(0x44)                            // Precinct size 1
+	buf.WriteByte(0x55)                            // Precinct size 2
 
 	binary.Write(buf, binary.BigEndian, uint16(SOD))
 
@@ -1778,7 +1778,7 @@ func TestParser_ReadCOC_ManyComponents(t *testing.T) {
 
 	// Add COC marker for >256 components (2-byte component index)
 	binary.Write(buf, binary.BigEndian, uint16(COC))
-	binary.Write(buf, binary.BigEndian, uint16(10)) // Length (1 extra byte for 2-byte comp index)
+	binary.Write(buf, binary.BigEndian, uint16(10))  // Length (1 extra byte for 2-byte comp index)
 	binary.Write(buf, binary.BigEndian, uint16(100)) // Component index (2 bytes for >=257 components)
 	buf.WriteByte(0)                                 // Scoc
 	buf.WriteByte(4)                                 // NumDecompositions
@@ -1811,7 +1811,7 @@ func TestParser_ReadQCC_ManyComponents(t *testing.T) {
 
 	// Add QCC marker for >256 components (2-byte component index)
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
-	binary.Write(buf, binary.BigEndian, uint16(6)) // Length (headerBytes=4 for >=257 comp)
+	binary.Write(buf, binary.BigEndian, uint16(6))   // Length (headerBytes=4 for >=257 comp)
 	binary.Write(buf, binary.BigEndian, uint16(200)) // Component index (2 bytes)
 	buf.WriteByte(0x40 | QuantizationScalarDerived)
 	binary.Write(buf, binary.BigEndian, uint16(0x5000))
@@ -1842,12 +1842,12 @@ func TestParser_ReadPOC_ManyComponents(t *testing.T) {
 	binary.Write(buf, binary.BigEndian, uint16(POC))
 	binary.Write(buf, binary.BigEndian, uint16(11)) // Length = 2 + 9*1
 	// Entry 1
-	buf.WriteByte(0)                                  // ResolutionStart
+	buf.WriteByte(0)                                 // ResolutionStart
 	binary.Write(buf, binary.BigEndian, uint16(0))   // ComponentStart (2 bytes)
 	binary.Write(buf, binary.BigEndian, uint16(1))   // LayerEnd
-	buf.WriteByte(5)                                  // ResolutionEnd
+	buf.WriteByte(5)                                 // ResolutionEnd
 	binary.Write(buf, binary.BigEndian, uint16(300)) // ComponentEnd (2 bytes)
-	buf.WriteByte(uint8(RLCP))                        // ProgressionOrder
+	buf.WriteByte(uint8(RLCP))                       // ProgressionOrder
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -1881,7 +1881,7 @@ func TestParser_TileCOC_ManyComponents(t *testing.T) {
 
 	// Tile COC for >256 components
 	binary.Write(buf, binary.BigEndian, uint16(COC))
-	binary.Write(buf, binary.BigEndian, uint16(10))   // Length (baseLen=8 for >=257)
+	binary.Write(buf, binary.BigEndian, uint16(10))  // Length (baseLen=8 for >=257)
 	binary.Write(buf, binary.BigEndian, uint16(150)) // Component index
 	buf.WriteByte(0)
 	buf.WriteByte(3)
@@ -1922,8 +1922,8 @@ func TestParser_TileQCC_ManyComponents(t *testing.T) {
 
 	// Tile QCC for >256 components
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
-	binary.Write(buf, binary.BigEndian, uint16(6))    // Length (headerBytes=4 for >=257)
-	binary.Write(buf, binary.BigEndian, uint16(250))  // Component index
+	binary.Write(buf, binary.BigEndian, uint16(6))   // Length (headerBytes=4 for >=257)
+	binary.Write(buf, binary.BigEndian, uint16(250)) // Component index
 	buf.WriteByte(0x40 | QuantizationScalarDerived)
 	binary.Write(buf, binary.BigEndian, uint16(0x5000))
 
@@ -1959,13 +1959,13 @@ func TestParser_TilePOC_ManyComponents(t *testing.T) {
 
 	// Tile POC for >256 components (entrySize=9)
 	binary.Write(buf, binary.BigEndian, uint16(POC))
-	binary.Write(buf, binary.BigEndian, uint16(11)) // Length = 2 + 9*1
-	buf.WriteByte(0)                                  // ResolutionStart
+	binary.Write(buf, binary.BigEndian, uint16(11))  // Length = 2 + 9*1
+	buf.WriteByte(0)                                 // ResolutionStart
 	binary.Write(buf, binary.BigEndian, uint16(0))   // ComponentStart
 	binary.Write(buf, binary.BigEndian, uint16(1))   // LayerEnd
-	buf.WriteByte(3)                                  // ResolutionEnd
+	buf.WriteByte(3)                                 // ResolutionEnd
 	binary.Write(buf, binary.BigEndian, uint16(300)) // ComponentEnd
-	buf.WriteByte(uint8(RPCL))                        // ProgressionOrder
+	buf.WriteByte(uint8(RPCL))                       // ProgressionOrder
 
 	binary.Write(buf, binary.BigEndian, uint16(SOD))
 
@@ -2026,7 +2026,7 @@ func TestParser_ReadQCC_ManyComponentsNoQuantization(t *testing.T) {
 
 	// Add QCC marker for >256 components with no quantization
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
-	binary.Write(buf, binary.BigEndian, uint16(7)) // Length
+	binary.Write(buf, binary.BigEndian, uint16(7))   // Length
 	binary.Write(buf, binary.BigEndian, uint16(200)) // Component index (2 bytes)
 	buf.WriteByte(0x40 | QuantizationNone)
 	buf.WriteByte(0x48)
@@ -2053,7 +2053,7 @@ func TestParser_ReadQCC_ManyComponentsExpounded(t *testing.T) {
 
 	// Add QCC marker for >256 components with scalar expounded
 	binary.Write(buf, binary.BigEndian, uint16(QCC))
-	binary.Write(buf, binary.BigEndian, uint16(9)) // Length = headerBytes(4) + 1(sqcc) + 4(2 step sizes)
+	binary.Write(buf, binary.BigEndian, uint16(9))   // Length = headerBytes(4) + 1(sqcc) + 4(2 step sizes)
 	binary.Write(buf, binary.BigEndian, uint16(200)) // Component index (2 bytes)
 	buf.WriteByte(0x40 | QuantizationScalarExpounded)
 	binary.Write(buf, binary.BigEndian, uint16(0x4800))
@@ -2483,7 +2483,7 @@ func TestParser_readBytes_Error(t *testing.T) {
 	// Add PPM marker that claims more data than available
 	binary.Write(buf, binary.BigEndian, uint16(PPM))
 	binary.Write(buf, binary.BigEndian, uint16(100)) // Length claiming 100 bytes
-	buf.WriteByte(0)                                  // Zppm
+	buf.WriteByte(0)                                 // Zppm
 	// But only provide a few more bytes - not the full 97 bytes needed
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -2831,8 +2831,8 @@ func TestParser_readCOD_ErrorReadingMCT(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Num layers
 	// Missing MCT
 
@@ -2847,10 +2847,10 @@ func TestParser_readCOD_ErrorReadingNumDecomp(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Num layers
-	buf.WriteByte(0)                                // MCT
+	buf.WriteByte(0)                               // MCT
 	// Missing num decomposition levels
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -2864,11 +2864,11 @@ func TestParser_readCOD_ErrorReadingCodeBlockWidth(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Num layers
-	buf.WriteByte(0)                                // MCT
-	buf.WriteByte(5)                                // Num decomposition levels
+	buf.WriteByte(0)                               // MCT
+	buf.WriteByte(5)                               // Num decomposition levels
 	// Missing code block width
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -2882,12 +2882,12 @@ func TestParser_readCOD_ErrorReadingCodeBlockHeight(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Num layers
-	buf.WriteByte(0)                                // MCT
-	buf.WriteByte(5)                                // Num decomposition levels
-	buf.WriteByte(4)                                // Code block width
+	buf.WriteByte(0)                               // MCT
+	buf.WriteByte(5)                               // Num decomposition levels
+	buf.WriteByte(4)                               // Code block width
 	// Missing code block height
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -2901,13 +2901,13 @@ func TestParser_readCOD_ErrorReadingCodeBlockStyle(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Num layers
-	buf.WriteByte(0)                                // MCT
-	buf.WriteByte(5)                                // Num decomposition levels
-	buf.WriteByte(4)                                // Code block width
-	buf.WriteByte(4)                                // Code block height
+	buf.WriteByte(0)                               // MCT
+	buf.WriteByte(5)                               // Num decomposition levels
+	buf.WriteByte(4)                               // Code block width
+	buf.WriteByte(4)                               // Code block height
 	// Missing code block style
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -2921,14 +2921,14 @@ func TestParser_readCOD_ErrorReadingWavelet(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
 	binary.Write(buf, binary.BigEndian, uint16(12))
-	buf.WriteByte(0)                                // Scod
-	buf.WriteByte(0)                                // Progression order
+	buf.WriteByte(0)                               // Scod
+	buf.WriteByte(0)                               // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1)) // Num layers
-	buf.WriteByte(0)                                // MCT
-	buf.WriteByte(5)                                // Num decomposition levels
-	buf.WriteByte(4)                                // Code block width
-	buf.WriteByte(4)                                // Code block height
-	buf.WriteByte(0)                                // Code block style
+	buf.WriteByte(0)                               // MCT
+	buf.WriteByte(5)                               // Num decomposition levels
+	buf.WriteByte(4)                               // Code block width
+	buf.WriteByte(4)                               // Code block height
+	buf.WriteByte(0)                               // Code block style
 	// Missing wavelet transform
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -2941,16 +2941,16 @@ func TestParser_readCOD_ErrorReadingWavelet(t *testing.T) {
 func TestParser_readCOD_ErrorReadingPrecincts(t *testing.T) {
 	buf := createBaseCodestream(1)
 	binary.Write(buf, binary.BigEndian, uint16(COD))
-	binary.Write(buf, binary.BigEndian, uint16(14))  // Length with 2 precinct sizes
-	buf.WriteByte(CodingStylePrecincts)              // Scod with precincts
-	buf.WriteByte(0)                                 // Progression order
+	binary.Write(buf, binary.BigEndian, uint16(14)) // Length with 2 precinct sizes
+	buf.WriteByte(CodingStylePrecincts)             // Scod with precincts
+	buf.WriteByte(0)                                // Progression order
 	binary.Write(buf, binary.BigEndian, uint16(1))  // Num layers
-	buf.WriteByte(0)                                 // MCT
-	buf.WriteByte(5)                                 // Num decomposition levels
-	buf.WriteByte(4)                                 // Code block width
-	buf.WriteByte(4)                                 // Code block height
-	buf.WriteByte(0)                                 // Code block style
-	buf.WriteByte(1)                                 // Wavelet transform
+	buf.WriteByte(0)                                // MCT
+	buf.WriteByte(5)                                // Num decomposition levels
+	buf.WriteByte(4)                                // Code block width
+	buf.WriteByte(4)                                // Code block height
+	buf.WriteByte(0)                                // Code block style
+	buf.WriteByte(1)                                // Wavelet transform
 	// Missing precinct sizes
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -3271,7 +3271,7 @@ func TestParser_ReadTilePartHeader_ErrorReadingNumTileParts(t *testing.T) {
 	binary.Write(buf, binary.BigEndian, uint16(10))
 	binary.Write(buf, binary.BigEndian, uint16(0))    // Tile index
 	binary.Write(buf, binary.BigEndian, uint32(1000)) // Tile-part length
-	buf.WriteByte(0)                                   // Tile-part index
+	buf.WriteByte(0)                                  // Tile-part index
 	// Missing num tile-parts
 
 	parser := NewParser(bytes.NewReader(buf.Bytes()))
@@ -3439,7 +3439,7 @@ func TestParser_ReadCAP(t *testing.T) {
 
 	// Add CAP marker with HTJ2K bit set
 	binary.Write(buf, binary.BigEndian, uint16(CAP))
-	binary.Write(buf, binary.BigEndian, uint16(6))         // Length: 2 + 4
+	binary.Write(buf, binary.BigEndian, uint16(6))            // Length: 2 + 4
 	binary.Write(buf, binary.BigEndian, uint32(CapPcapHTJ2K)) // Pcap with HTJ2K flag
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
@@ -3468,10 +3468,10 @@ func TestParser_ReadCAP_WithCCAPi(t *testing.T) {
 
 	// CAP with Pcap + 2 CCAPi entries
 	binary.Write(buf, binary.BigEndian, uint16(CAP))
-	binary.Write(buf, binary.BigEndian, uint16(10))            // Length: 2 + 4 + 4
-	binary.Write(buf, binary.BigEndian, uint32(CapPcapHTJ2K))  // Pcap
-	binary.Write(buf, binary.BigEndian, uint16(0x2020))        // CCAPi[0]
-	binary.Write(buf, binary.BigEndian, uint16(0x4040))        // CCAPi[1]
+	binary.Write(buf, binary.BigEndian, uint16(10))           // Length: 2 + 4 + 4
+	binary.Write(buf, binary.BigEndian, uint32(CapPcapHTJ2K)) // Pcap
+	binary.Write(buf, binary.BigEndian, uint16(0x2020))       // CCAPi[0]
+	binary.Write(buf, binary.BigEndian, uint16(0x4040))       // CCAPi[1]
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -3523,9 +3523,9 @@ func TestParser_ReadNLT(t *testing.T) {
 	// Add NLT marker: component 0, 32-bit signed (0x9F), transform type 3
 	binary.Write(buf, binary.BigEndian, uint16(NLT))
 	binary.Write(buf, binary.BigEndian, uint16(5)) // Length: 2 + 3
-	buf.WriteByte(0)    // Cnlt: component 0
-	buf.WriteByte(0x9F) // BDnlt: signed 32-bit (bit7=1, bits0-6=31 -> precision 32)
-	buf.WriteByte(3)    // Tnlt: type 3 (sign-magnitude transform)
+	buf.WriteByte(0)                               // Cnlt: component 0
+	buf.WriteByte(0x9F)                            // BDnlt: signed 32-bit (bit7=1, bits0-6=31 -> precision 32)
+	buf.WriteByte(3)                               // Tnlt: type 3 (sign-magnitude transform)
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 
@@ -3589,7 +3589,7 @@ func TestParser_ReadNLT_TooShort(t *testing.T) {
 
 	binary.Write(buf, binary.BigEndian, uint16(NLT))
 	binary.Write(buf, binary.BigEndian, uint16(3)) // Length too short (< 5)
-	buf.WriteByte(0) // Partial data
+	buf.WriteByte(0)                               // Partial data
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
 

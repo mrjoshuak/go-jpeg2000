@@ -27,7 +27,7 @@ func FuzzT1Decode(f *testing.F) {
 // FuzzHTDecode tests the HTJ2K decoder with arbitrary input.
 func FuzzHTDecode(f *testing.F) {
 	// Minimal HT data with SCUP marker
-	f.Add([]byte{0x00, 0x02}) // Minimal SCUP = 2
+	f.Add([]byte{0x00, 0x02})             // Minimal SCUP = 2
 	f.Add([]byte{0x00, 0x00, 0x00, 0x04}) // SCUP = 4
 	f.Add([]byte{})
 	f.Add([]byte{0x00})

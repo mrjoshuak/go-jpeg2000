@@ -308,12 +308,12 @@ func TestGetSignContrib(t *testing.T) {
 		flag     T1Flags
 		expected int
 	}{
-		{0, 0},                      // Not significant
-		{T1Sig, 1},                  // Significant, positive
-		{T1Sig | T1SignNeg, -1},     // Significant, negative
-		{T1SignNeg, 0},              // Has sign flag but not significant
-		{T1Visit, 0},                // Other flags only
-		{T1Sig | T1Visit, 1},        // Significant with visit
+		{0, 0},                             // Not significant
+		{T1Sig, 1},                         // Significant, positive
+		{T1Sig | T1SignNeg, -1},            // Significant, negative
+		{T1SignNeg, 0},                     // Has sign flag but not significant
+		{T1Visit, 0},                       // Other flags only
+		{T1Sig | T1Visit, 1},               // Significant with visit
 		{T1Sig | T1SignNeg | T1Refine, -1}, // Multiple flags
 	}
 
@@ -404,8 +404,8 @@ func TestMqByteOutRare(t *testing.T) {
 		expectedCT uint32
 	}{
 		{"0xFF byte", 0xFF, 0xFFFFF, 7},
-		{"carry causes 0xFF", 0xFE, 0x8000000, 7},     // increment to 0xFF
-		{"carry no 0xFF", 0x00, 0x8000000, 8},         // increment doesn't cause 0xFF
+		{"carry causes 0xFF", 0xFE, 0x8000000, 7}, // increment to 0xFF
+		{"carry no 0xFF", 0x00, 0x8000000, 8},     // increment doesn't cause 0xFF
 	}
 
 	for _, tt := range tests {
@@ -967,44 +967,44 @@ func TestT1_NegativeData(t *testing.T) {
 // Test mqByteOutLocal directly
 func TestMqByteOutLocal(t *testing.T) {
 	tests := []struct {
-		name       string
-		buf        []byte
-		bp         int
-		c          uint32
-		expectBp   int
-		expectCT   uint32
+		name     string
+		buf      []byte
+		bp       int
+		c        uint32
+		expectBp int
+		expectCT uint32
 	}{
 		{
-			name:       "normal byte",
-			buf:        []byte{0x00, 0x00, 0x00},
-			bp:         0,
-			c:          0x100000,
-			expectBp:   1,
-			expectCT:   8,
+			name:     "normal byte",
+			buf:      []byte{0x00, 0x00, 0x00},
+			bp:       0,
+			c:        0x100000,
+			expectBp: 1,
+			expectCT: 8,
 		},
 		{
-			name:       "0xFF byte",
-			buf:        []byte{0xFF, 0x00, 0x00},
-			bp:         0,
-			c:          0x100000,
-			expectBp:   1,
-			expectCT:   7,
+			name:     "0xFF byte",
+			buf:      []byte{0xFF, 0x00, 0x00},
+			bp:       0,
+			c:        0x100000,
+			expectBp: 1,
+			expectCT: 7,
 		},
 		{
-			name:       "carry bit set",
-			buf:        []byte{0x00, 0x00, 0x00},
-			bp:         0,
-			c:          0x8000000,
-			expectBp:   1,
-			expectCT:   8,
+			name:     "carry bit set",
+			buf:      []byte{0x00, 0x00, 0x00},
+			bp:       0,
+			c:        0x8000000,
+			expectBp: 1,
+			expectCT: 8,
 		},
 		{
-			name:       "carry causes 0xFF",
-			buf:        []byte{0xFE, 0x00, 0x00},
-			bp:         0,
-			c:          0x8000000,
-			expectBp:   1,
-			expectCT:   7,
+			name:     "carry causes 0xFF",
+			buf:      []byte{0xFE, 0x00, 0x00},
+			bp:       0,
+			c:        0x8000000,
+			expectBp: 1,
+			expectCT: 7,
 		},
 	}
 
@@ -1024,18 +1024,18 @@ func TestMqByteOutLocal(t *testing.T) {
 // Test getSignContextParams directly
 func TestGetSignContextParams(t *testing.T) {
 	tests := []struct {
-		hc, vc     int
-		expectCtx  uint8
-		expectXor  uint8
+		hc, vc    int
+		expectCtx uint8
+		expectXor uint8
 	}{
-		{0, 0, 10, 0},   // CtxSC0
-		{1, 0, 12, 0},   // CtxSC2
-		{0, 1, 11, 0},   // CtxSC1
-		{1, 1, 14, 0},   // CtxSC4
-		{-1, 0, 12, 1},  // negative h -> xorbit
-		{0, -1, 11, 1},  // negative v, h=0 -> xorbit
-		{2, 0, 12, 0},   // h > 1 clamped to 1
-		{0, 2, 11, 0},   // v > 1 clamped to 1
+		{0, 0, 10, 0},  // CtxSC0
+		{1, 0, 12, 0},  // CtxSC2
+		{0, 1, 11, 0},  // CtxSC1
+		{1, 1, 14, 0},  // CtxSC4
+		{-1, 0, 12, 1}, // negative h -> xorbit
+		{0, -1, 11, 1}, // negative v, h=0 -> xorbit
+		{2, 0, 12, 0},  // h > 1 clamped to 1
+		{0, 2, 11, 0},  // v > 1 clamped to 1
 	}
 
 	for _, tt := range tests {
@@ -1226,7 +1226,7 @@ func TestT1_EncodeRunLength_Direct(t *testing.T) {
 	t1 := NewT1(8, 8)
 	data := make([]int32, 64)
 	// Set specific pattern for run length
-	data[2] = 128 // y=0, x=2
+	data[2] = 128  // y=0, x=2
 	data[10] = 128 // y=1, x=2
 	t1.SetData(data)
 	t1.bandType = BandLL

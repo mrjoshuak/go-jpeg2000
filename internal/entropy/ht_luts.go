@@ -283,4 +283,3 @@ var vlcTbl1 = [1024]uint16{
 // MEL exponents table - defines the number of bits to decode for each MEL state.
 // The MEL state machine has 13 possible states (k = 0 to 12).
 var melExp = [13]int{0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5}
-

@@ -32,9 +32,9 @@ type PacketIterator struct {
 	order codestream.ProgressionOrder
 
 	// Bounds
-	resStart, resEnd int
+	resStart, resEnd   int
 	compStart, compEnd int
-	layStart, layEnd int
+	layStart, layEnd   int
 }
 
 // NewPacketIterator creates a packet iterator.

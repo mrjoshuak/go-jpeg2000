@@ -160,9 +160,9 @@ type TagTree struct {
 }
 
 type tagNode struct {
-	value    int
-	low      int
-	known    bool
+	value int
+	low   int
+	known bool
 }
 
 // NewTagTree creates a new tag tree.

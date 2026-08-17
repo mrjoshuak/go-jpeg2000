@@ -8,4 +8,3 @@ func clearFlagsFast(flags []T1Flags) {
 		flags[i] = 0
 	}
 }
-
