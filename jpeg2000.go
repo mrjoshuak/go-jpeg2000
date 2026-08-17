@@ -352,6 +352,42 @@ func EncodeFloat(w io.Writer, img *FloatImage, o *Options) error {
 	return e.encodeFloat()
 }
 
+// EncodeHalf writes a HalfImage to w in JPEG 2000 format.
+// Half encoding is always lossless (5/3 reversible wavelet): the IEEE 754
+// binary16 bit patterns are reinterpreted as signed 16-bit samples and an NLT
+// Type 3 marker with a 16-bit depth signals the decoder to apply the
+// sign-magnitude transform at that width.
+func EncodeHalf(w io.Writer, img *HalfImage, o *Options) error {
+	if o == nil {
+		o = DefaultOptions()
+	}
+	// Copy before forcing Lossless: o belongs to the caller, and reusing it for
+	// a later Encode must not silently inherit a setting made here.
+	opts := *o
+	opts.Lossless = true // half encoding is always lossless
+	e := &encoder{
+		w:       w,
+		options: &opts,
+		halfImg: img,
+	}
+	return e.encodeHalf()
+}
+
+// DecodeHalf reads a JPEG 2000 image written by EncodeHalf and returns the
+// exact binary16 bit patterns. It returns an error if the codestream does not
+// carry 16-bit NLT Type 3 samples, rather than silently reinterpreting data
+// that is not half float.
+func DecodeHalf(r io.Reader) (*HalfImage, error) {
+	return DecodeHalfConfig(r, nil)
+}
+
+// DecodeHalfConfig decodes a half-float JPEG 2000 image with the specified
+// configuration.
+func DecodeHalfConfig(r io.Reader, cfg *Config) (*HalfImage, error) {
+	d := newDecoder(r)
+	return d.decodeHalf(cfg)
+}
+
 // DecodeFloat reads a JPEG 2000 image and returns it as a FloatImage,
 // preserving float precision from the wavelet transform pipeline.
 func DecodeFloat(r io.Reader) (*FloatImage, error) {

@@ -242,6 +242,19 @@ func (h *Header) HasNLT(component int) bool {
 	return false
 }
 
+// NLTPrecision returns the sample precision declared by the NLT marker for
+// the given component, and whether that component has an NLT marker at all.
+// The point transform is defined over samples of this width, which is not
+// necessarily the same as the component precision in SIZ.
+func (h *Header) NLTPrecision(component int) (int, bool) {
+	for _, nlt := range h.NLTMarkers {
+		if int(nlt.ComponentIndex) == component {
+			return int(nlt.BitDepth&0x7F) + 1, true
+		}
+	}
+	return 0, false
+}
+
 // TilePartHeader represents a tile-part header.
 type TilePartHeader struct {
 	TileIndex      uint16

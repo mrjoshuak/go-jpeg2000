@@ -339,10 +339,8 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 
 	// Apply inverse NLT after DC shift
 	if hasNLT {
-		for c := 0; c < numComp; c++ {
-			if h.HasNLT(c) {
-				nltType3(componentData[c])
-			}
+		if err := d.inverseNLT(componentData); err != nil {
+			return nil, err
 		}
 	}
 
@@ -848,21 +846,30 @@ func clampInt32(v, min, max int32) int32 {
 	return v
 }
 
-// decodeFloat decodes the image as a FloatImage.
-func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
-	if err := d.readFormat(); err != nil {
-		return nil, fmt.Errorf("reading format: %w", err)
+// inverseNLT applies the inverse NLT Type 3 point transform to every component
+// that carries an NLT marker, at the sample width that marker declares. A
+// precision the transform is not defined for is reported as an error rather
+// than skipped, because skipping it would hand back plausible-looking but
+// wrong samples.
+func (d *decoder) inverseNLT(componentData [][]int32) error {
+	for c := range componentData {
+		precision, ok := d.header.NLTPrecision(c)
+		if !ok {
+			continue
+		}
+		if precision < 2 || precision > 32 {
+			return fmt.Errorf("NLT component %d declares unsupported precision %d", c, precision)
+		}
+		nltType3(componentData[c], precision)
 	}
-
-	if err := d.parseCodestream(); err != nil {
-		return nil, fmt.Errorf("parsing codestream: %w", err)
-	}
-
-	return d.decodeTilesFloat(cfg)
+	return nil
 }
 
-// decodeTilesFloat decodes all tiles and assembles a FloatImage output.
-func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
+// decodePlanes decodes all tiles and applies the inverse component transform,
+// the inverse DC level shift and the inverse NLT point transform, returning
+// the reconstructed component sample planes. It is shared by the FloatImage
+// and HalfImage decode paths.
+func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, height int, err error) {
 	h := d.header
 
 	reduce := 0
@@ -870,15 +877,14 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 		reduce = cfg.ReduceResolution
 	}
 
-	width := reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
-	height := reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
+	width = reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
+	height = reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
 
 	numComp := int(h.NumComponents)
 	if numComp == 0 || len(h.ComponentInfo) == 0 {
-		return nil, fmt.Errorf("invalid image: no components")
+		return nil, 0, 0, fmt.Errorf("invalid image: no components")
 	}
 	precision := h.ComponentInfo[0].Precision()
-	signed := h.ComponentInfo[0].IsSigned()
 
 	// Check if any component has NLT (float mode)
 	hasNLT := false
@@ -890,7 +896,7 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 	}
 
 	// Decode tiles into int32 component data (same as integer path)
-	componentData := make([][]int32, numComp)
+	componentData = make([][]int32, numComp)
 	for c := 0; c < numComp; c++ {
 		componentData[c] = make([]int32, width*height)
 	}
@@ -906,7 +912,7 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
 		if err := d.decodeTile(tileDecoder, tileIdx, componentData, width, height, cfg); err != nil {
-			return nil, fmt.Errorf("decoding tile %d: %w", tileIdx, err)
+			return nil, 0, 0, fmt.Errorf("decoding tile %d: %w", tileIdx, err)
 		}
 	}
 
@@ -943,23 +949,139 @@ func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
 		}
 	}
 
-	// Apply inverse NLT and reinterpret as float
+	// Apply inverse NLT after DC shift
 	if hasNLT {
-		for c := 0; c < numComp; c++ {
-			if h.HasNLT(c) {
-				nltType3(componentData[c])
-			}
+		if err := d.inverseNLT(componentData); err != nil {
+			return nil, 0, 0, err
 		}
+	}
 
-		// Reinterpret int32 bits as float32
+	return componentData, width, height, nil
+}
+
+// decodeHalf decodes the image as a HalfImage.
+func (d *decoder) decodeHalf(cfg *Config) (*HalfImage, error) {
+	// A reduced-resolution decode stops the inverse wavelet at an LL subband,
+	// so the surviving int32 values are wavelet coefficients in the
+	// sign-magnitude domain, not samples. Reinterpreting those as binary16
+	// yields arbitrary bit patterns -- measured: a smooth 0..1 gradient comes
+	// back with negative values. Refuse rather than return silent garbage.
+	if cfg != nil && cfg.ReduceResolution > 0 {
+		return nil, fmt.Errorf("jpeg2000: ReduceResolution is not supported for half decoding: " +
+			"reduced-resolution output is wavelet-domain data, not half samples")
+	}
+
+	if err := d.readFormat(); err != nil {
+		return nil, fmt.Errorf("reading format: %w", err)
+	}
+
+	if err := d.parseCodestream(); err != nil {
+		return nil, fmt.Errorf("parsing codestream: %w", err)
+	}
+
+	h := d.header
+	numComp := int(h.NumComponents)
+	if numComp == 0 || len(h.ComponentInfo) == 0 {
+		return nil, fmt.Errorf("invalid image: no components")
+	}
+
+	// Refuse anything that is not 16-bit half sample data. Decoding it as
+	// half anyway would produce silent garbage.
+	for c := 0; c < numComp; c++ {
+		nltPrecision, isNLT := h.NLTPrecision(c)
+		if !isNLT {
+			return nil, fmt.Errorf("component %d has no NLT marker: not half float data", c)
+		}
+		if nltPrecision != 16 {
+			return nil, fmt.Errorf("component %d declares %d-bit NLT samples, want 16", c, nltPrecision)
+		}
+		if p := h.ComponentInfo[c].Precision(); p != 16 {
+			return nil, fmt.Errorf("component %d has %d-bit precision, want 16", c, p)
+		}
+		if !h.ComponentInfo[c].IsSigned() {
+			return nil, fmt.Errorf("component %d is unsigned: not half float data", c)
+		}
+	}
+
+	componentData, width, height, err := d.decodePlanes(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	components := make([][]uint16, numComp)
+	for c := 0; c < numComp; c++ {
+		components[c] = make([]uint16, width*height)
+		for i, v := range componentData[c] {
+			components[c][i] = uint16(v)
+		}
+	}
+
+	return &HalfImage{
+		Width:      width,
+		Height:     height,
+		Components: components,
+	}, nil
+}
+
+// decodeFloat decodes the image as a FloatImage.
+func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
+	if err := d.readFormat(); err != nil {
+		return nil, fmt.Errorf("reading format: %w", err)
+	}
+
+	if err := d.parseCodestream(); err != nil {
+		return nil, fmt.Errorf("parsing codestream: %w", err)
+	}
+
+	return d.decodeTilesFloat(cfg)
+}
+
+// decodeTilesFloat decodes all tiles and assembles a FloatImage output.
+func (d *decoder) decodeTilesFloat(cfg *Config) (*FloatImage, error) {
+	h := d.header
+
+	numComp := int(h.NumComponents)
+	if numComp == 0 || len(h.ComponentInfo) == 0 {
+		return nil, fmt.Errorf("invalid image: no components")
+	}
+	precision := h.ComponentInfo[0].Precision()
+	signed := h.ComponentInfo[0].IsSigned()
+
+	// Check if any component has NLT (float mode)
+	hasNLT := false
+	for c := 0; c < numComp; c++ {
+		if h.HasNLT(c) {
+			hasNLT = true
+			break
+		}
+	}
+
+	componentData, width, height, err := d.decodePlanes(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reinterpret as float
+	if hasNLT {
+		// Reinterpret the sample bits as floating point at the width the NLT
+		// marker declares: binary32 bit patterns directly, binary16 patterns
+		// widened to float32.
 		components := make([][]float32, numComp)
 		for c := 0; c < numComp; c++ {
 			components[c] = make([]float32, width*height)
-			if h.HasNLT(c) {
+			nltPrecision, isNLT := h.NLTPrecision(c)
+			switch {
+			case isNLT && nltPrecision == 32:
 				for i, v := range componentData[c] {
 					components[c][i] = math.Float32frombits(uint32(v))
 				}
-			} else {
+			case isNLT && nltPrecision == 16:
+				for i, v := range componentData[c] {
+					components[c][i] = halfToFloat32(uint16(v))
+				}
+			case isNLT:
+				return nil, fmt.Errorf("NLT component %d has unsupported float width %d", c, nltPrecision)
+			default:
 				for i, v := range componentData[c] {
 					components[c][i] = float32(v)
 				}

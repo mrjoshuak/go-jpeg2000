@@ -475,6 +475,9 @@ func (p *Parser) readQCD() error {
 
 	// Read step sizes based on quantization style
 	remaining := int(length) - 3
+	if remaining < 0 {
+		return fmt.Errorf("marker segment length %d is too short", length)
+	}
 	style := sqcd & 0x1F
 
 	switch style {
@@ -766,6 +769,9 @@ func (p *Parser) readPLM() error {
 
 	// Read packet lengths (variable length encoded)
 	remaining := int(length) - 3
+	if remaining < 0 {
+		return fmt.Errorf("marker segment length %d is too short", length)
+	}
 	for remaining > 0 {
 		val, n, err := p.readVariableLength()
 		if err != nil {
@@ -809,6 +815,9 @@ func (p *Parser) readPPM() error {
 	}
 
 	// Read packed data
+	if int(length) < 3 {
+		return fmt.Errorf("marker segment length %d is too short", length)
+	}
 	data, err := p.readBytes(int(length) - 3)
 	if err != nil {
 		return err
@@ -1189,6 +1198,9 @@ func (p *Parser) readQCDInto(qcd *QuantizationDefault) error {
 	qcd.NumGuardBits = sqcd >> 5
 
 	remaining := int(length) - 3
+	if remaining < 0 {
+		return fmt.Errorf("marker segment length %d is too short", length)
+	}
 	style := sqcd & 0x1F
 
 	switch style {
@@ -1392,5 +1404,8 @@ func (p *Parser) readPPT() ([]byte, error) {
 		return nil, err
 	}
 
+	if int(length) < 3 {
+		return nil, fmt.Errorf("marker segment length %d is too short", length)
+	}
 	return p.readBytes(int(length) - 3)
 }

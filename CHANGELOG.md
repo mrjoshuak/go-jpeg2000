@@ -5,10 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-08-17
+
+### Added
+- `HalfImage`, `EncodeHalf`, `DecodeHalf` and `DecodeHalfConfig`: IEEE 754
+  binary16 support, carried as the exact 16-bit patterns rather than widened to
+  float32. Verified lossless across all 65536 bit patterns, including
+  subnormals, negative zero, infinities and signalling NaN payloads. The names
+  and shapes mirror the existing `FloatImage` / `EncodeFloat` / `DecodeFloat`
+  family.
 
 ### Fixed
-- Parallel encoding data race (remainder of the 1.2.0 fix): the worker read
+- **HighThroughput mode emitted non-conforming code-block dimensions.** The COD
+  segment signalled `xcb'=ycb'=5`, i.e. 128x128 blocks, whose exponents sum to
+  14. ISO/IEC 15444-1 Table A.18 requires `xcb + ycb <= 12`, so conforming
+  decoders rejected the codestream outright — OpenJPEG with "Invalid cblkw/cblkh
+  combination", and OpenJPH refuses to even produce such a stream. Code-block
+  exponents are now clamped to the legal range.
+- **The COD marker disagreed with the actual tile partition.** `generateCOD` and
+  `encodeTile` derived the code-block size independently, so in HighThroughput
+  mode the header advertised a size the payload did not use and any image larger
+  than one code-block decoded to a blank frame. Both now share a single
+  `codeBlockExponents`.
+- **Parallel encoding data race** (remainder of the 1.2.0 fix): the worker read
   `T1.TruncationPoints()` *after* handing its `*T1` back to the pool, so another
   worker could already be encoding into that same `*T1`. The truncation points are
   now copied before `PutT1`. Besides the race, this could silently corrupt the
@@ -18,6 +37,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TestEncodeParallelMatchesSequential` and `TestEncodeConcurrentStable`, which pin
   the parallel code-block encoder to the sequential one byte-for-byte and would
   catch any future use of pooled `T1` state after it has been released.
+- Marker segments declaring a length shorter than their own header no longer
+  panic the decoder with `makeslice: len out of range`. A truncated or hostile
+  codestream now returns an error from every public decode entry point.
+
+### Known limitations
+- OpenJPH-based decoders (including OpenEXR 3.4+) still reject this library's
+  HighThroughput output: the encoder writes a CAP marker but does not set Rsiz
+  bit 14 in SIZ, so OpenJPH reports "this is not a JPH file". The code-block fix
+  above is necessary but not sufficient for that interoperability.
+- `opj_decompress` parses this library's codestreams after the code-block fix but
+  does not recover coefficients from them, decoding to a single flat value.
+  Reading back with this library is exact; cross-decoder interoperability is not
+  yet established.
+- `DecodeHalfConfig` rejects `ReduceResolution > 0`. A reduced-resolution decode
+  stops the inverse wavelet at an LL subband, so the values are wavelet
+  coefficients rather than samples and reinterpreting them as binary16 would
+  produce silent garbage.
+
+## [1.2.1] - 2026-02-28
+
+### Fixed
+- Generic fallback now detects alpha support from the colour model.
 
 ## [1.2.0] - 2026-02-28
 

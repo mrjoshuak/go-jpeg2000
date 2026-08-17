@@ -33,9 +33,81 @@ type encoder struct {
 	// Component data
 	componentData [][]int32
 
-	// Float encoding state
+	// Float encoding state. isFloat marks sample data that is carried through
+	// the integer pipeline as a reinterpreted floating-point bit pattern and
+	// therefore needs the NLT Type 3 point transform; it covers both binary32
+	// (floatImg) and binary16 (halfImg) samples.
 	isFloat  bool
 	floatImg *FloatImage
+	halfImg  *HalfImage
+}
+
+// numResolutions returns the number of resolution levels to encode,
+// defaulting to six when the option is unset. Every part of the encoder must
+// agree on this value: the COD marker records it, and the DWT, the subband
+// layout and the code-block partition are all derived from it.
+func (e *encoder) numResolutions() int {
+	if e.options.NumResolutions <= 0 {
+		return 6
+	}
+	return e.options.NumResolutions
+}
+
+// codeBlockExponents returns the log2 code-block width and height. The COD
+// marker carries these values and the decoder partitions the subbands with
+// them, so the encoder must partition with exactly the same numbers.
+//
+// The values are held to the limits ISO/IEC 15444-1 Table A.18 places on
+// them — each exponent in [2, 10] and their sum at most 12, i.e. at most
+// 4096 samples per code-block — because a decoder is entitled to reject
+// anything outside that range. A requested 128x128 block therefore becomes
+// 64x64.
+func (e *encoder) codeBlockExponents() (int, int) {
+	xcb, ycb := e.options.CodeBlockSize.X, e.options.CodeBlockSize.Y
+
+	if e.options.HighThroughput {
+		xcb = log2BlockSize(e.options.HTBlockWidth)
+		ycb = log2BlockSize(e.options.HTBlockHeight)
+	}
+
+	if xcb <= 0 {
+		xcb = 6 // default: 2^6 = 64
+	}
+	if ycb <= 0 {
+		ycb = 6
+	}
+
+	xcb = clampInt(xcb, 2, 10)
+	ycb = clampInt(ycb, 2, 10)
+	for xcb+ycb > 12 {
+		if xcb >= ycb {
+			xcb--
+		} else {
+			ycb--
+		}
+	}
+	return xcb, ycb
+}
+
+// log2BlockSize converts a code-block edge length to its log2 exponent,
+// returning 0 for a size that is not a power of two in the usable range.
+func log2BlockSize(size int) int {
+	for exp := 2; exp <= 10; exp++ {
+		if size == 1<<exp {
+			return exp
+		}
+	}
+	return 0
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // maxPrecision returns the maximum precision across all components.
@@ -254,6 +326,18 @@ func (e *encoder) extractImageData() error {
 // extractFloatData extracts pixel data from a FloatImage, reinterpreting
 // IEEE 754 float32 bits as int32 values for the integer wavelet pipeline.
 func (e *encoder) extractFloatData() error {
+	if e.floatImg == nil || len(e.floatImg.Components) == 0 {
+		return fmt.Errorf("float image has no components")
+	}
+	if e.floatImg.Width <= 0 || e.floatImg.Height <= 0 {
+		return fmt.Errorf("invalid float image size %dx%d", e.floatImg.Width, e.floatImg.Height)
+	}
+	want := e.floatImg.Width * e.floatImg.Height
+	for c, comp := range e.floatImg.Components {
+		if len(comp) != want {
+			return fmt.Errorf("float component %d has %d samples, want %d", c, len(comp), want)
+		}
+	}
 	e.isFloat = true
 	e.numComponents = len(e.floatImg.Components)
 	e.componentPrecision = make([]int, e.numComponents)
@@ -302,12 +386,79 @@ func (e *encoder) encodeFloat() error {
 	}
 }
 
+// extractHalfData extracts pixel data from a HalfImage, reinterpreting the
+// IEEE 754 binary16 bit patterns as signed 16-bit values (sign-extended into
+// int32) for the integer wavelet pipeline.
+func (e *encoder) extractHalfData() error {
+	if e.halfImg == nil || len(e.halfImg.Components) == 0 {
+		return fmt.Errorf("half image has no components")
+	}
+	if e.halfImg.Width <= 0 || e.halfImg.Height <= 0 {
+		return fmt.Errorf("invalid half image size %dx%d", e.halfImg.Width, e.halfImg.Height)
+	}
+	want := e.halfImg.Width * e.halfImg.Height
+	for c, comp := range e.halfImg.Components {
+		if len(comp) != want {
+			return fmt.Errorf("half component %d has %d samples, want %d", c, len(comp), want)
+		}
+	}
+
+	e.isFloat = true
+	e.numComponents = len(e.halfImg.Components)
+	e.componentPrecision = make([]int, e.numComponents)
+	e.componentSigned = make([]bool, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		e.componentPrecision[c] = 16
+		e.componentSigned[c] = true
+	}
+	e.width = e.halfImg.Width
+	e.height = e.halfImg.Height
+
+	e.componentData = make([][]int32, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		e.componentData[c] = make([]int32, want)
+		for i, h := range e.halfImg.Components[c] {
+			// Sign-extend: the half sign bit becomes the int32 sign bit, which
+			// is what the NLT Type 3 transform keys off.
+			e.componentData[c][i] = int32(int16(h))
+		}
+	}
+
+	return nil
+}
+
+// encodeHalf encodes a HalfImage.
+func (e *encoder) encodeHalf() error {
+	if err := e.extractHalfData(); err != nil {
+		return fmt.Errorf("extracting half data: %w", err)
+	}
+
+	if err := e.preprocess(); err != nil {
+		return fmt.Errorf("preprocessing: %w", err)
+	}
+
+	cs, err := e.generateCodestream()
+	if err != nil {
+		return fmt.Errorf("generating codestream: %w", err)
+	}
+
+	switch e.options.Format {
+	case FormatJP2:
+		return e.writeJP2(cs)
+	case FormatJ2K:
+		_, err := e.w.Write(cs)
+		return err
+	default:
+		return fmt.Errorf("unsupported format: %s", e.options.Format)
+	}
+}
+
 // preprocess applies preprocessing transforms.
 func (e *encoder) preprocess() error {
 	// For float data, apply NLT Type 3 before anything else
 	if e.isFloat {
 		for c := 0; c < e.numComponents; c++ {
-			nltType3(e.componentData[c])
+			nltType3(e.componentData[c], e.componentPrecision[c])
 		}
 	}
 
@@ -348,11 +499,10 @@ func (e *encoder) preprocess() error {
 		}
 	}
 
-	// Apply DWT
-	numLevels := e.options.NumResolutions - 1
-	if numLevels <= 0 {
-		numLevels = 5
-	}
+	// Apply DWT. The level count must match the COD marker exactly: one
+	// fewer than the resolution count, including zero levels when only the
+	// base resolution is coded.
+	numLevels := e.numResolutions() - 1
 
 	for c := 0; c < e.numComponents; c++ {
 		if e.options.Lossless {
@@ -497,10 +647,7 @@ func (e *encoder) generateSIZ() []byte {
 
 // generateCOD generates the COD marker segment.
 func (e *encoder) generateCOD() []byte {
-	numRes := e.options.NumResolutions
-	if numRes <= 0 {
-		numRes = 6
-	}
+	numRes := e.numResolutions()
 
 	// Base length = 12 (without precinct sizes)
 	length := 12
@@ -531,47 +678,9 @@ func (e *encoder) generateCOD() []byte {
 	// SPcod
 	buf[9] = uint8(numRes - 1) // Number of decomposition levels
 
-	// Determine code block size
-	cbWidth := e.options.CodeBlockSize.X
-	cbHeight := e.options.CodeBlockSize.Y
-
-	// In HTJ2K mode, use HTJ2K-specific block sizes if specified
-	if e.options.HighThroughput {
-		// HTJ2K defaults to 128x128 blocks, but OpenEXR also supports 32x32
-		htWidth := e.options.HTBlockWidth
-		htHeight := e.options.HTBlockHeight
-		if htWidth == 0 {
-			htWidth = 128 // Default HTJ2K block width
-		}
-		if htHeight == 0 {
-			htHeight = 128 // Default HTJ2K block height
-		}
-		// Convert to log2 exponent (32->5, 64->6, 128->7)
-		switch htWidth {
-		case 32:
-			cbWidth = 5
-		case 128:
-			cbWidth = 7
-		default:
-			cbWidth = 7 // Default to 128
-		}
-		switch htHeight {
-		case 32:
-			cbHeight = 5
-		case 128:
-			cbHeight = 7
-		default:
-			cbHeight = 7 // Default to 128
-		}
-	} else {
-		// Standard mode defaults
-		if cbWidth <= 0 {
-			cbWidth = 6
-		}
-		if cbHeight <= 0 {
-			cbHeight = 6
-		}
-	}
+	// Code-block size, from the single source of truth the tile encoder also
+	// uses.
+	cbWidth, cbHeight := e.codeBlockExponents()
 
 	buf[10] = uint8(cbWidth - 2)  // Code-block width exponent
 	buf[11] = uint8(cbHeight - 2) // Code-block height exponent
@@ -594,10 +703,7 @@ func (e *encoder) generateCOD() []byte {
 
 // generateQCD generates the QCD marker segment.
 func (e *encoder) generateQCD() []byte {
-	numRes := e.options.NumResolutions
-	if numRes <= 0 {
-		numRes = 6
-	}
+	numRes := e.numResolutions()
 
 	// Calculate number of subbands
 	numBands := 3*(numRes-1) + 1
@@ -778,10 +884,7 @@ func computeNumBPS(data []int32) int {
 // subbandOffset computes the (x, y) offset of a subband within the
 // DWT-decomposed data array for a given resolution and band type.
 func (e *encoder) subbandOffset(res, bandType int) (int, int) {
-	numRes := e.options.NumResolutions
-	if numRes <= 0 {
-		numRes = 6
-	}
+	numRes := e.numResolutions()
 	return computeSubbandOffset(e.width, e.height, numRes, res, bandType)
 }
 
@@ -893,21 +996,12 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	// Collect all code-block jobs
 	var jobs []codeBlockJob
 
-	numRes := e.options.NumResolutions
-	if numRes <= 0 {
-		numRes = 6
-	}
+	numRes := e.numResolutions()
 
-	// Compute code-block size from options (must match generateCOD).
-	// CodeBlockSize.X/Y are the log2 exponent of the actual block size.
-	cbWidthExp := e.options.CodeBlockSize.X
-	cbHeightExp := e.options.CodeBlockSize.Y
-	if cbWidthExp <= 0 {
-		cbWidthExp = 6 // default: 2^6 = 64
-	}
-	if cbHeightExp <= 0 {
-		cbHeightExp = 6
-	}
+	// Code-block size, from the same source of truth generateCOD writes into
+	// the codestream. If these disagree the decoder partitions the subbands
+	// differently and reconstructs garbage.
+	cbWidthExp, cbHeightExp := e.codeBlockExponents()
 	cbWidth := 1 << cbWidthExp
 	cbHeight := 1 << cbHeightExp
 
@@ -1031,14 +1125,14 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 				t1 := entropy.GetT1(job.width, job.height)
 				t1.SetData(job.data)
 				encoded := t1.Encode(job.bandType)
-				// Copy every result out of the T1 before returning it to
-				// the pool. Encode returns a slice of the T1's internal
-				// mqBuf and TruncationPoints returns its internal
-				// truncPoints slice; both are overwritten as soon as
-				// another worker takes this T1 out of the pool and starts
-				// encoding into it.
+				// Copy encoded bytes before returning T1 to pool.
+				// Encode returns a slice of the T1's internal mqBuf,
+				// which would be overwritten when the T1 is reused.
 				encodedCopy := make([]byte, len(encoded))
 				copy(encodedCopy, encoded)
+				// Copy the truncation points too, and do it *before*
+				// returning the T1 to the pool: once it is back in the pool
+				// another worker may take it and overwrite this state.
 				tp := t1.TruncationPoints()
 				tpCopy := make([]int, len(tp))
 				copy(tpCopy, tp)

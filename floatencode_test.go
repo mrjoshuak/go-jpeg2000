@@ -197,8 +197,8 @@ func TestNLTType3SelfInverse(t *testing.T) {
 		data := []int32{original}
 
 		// Apply twice (self-inverse)
-		nltType3(data)
-		nltType3(data)
+		nltType3(data, 32)
+		nltType3(data, 32)
 
 		if data[0] != original {
 			t.Errorf("NLT not self-inverse for %v (0x%08X): got 0x%08X",
