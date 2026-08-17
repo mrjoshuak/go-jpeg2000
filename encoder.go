@@ -1031,15 +1031,18 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 				t1 := entropy.GetT1(job.width, job.height)
 				t1.SetData(job.data)
 				encoded := t1.Encode(job.bandType)
-				// Copy encoded bytes before returning T1 to pool.
-				// Encode returns a slice of the T1's internal mqBuf,
-				// which would be overwritten when the T1 is reused.
+				// Copy every result out of the T1 before returning it to
+				// the pool. Encode returns a slice of the T1's internal
+				// mqBuf and TruncationPoints returns its internal
+				// truncPoints slice; both are overwritten as soon as
+				// another worker takes this T1 out of the pool and starts
+				// encoding into it.
 				encodedCopy := make([]byte, len(encoded))
 				copy(encodedCopy, encoded)
-				entropy.PutT1(t1)
 				tp := t1.TruncationPoints()
 				tpCopy := make([]int, len(tp))
 				copy(tpCopy, tp)
+				entropy.PutT1(t1)
 				resultChan <- codeBlockResult{
 					index:       job.index,
 					encoded:     encodedCopy,

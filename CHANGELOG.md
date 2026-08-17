@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Parallel encoding data race (remainder of the 1.2.0 fix): the worker read
+  `T1.TruncationPoints()` *after* handing its `*T1` back to the pool, so another
+  worker could already be encoding into that same `*T1`. The truncation points are
+  now copied before `PutT1`. Besides the race, this could silently corrupt the
+  layer boundaries of multi-layer (`NumLayers > 1`) codestreams.
+
+### Added
+- `TestEncodeParallelMatchesSequential` and `TestEncodeConcurrentStable`, which pin
+  the parallel code-block encoder to the sequential one byte-for-byte and would
+  catch any future use of pooled `T1` state after it has been released.
+
 ## [1.2.0] - 2026-02-28
 
 ### Added
