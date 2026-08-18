@@ -41,6 +41,15 @@ type encoder struct {
 	floatImg *FloatImage
 	halfImg  *HalfImage
 
+	// Wide sample state. A binary32 component fills the whole int32 range
+	// after the NLT Type 3 point transform, so its wavelet coefficients need
+	// more magnitude bits than a 32-bit sign-magnitude word holds. See wide.go.
+	wide      bool
+	wideData  [][]int64 // one transformed plane per component, single-tile
+	wideTiles [][][]int64
+	wideMb    []int // per subband, the magnitude bit-planes it needs
+	wideGuard int
+
 	// Quantization state for the irreversible path, set by
 	// transformIrreversible and read by generateQCD and bandMb. Those two must
 	// agree: the QCD exponent a decoder reads is what fixes Mb, and the
@@ -369,6 +378,9 @@ func (e *encoder) extractFloatData() error {
 		}
 	}
 	e.isFloat = true
+	// A binary32 sample fills the whole int32 range once the NLT Type 3 point
+	// transform has run, so its coefficients need a 64-bit word. See wide.go.
+	e.wide = true
 	e.numComponents = len(e.floatImg.Components)
 	e.componentPrecision = make([]int, e.numComponents)
 	e.componentSigned = make([]bool, e.numComponents)
@@ -497,6 +509,12 @@ func (e *encoder) preprocess() error {
 		if !e.componentSigned[c] {
 			mct.DCLevelShiftForward(e.componentData[c], e.componentPrecision[c])
 		}
+	}
+
+	// A component whose coefficients do not fit int32 takes the 64-bit
+	// transform chain instead of everything below.
+	if e.wide {
+		return e.preprocessWide()
 	}
 
 	// Apply MCT if we have 3+ components
@@ -924,6 +942,20 @@ func (e *encoder) generateQCD() []byte {
 		binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.QCD))
 		binary.BigEndian.PutUint16(buf[2:4], uint16(length))
 
+		if e.wide {
+			// The magnitude budget was measured from the transformed
+			// coefficients; see setWideMagnitudeBudget.
+			buf[4] = codestream.QuantizationNone | uint8(e.wideGuard)<<5
+			for i := 0; i < numBands; i++ {
+				exp := 31
+				if i < len(e.wideMb) {
+					exp = e.wideMb[i] - e.wideGuard + 1
+				}
+				buf[5+i] = uint8(clampInt(exp, 0, 31)) << 3
+			}
+			return buf
+		}
+
 		// Sqcd: no quantization, guard bits
 		maxPrec := e.maxPrecision()
 		// Two guard bits. Mb = guardBits + exponent - 1 bounds U_q, the
@@ -1025,7 +1057,10 @@ func (e *encoder) generateCAP() []byte {
 	binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.CAP))
 	binary.BigEndian.PutUint16(buf[2:4], uint16(length))
 	binary.BigEndian.PutUint32(buf[4:8], codestream.CapPcapHTJ2K)
-	binary.BigEndian.PutUint16(buf[8:10], codestream.CapCcapHTDefault)
+	// Ccap^15 declares the largest magnitude budget any subband of this
+	// codestream carries. It was a constant, which said "10 bit-planes" for
+	// every file this library wrote, including binary32 ones needing 35.
+	binary.BigEndian.PutUint16(buf[8:10], codestream.CapCcapHTDefault|ccapMagB(e.maxBandMbSignalled()))
 
 	return buf
 }
@@ -1076,8 +1111,11 @@ func (e *encoder) generateTiles() ([]byte, error) {
 
 // codeBlockJob represents a code-block encoding job for parallel processing.
 type codeBlockJob struct {
-	index    int // Order in output
+	index int // Order in output
+	// Exactly one of data and data64 is set. data64 carries a code-block whose
+	// coefficients need more than 32 bits; see wide.go.
 	data     []int32
+	data64   []int64
 	width    int
 	height   int
 	bandType int
@@ -1129,12 +1167,6 @@ func computeNumBPS(data []int32) int {
 		maxVal >>= 1
 	}
 	return numBPS
-}
-
-// subbandOffset computes the (x, y) offset of a subband within the
-// DWT-decomposed data array for a given resolution and band type.
-func (e *encoder) subbandOffset(res, bandType int) (int, int) {
-	return computeSubbandOffset(e.width, e.height, e.numResolutions(), res, bandType)
 }
 
 // buildTileData constructs tile data with a metadata table followed by
@@ -1216,7 +1248,7 @@ func buildMultiLayerTileData(metas []cbMeta, truncPoints [][]int, encoded []byte
 
 // encodeTile encodes the whole image as a single tile-part.
 func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
-	jobs, layout := e.collectJobs(e.componentData, 0, 0, e.width, e.height)
+	jobs, layout := e.collectJobs(e.componentData, e.wideData, 0, 0, e.width, e.height)
 	encoded, numBPS, passes := e.encodeJobs(jobs)
 	return e.createTileHeader(tileIdx, e.assembleTileData(layout, jobs, encoded, numBPS, passes)), nil
 }
@@ -1257,8 +1289,17 @@ func (l *tileLayout) at(c, r int) *resLayout { return &l.res[c*l.numRes+r] }
 // ISO/IEC 15444-1 B.5 derives them from; passing the whole image reproduces
 // the single-tile case exactly. tileBands is the single description of that
 // geometry, and the decoder walks the same one.
-func (e *encoder) collectJobs(comps [][]int32, x0, y0, x1, y1 int) ([]codeBlockJob, *tileLayout) {
+//
+// Exactly one of comps and comps64 is non-nil: comps64 carries a component
+// whose coefficients need more than 32 bits, which is the binary32 case. The
+// geometry below is shared deliberately — the code-block partition and the
+// packet layout must not be able to differ between the two widths.
+func (e *encoder) collectJobs(comps [][]int32, comps64 [][]int64, x0, y0, x1, y1 int) ([]codeBlockJob, *tileLayout) {
 	numRes := e.numResolutions()
+	numComps := len(comps)
+	if comps64 != nil {
+		numComps = len(comps64)
+	}
 
 	// Code-block size, from the same source of truth generateCOD writes into
 	// the codestream. If these disagree the decoder partitions the subbands
@@ -1268,11 +1309,11 @@ func (e *encoder) collectJobs(comps [][]int32, x0, y0, x1, y1 int) ([]codeBlockJ
 	cbHeight := 1 << cbHeightExp
 	stride := x1 - x0
 
-	layout := newTileLayout(len(comps), numRes)
+	layout := newTileLayout(numComps, numRes)
 	bands := tileBands(x0, y0, x1, y1, numRes, cbWidth, cbHeight)
 	var jobs []codeBlockJob
 
-	for c := 0; c < len(comps); c++ {
+	for c := 0; c < numComps; c++ {
 		for _, bd := range bands {
 			rl := layout.at(c, bd.res)
 			if !rl.present {
@@ -1288,9 +1329,17 @@ func (e *encoder) collectJobs(comps [][]int32, x0, y0, x1, y1 int) ([]codeBlockJ
 			for cby := 0; cby < bd.cbY; cby++ {
 				for cbx := 0; cbx < bd.cbX; cbx++ {
 					ox, oy, w, h := bd.blockRect(cbx, cby, cbWidth, cbHeight)
+					var narrow []int32
+					var wide []int64
+					if comps64 != nil {
+						wide = extractCodeBlock(comps64[c], stride, ox, oy, w, h)
+					} else {
+						narrow = extractCodeBlock(comps[c], stride, ox, oy, w, h)
+					}
 					jobs = append(jobs, codeBlockJob{
 						index:    len(jobs),
-						data:     extractCodeBlock(comps[c], stride, ox, oy, w, h),
+						data:     narrow,
+						data64:   wide,
 						width:    w,
 						height:   h,
 						bandType: bd.bandType,
@@ -1320,8 +1369,8 @@ func (e *encoder) encodeJobs(jobs []codeBlockJob) ([][]byte, []int, [][]int) {
 	// Set GOMAXPROCS=1 to force single-threaded encoding.
 	if len(jobs) <= 4 || runtime.GOMAXPROCS(0) == 1 {
 		for i, job := range jobs {
-			numBPS[i] = computeNumBPS(job.data)
-			encoded[i], truncPoints[i] = e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
+			numBPS[i] = jobNumBPS(job)
+			encoded[i], truncPoints[i] = e.encodeCodeBlock(job)
 		}
 		return encoded, numBPS, truncPoints
 	}
@@ -1348,11 +1397,11 @@ func (e *encoder) encodeJobs(jobs []codeBlockJob) ([][]byte, []int, [][]int) {
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
-				numBPS := computeNumBPS(job.data)
+				numBPS := jobNumBPS(job)
 				// encodeCodeBlock selects the HT or MQ coder to match what the
 				// COD/CAP markers declare, and returns copies that stay valid
 				// after the coder goes back to its pool.
-				encodedCopy, tpCopy := e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
+				encodedCopy, tpCopy := e.encodeCodeBlock(job)
 				resultChan <- codeBlockResult{
 					index:       job.index,
 					encoded:     encodedCopy,
@@ -1416,11 +1465,11 @@ func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, enco
 
 // extractCodeBlock copies one code-block out of a tile-component's
 // coefficient array, whose rows are stride samples apart.
-func extractCodeBlock(data []int32, stride, x, y, w, h int) []int32 {
+func extractCodeBlock[T int32 | int64](data []T, stride, x, y, w, h int) []T {
 	if w <= 0 || h <= 0 {
 		return nil
 	}
-	out := make([]int32, w*h)
+	out := make([]T, w*h)
 	for row := 0; row < h; row++ {
 		src := (y+row)*stride + x
 		if src < 0 || src+w > len(data) {
@@ -1544,7 +1593,14 @@ func (e *encoder) writeJP2(codestream []byte) error {
 //
 // The returned slice is always a fresh copy, so it stays valid after the coder
 // is returned to its pool.
-func (e *encoder) encodeCodeBlock(data []int32, width, height, bandType int) ([]byte, []int) {
+func (e *encoder) encodeCodeBlock(job codeBlockJob) ([]byte, []int) {
+	data, width, height, bandType := job.data, job.width, job.height, job.bandType
+	if job.data64 != nil {
+		// A wide code-block is HT-only: the Part 1 MQ coder in this package
+		// works on int32 coefficients, and a binary32 component's do not fit.
+		out := entropy.EncodeCleanup64(job.data64, width, height)
+		return out, []int{len(out)}
+	}
 	if e.options.HighThroughput {
 		ht := entropy.GetHTEncoder(width, height)
 		ht.SetData(data)

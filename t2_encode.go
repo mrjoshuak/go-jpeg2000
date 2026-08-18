@@ -302,6 +302,14 @@ func (e *encoder) bandMb(res, bandIdx int) int {
 		}
 		return mb
 	}
+	if e.wide {
+		// Must match generateQCD's wide branch, which signals the measured
+		// magnitude budget rather than one derived from the precision.
+		if idx < len(e.wideMb) {
+			return e.wideMb[idx]
+		}
+		return 1
+	}
 	maxPrec := e.maxPrecision()
 	// Must match generateQCD.
 	guardBits := 2

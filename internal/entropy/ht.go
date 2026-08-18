@@ -20,6 +20,14 @@ type HTDecoder struct {
 	width  int
 	height int
 
+	// Wide output. A binary32 component carried through the NLT Type 3 point
+	// transform fills the whole int32 range, and the reversible 5/3 transform
+	// widens that to 33 magnitude bits — 35 once the RCT has been applied — so
+	// its coefficients do not fit the int32 buffer above. When wide is set the
+	// cleanup pass writes data64 instead and data is left alone.
+	wide   bool
+	data64 []int64
+
 	// MEL decoder state
 	mel melState
 
@@ -97,6 +105,43 @@ func (d *HTDecoder) Decode(data []byte, numBitplanes, bandType int) []int32 {
 	return d.DecodeSegments(data, len(data), numBitplanes, bandType)
 }
 
+// Decode64 decodes a code-block whose coefficients need more than 32 bits,
+// returning them as int64. It is the same cleanup pass as Decode; only the
+// width of the output word differs.
+//
+// Decode cannot serve this case by narrowing: a coefficient that needs 33 to 35
+// magnitude bits wraps in int32, and because the reversible lifting steps are
+// exactly invertible modulo 2^32 the wrap is invisible to a round trip through
+// this library and visible to every other decoder.
+//
+// The whole segment is the cleanup pass, as it is for Decode: there is no wide
+// entry point taking an explicit Lcup, so decodeSPPMRP — which writes the 32-bit
+// buffer — is never reached from here.
+func (d *HTDecoder) Decode64(data []byte, numBitplanes, bandType int) []int64 {
+	if cap(d.data64) < d.width*d.height {
+		d.data64 = make([]int64, d.width*d.height)
+	} else {
+		d.data64 = d.data64[:d.width*d.height]
+	}
+	d.wide = true
+	defer func() { d.wide = false }()
+	d.DecodeSegments(data, len(data), numBitplanes, bandType)
+	return d.data64
+}
+
+// clearOutput zeroes whichever output buffer this decode is writing to.
+func (d *HTDecoder) clearOutput() {
+	if d.wide {
+		for i := range d.data64 {
+			d.data64[i] = 0
+		}
+		return
+	}
+	for i := range d.data {
+		d.data[i] = 0
+	}
+}
+
 // DecodeSegments decodes an HTJ2K code block with optional SPP/MRP segments.
 // data contains all segments concatenated, lcup is the cleanup pass segment length,
 // numBitplanes is the number of bitplanes, and bandType specifies the subband.
@@ -104,9 +149,7 @@ func (d *HTDecoder) Decode(data []byte, numBitplanes, bandType int) []int32 {
 // the SPP and MRP refinement data.
 func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int) []int32 {
 	if len(data) < 2 {
-		for i := range d.data {
-			d.data[i] = 0
-		}
+		d.clearOutput()
 		return d.data
 	}
 
@@ -123,9 +166,7 @@ func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int
 	// which is exactly what a conforming file decoded to.
 	scup := (int(data[lcup-1]) << 4) | int(data[lcup-2]&0x0F)
 	if scup < 2 || scup > lcup {
-		for i := range d.data {
-			d.data[i] = 0
-		}
+		d.clearOutput()
 		return d.data
 	}
 
@@ -133,9 +174,7 @@ func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int
 
 	// Initialize bitstream readers
 	if !d.initMEL(data, lcup, scup) {
-		for i := range d.data {
-			d.data[i] = 0
-		}
+		d.clearOutput()
 		return d.data
 	}
 	d.initVLC(data, lcup, scup)
@@ -162,9 +201,7 @@ func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int
 	// means a different subband entirely. The reference zeroes insignificant
 	// positions inside the code-block as it goes; clearing up front is
 	// equivalent and cheaper.
-	for i := range d.data {
-		d.data[i] = 0
-	}
+	d.clearOutput()
 
 	// Decode the cleanup pass
 	d.decodeCleanup(numBitplanes)
@@ -482,6 +519,26 @@ func (d *HTDecoder) frwdFetch(f *frwdBitstream) uint32 {
 	return uint32(f.tmp)
 }
 
+// frwdReadWord reads n bits from a forward bitstream, where n may exceed the 32
+// bits frwdFetch guarantees, and consumes them.
+//
+// A binary32 component needs up to 36 magnitude bits in one MagSgn codeword.
+// The buffer cannot simply be topped up to that width: frwdRead adds up to 32
+// bits at a time and refuses to run on a buffer already holding more than 32,
+// because 33 + 32 would not fit the 64-bit accumulator. So a wide codeword is
+// taken as two fetches with an advance between them, each within the guarantee.
+func (d *HTDecoder) frwdReadWord(f *frwdBitstream, n uint32) uint64 {
+	w := uint64(d.frwdFetch(f))
+	if n <= 32 {
+		d.frwdAdvance(f, n)
+		return w
+	}
+	d.frwdAdvance(f, 32)
+	w |= uint64(d.frwdFetch(f)) << 32
+	d.frwdAdvance(f, n-32)
+	return w
+}
+
 // frwdAdvance consumes bits from a forward bitstream.
 func (d *HTDecoder) frwdAdvance(f *frwdBitstream, numBits uint32) uint32 {
 	f.tmp >>= numBits
@@ -620,8 +677,10 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 			}
 		}
 		var u [2]uint32
-		consumed := d.decodeInitUVLC(vlcVal, uvlcMode, &u)
+		var uext uint32
+		consumed := d.decodeInitUVLC(vlcVal, uvlcMode, &u, &uext)
 		d.revAdvance(&d.vlc, consumed)
+		d.readUVLCExt(&u, uext)
 
 		d.decodeQuad(qinf[0], u[0], x, 0, lsp)
 		d.decodeQuad(qinf[1], u[1], x+2, 0, lsp+1)
@@ -677,8 +736,10 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 
 			uvlcMode := ((uint32(qinf[0]) & 0x8) >> 3) | ((uint32(qinf[1]) & 0x8) >> 2)
 			var u [2]uint32
-			consumed := d.decodeNonInitUVLC(vlcVal, uvlcMode, &u)
+			var uext uint32
+			consumed := d.decodeNonInitUVLC(vlcVal, uvlcMode, &u, &uext)
 			d.revAdvance(&d.vlc, consumed)
+			d.readUVLCExt(&u, uext)
 
 			// E^max, eqns 5 and 6 in ITU T.814. U_q already carries u_q + 1,
 			// so subtract 2 rather than 1.
@@ -712,8 +773,51 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 	}
 }
 
+// uvlcExtThreshold is the largest u the five-bit UVLC suffix can express on its
+// own. Above it the codeword carries a four-bit extension holding u/4.
+const uvlcExtThreshold = 32
+
+// extBit returns the mask bit for u entry k when the decoded suffix value says
+// an extension follows.
+func extBit(val uint32, k uint) uint32 {
+	if val > uvlcExtThreshold {
+		return 1 << k
+	}
+	return 0
+}
+
+// readUVLCExt consumes the four-bit UVLC extensions the mask says are present
+// and folds them into the u values, in the order the encoder wrote them: u[0]
+// first, then u[1], both after every prefix and suffix of the pair.
+//
+// The VLC word the caller decoded from is only guaranteed to hold 32 bits, of
+// which the prefixes and suffixes have already taken up to 16, so the stream is
+// re-fetched here rather than reusing what is left of it.
+func (d *HTDecoder) readUVLCExt(u *[2]uint32, mask uint32) {
+	if mask == 0 {
+		return
+	}
+	w := d.revFetch(&d.vlc)
+	consumed := uint32(0)
+	if mask&1 != 0 {
+		u[0] += 4 * (w & 0xF)
+		w >>= 4
+		consumed += 4
+	}
+	if mask&2 != 0 {
+		u[1] += 4 * (w & 0xF)
+		consumed += 4
+	}
+	d.revAdvance(&d.vlc, consumed)
+}
+
 // decodeInitUVLC decodes initial UVLC to get u values.
-func (d *HTDecoder) decodeInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
+//
+// ext receives a bitmask of the u entries whose codeword is followed by a
+// four-bit extension: the five-bit suffix saturates at 32, and anything above
+// that is carried in the extension (ISO/IEC 15444-15 Table 5). Only a component
+// wide enough to reach a magnitude exponent of 32 can produce one.
+func (d *HTDecoder) decodeInitUVLC(vlc, mode uint32, u *[2]uint32, ext *uint32) uint32 {
 	// UVLC prefix decoder table
 	dec := [8]uint8{
 		3 | (5 << 2) | (5 << 5), // 000
@@ -743,9 +847,11 @@ func (d *HTDecoder) decodeInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 		if mode == 1 {
 			u[0] = val + 1
 			u[1] = 1
+			*ext |= extBit(val, 0)
 		} else {
 			u[0] = 1
 			u[1] = val + 1
+			*ext |= extBit(val, 1)
 		}
 	} else if mode == 3 {
 		t1 := dec[vlc&0x7]
@@ -762,6 +868,7 @@ func (d *HTDecoder) decodeInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 			consumed += suffixLen
 			val := uint32(t1>>5) + (vlc & ((1 << suffixLen) - 1))
 			u[0] = val + 1
+			*ext |= extBit(val, 0)
 		} else {
 			t2 := dec[vlc&0x7]
 			prefixLen2 := uint32(t2 & 0x3)
@@ -772,12 +879,14 @@ func (d *HTDecoder) decodeInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 			consumed += suffixLen1
 			val1 := uint32(t1>>5) + (vlc & ((1 << suffixLen1) - 1))
 			u[0] = val1 + 1
+			*ext |= extBit(val1, 0)
 			vlc >>= suffixLen1
 
 			suffixLen2 := uint32((t2 >> 2) & 0x7)
 			consumed += suffixLen2
 			val2 := uint32(t2>>5) + (vlc & ((1 << suffixLen2) - 1))
 			u[1] = val2 + 1
+			*ext |= extBit(val2, 1)
 		}
 	} else if mode == 4 {
 		t1 := dec[vlc&0x7]
@@ -794,18 +903,21 @@ func (d *HTDecoder) decodeInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 		consumed += suffixLen1
 		val1 := uint32(t1>>5) + (vlc & ((1 << suffixLen1) - 1))
 		u[0] = val1 + 3
+		*ext |= extBit(val1, 0)
 		vlc >>= suffixLen1
 
 		suffixLen2 := uint32((t2 >> 2) & 0x7)
 		consumed += suffixLen2
 		val2 := uint32(t2>>5) + (vlc & ((1 << suffixLen2) - 1))
 		u[1] = val2 + 3
+		*ext |= extBit(val2, 1)
 	}
 	return consumed
 }
 
-// decodeNonInitUVLC decodes non-initial UVLC to get u values.
-func (d *HTDecoder) decodeNonInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
+// decodeNonInitUVLC decodes non-initial UVLC to get u values. ext carries the
+// same meaning as in decodeInitUVLC.
+func (d *HTDecoder) decodeNonInitUVLC(vlc, mode uint32, u *[2]uint32, ext *uint32) uint32 {
 	dec := [8]uint8{
 		3 | (5 << 2) | (5 << 5),
 		1 | (0 << 2) | (1 << 5),
@@ -834,9 +946,11 @@ func (d *HTDecoder) decodeNonInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 		if mode == 1 {
 			u[0] = val + 1
 			u[1] = 1
+			*ext |= extBit(val, 0)
 		} else {
 			u[0] = 1
 			u[1] = val + 1
+			*ext |= extBit(val, 1)
 		}
 	} else if mode == 3 {
 		t1 := dec[vlc&0x7]
@@ -853,12 +967,14 @@ func (d *HTDecoder) decodeNonInitUVLC(vlc, mode uint32, u *[2]uint32) uint32 {
 		consumed += suffixLen1
 		val1 := uint32(t1>>5) + (vlc & ((1 << suffixLen1) - 1))
 		u[0] = val1 + 1
+		*ext |= extBit(val1, 0)
 		vlc >>= suffixLen1
 
 		suffixLen2 := uint32((t2 >> 2) & 0x7)
 		consumed += suffixLen2
 		val2 := uint32(t2>>5) + (vlc & ((1 << suffixLen2) - 1))
 		u[1] = val2 + 1
+		*ext |= extBit(val2, 1)
 	}
 	return consumed
 }
@@ -1259,16 +1375,18 @@ func (e *HTEncoder) Resize(width, height int) {
 //
 // It returns v_n, which the caller folds into the line state as the exponent
 // the stripe below uses for context, and whether the sample was significant.
-func (d *HTDecoder) decodeSample(qinf uint16, uq uint32, n, x, y int) (uint32, bool) {
+func (d *HTDecoder) decodeSample(qinf uint16, uq uint32, n, x, y int) (uint64, bool) {
 	if qinf&(0x10<<uint(n)) == 0 {
 		return 0, false
 	}
-	ms := d.frwdFetch(&d.magSgn)
+	// The number of magnitude bits can exceed 32 for a binary32 component, so
+	// the MagSgn word is read 64 bits wide. Below 32 bits this is the single
+	// fetch and advance it has always been.
 	mn := uq - ((uint32(qinf) >> uint(12+n)) & 1)
-	d.frwdAdvance(&d.magSgn, mn)
+	ms := d.frwdReadWord(&d.magSgn, mn)
 
-	vn := ms & ((1 << mn) - 1)
-	vn |= ((uint32(qinf) >> uint(8+n)) & 1) << mn
+	vn := ms & (1<<mn - 1)
+	vn |= uint64((uint32(qinf)>>uint(8+n))&1) << mn
 	vn |= 1 // centre of bin
 
 	if x < d.width && y < d.height {
@@ -1276,18 +1394,22 @@ func (d *HTDecoder) decodeSample(qinf uint16, uq uint32, n, x, y int) (uint32, b
 		// storing (v_n + 2) << (p-1) and shifting down by p later. Returning
 		// plain coefficients, those cancel to a single right shift: the
 		// representation is 2*mu + 0.5, so mu = (v_n + 2) >> 1.
-		mag := int32((vn + 2) >> 1)
+		mag := int64((vn + 2) >> 1)
 		if ms&1 != 0 {
 			mag = -mag
 		}
-		d.data[y*d.width+x] = mag
+		if d.wide {
+			d.data64[y*d.width+x] = mag
+		} else {
+			d.data[y*d.width+x] = int32(mag)
+		}
 	}
 	return vn, true
 }
 
 // expOf returns the exponent E stored in the line state for a decoded v_n.
-func expOf(vn uint32) uint8 {
-	return uint8(32 - bits.LeadingZeros32(vn))
+func expOf(vn uint64) uint8 {
+	return uint8(64 - bits.LeadingZeros64(vn))
 }
 
 // decodeQuad decodes one 2x2 quad and maintains the line state entries that

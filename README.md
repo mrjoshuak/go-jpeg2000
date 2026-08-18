@@ -293,12 +293,12 @@ what an *external* decoder was measured doing, not in terms of test coverage.
 `scripts/validate.sh` runs these checks against separately installed reference
 tools and fails the build if any regresses.
 
-| Direction                              | Status                                                                                                                                      |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| HTJ2K write (`Options.HighThroughput`) | **Conforming.** OpenJPH decodes our codestreams to the exact source samples at 17, 25, 32, 64, 128 and 200 px, across 1-4 resolution levels |
-| HTJ2K read                             | **Conforming.** We decode OpenJPH's codestreams exactly, 0-3 decomposition levels                                                           |
-| Part 1 read (MQ / EBCOT)               | **Conforming.** We decode OpenJPEG's codestreams exactly, 1-3 resolution levels                                                             |
-| Part 1 write (MQ / EBCOT)              | **Not interoperable.** Still emits a private tile container, not T2 packets                                                                 |
+| Direction                              | Status                                                                                                                                                                                                                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTJ2K write (`Options.HighThroughput`) | **Conforming.** OpenJPH decodes our codestreams to the exact source samples: 17-200 px, 1-6 resolution levels, tiled and untiled, 8/16-bit integer, binary32 float, 1 and 3 components, reversible 5/3 and irreversible 9/7 |
+| HTJ2K read                             | **Conforming.** We decode OpenJPH's codestreams exactly, 0-5 decomposition levels, tiled and untiled, integer and float                                                                                                     |
+| Part 1 read (MQ / EBCOT)               | **Conforming.** We decode OpenJPEG's codestreams exactly, 1-3 resolution levels                                                                                                                                             |
+| Part 1 write (MQ / EBCOT)              | **Not interoperable.** Still emits a private tile container, not T2 packets                                                                                                                                                 |
 
 ### The Part 1 write limitation
 
@@ -311,40 +311,47 @@ where the HT cleanup pass emits exactly one.
 
 If you need output other tools can read, set `HighThroughput: true`.
 
-### What these measurements cover, and what they do not
+### What these measurements cover
 
-Every row above was measured on 8-bit greyscale images: single tile, single
-quality layer, lossless 5/3, default progression. That is the extent of the
-external evidence. The following are exercised only by this library's own
-tests, which is precisely the position every codec here was in before v1.4.0:
+`scripts/validate.sh` runs 118 external checks against OpenJPH and OpenJPEG and
+fails the build on any regression. The matrix spans 8- and 16-bit integer
+greyscale, three-component colour, binary32 float, reversible and irreversible
+transforms, 1 to 6 resolution levels, and tile sizes that both do and do not
+divide the image. Float cases are compared through PFM, because `ojph_expand`
+cannot write a 32-bit component to PGM or PPM — it emits an all-zero raster with
+maxval 0 for its own codestreams as readily as for ours, so a float case checked
+through PGM measures nothing. Every read-side check runs the oracle's own round
+trip first, so a broken oracle stays distinguishable from a real defect.
 
-- multi-component and RGB images through an external decoder
-- the 9/7 irreversible path
-- `EncodeFloat` and `EncodeHalf` output
-- tiling, component subsampling, precinct partitions, multiple quality layers,
-  and progression orders other than the default
+Float fixtures use the whole binary32 encoding — both zeros, both infinities,
+quiet NaNs, smallest and largest denormals, FLT_MAX — not small positive
+integers, which is exactly what hid a 32-bit overflow in the wavelet for so
+long: they never needed the 33rd magnitude bit.
+
+Still exercised only by this library's own tests, and so unverified rather than
+known-good:
+
+- component subsampling, precinct partitions, multiple quality layers, and
+  progression orders other than the default
 - the HT SPP/MRP refinement passes: `HTEncoder.Encode` emits the cleanup pass
-  only, and nothing on the live encode path calls `EncodeWithRefinement`
-
-Treat those as unverified rather than as working. Extending
-`scripts/validate.sh` to cover them is the most useful next contribution here.
+  only, which is conformant but leaves no room for quality-layer truncation
 
 ## Implementation Status
 
-| Component                | Status      | Coverage | Notes                                                                                |
-| ------------------------ | ----------- | -------- | ------------------------------------------------------------------------------------ |
-| JP2 Box Parsing          | ✅ Complete | 99.3%    | All standard box types                                                               |
-| Codestream Parsing       | ✅ Complete | 91.0%    | All main/tile-part markers                                                           |
-| 5-3 DWT (Lossless)       | ✅ Complete | 100%     | Reversible wavelet                                                                   |
-| 9-7 DWT (Lossy)          | ✅ Complete | 100%     | Irreversible wavelet                                                                 |
-| MCT (Color Transform)    | ✅ Complete | 100%     | RCT and ICT                                                                          |
-| MQ Coder                 | ✅ Complete | 95.7%    | Arithmetic coding                                                                    |
-| HTJ2K (Part 15)          | ⚠️ Partial  | 90%+     | Cleanup pass verified against OpenJPH both directions; encoder does not emit SPP/MRP |
-| EBCOT (Tier-1)           | ✅ Complete | 91.9%    | All coding passes                                                                    |
-| Packet Assembly (Tier-2) | ⚠️ Partial  | 91.9%    | Conforming for HTJ2K; Part 1 write uses a private container (see Interoperability)   |
-| Colorspace Conversion    | ✅ Complete | 92.8%    | All 19 colorspaces                                                                   |
-| Encoder                  | ✅ Complete | 92.8%    | All image types                                                                      |
-| Decoder                  | ✅ Complete | 92.8%    | Full colorspace support                                                              |
+| Component                | Status      | Coverage | Notes                                                                                               |
+| ------------------------ | ----------- | -------- | --------------------------------------------------------------------------------------------------- |
+| JP2 Box Parsing          | ✅ Complete | 99.3%    | All standard box types                                                                              |
+| Codestream Parsing       | ✅ Complete | 91.0%    | All main/tile-part markers                                                                          |
+| 5-3 DWT (Lossless)       | ✅ Complete | 100%     | Reversible wavelet                                                                                  |
+| 9-7 DWT (Lossy)          | ✅ Complete | 100%     | Irreversible wavelet                                                                                |
+| MCT (Color Transform)    | ✅ Complete | 100%     | RCT and ICT                                                                                         |
+| MQ Coder                 | ✅ Complete | 95.7%    | Arithmetic coding                                                                                   |
+| HTJ2K (Part 15)          | ✅ Complete | 90%+     | Cleanup pass, verified against OpenJPH in both directions; encoder does not emit SPP/MRP            |
+| EBCOT (Tier-1)           | ✅ Complete | 91.9%    | All coding passes                                                                                   |
+| Packet Assembly (Tier-2) | ⚠️ Partial  | 91.9%    | Conforming for HTJ2K including tiling; Part 1 write uses a private container (see Interoperability) |
+| Colorspace Conversion    | ✅ Complete | 92.8%    | All 19 colorspaces                                                                                  |
+| Encoder                  | ✅ Complete | 92.8%    | All image types                                                                                     |
+| Decoder                  | ✅ Complete | 92.8%    | Full colorspace support                                                                             |
 
 **Overall Test Coverage: 91-100% across all packages**
 

@@ -379,7 +379,7 @@ func decodePacketIntoTile(
 	metas := make([]decodeMeta, numCB)
 	for i := 0; i < numCB; i++ {
 		off := 2 + i*5
-		metas[i].numBPS = clampBitPlanes(int(pktData[off]))
+		metas[i].numBPS = clampBitPlanes(int(pktData[off]), false)
 		metas[i].dataLen = int(binary.BigEndian.Uint32(pktData[off+1 : off+5]))
 	}
 

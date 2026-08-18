@@ -54,7 +54,22 @@ const (
 	// declare. Coefficients are held in int32, so a bit-plane index of 31 or
 	// more cannot contribute anything and only costs decode time.
 	MaxBitPlanes = 31
+
+	// MaxBitPlanesWide bounds the same count for a codestream whose signalled
+	// magnitude budget forces 64-bit coefficient words. The block coder doubles
+	// the magnitude and carries the sign in the top bit, so 62 planes is the
+	// most a 64-bit word can hold.
+	MaxBitPlanesWide = 62
 )
+
+// BitPlaneLimit returns the magnitude bit-plane ceiling for the coefficient
+// word width in use.
+func BitPlaneLimit(wide bool) int {
+	if wide {
+		return MaxBitPlanesWide
+	}
+	return MaxBitPlanes
+}
 
 // ceilDivU32 computes ceil(a/b) in 64-bit arithmetic so that neither the
 // subtraction nor the addition of b-1 can wrap.

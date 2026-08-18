@@ -432,10 +432,16 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	precision := h.ComponentInfo[0].Precision()
 	signed := h.ComponentInfo[0].IsSigned()
 
-	// Allocate component data
+	// Allocate component data. A codestream whose signalled magnitude budget
+	// passes 32 bits carries its coefficients in a parallel 64-bit plane until
+	// the inverse colour transform has run; see wide.go.
 	componentData := make([][]int32, numComp)
 	for c := 0; c < numComp; c++ {
 		componentData[c] = make([]int32, width*height)
+	}
+	var wide *wideDecode
+	if h.WideSamples() {
+		wide = newWideDecode(numComp, width*height)
 	}
 
 	// Decode each tile
@@ -446,9 +452,15 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	}
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
-		if err := d.decodeTile(tileDecoder, tileIdx, componentData, width, height, cfg); err != nil {
+		if err := d.decodeTile(tileDecoder, tileIdx, componentData, wide, width, height, cfg); err != nil {
 			return nil, fmt.Errorf("decoding tile %d: %w", tileIdx, err)
 		}
+	}
+
+	// The wide planes carry the inverse colour transform themselves, because
+	// the chrominance differences it undoes are what needed the extra bits.
+	if wide != nil {
+		wide.finish(h, componentData)
 	}
 
 	// Check if any component has NLT (float mode)
@@ -461,7 +473,7 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	}
 
 	// Apply inverse MCT if needed
-	if h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
+	if wide == nil && h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
 		if h.CodingStyle.IsReversible() {
 			if hasNLT && precision > 16 {
 				mct.InverseRCT32(componentData[0], componentData[1], componentData[2])
@@ -517,6 +529,7 @@ func (d *decoder) decodeTile(
 	tileDecoder *tcd.TileDecoder,
 	tileIdx int,
 	componentData [][]int32,
+	wide *wideDecode,
 	imgWidth, imgHeight int,
 	cfg *Config,
 ) error {
@@ -564,6 +577,12 @@ func (d *decoder) decodeTile(
 				dstY := y - imgYOff
 				if dstX >= 0 && dstY >= 0 && dstX < imgWidth && dstY < imgHeight {
 					dstIdx := dstY*imgWidth + dstX
+					if wide != nil {
+						if srcIdx < len(tc.Data64) && c < len(wide.planes) {
+							wide.planes[c][dstIdx] = tc.Data64[srcIdx]
+						}
+						continue
+					}
 					if srcIdx < len(tc.Data) {
 						componentData[c][dstIdx] = tc.Data[srcIdx]
 					}
@@ -656,6 +675,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 	}
 
 	h := d.header
+	wide := h.WideSamples()
 	numRes := int(h.CodingStyle.NumDecompositions) + 1
 	if numRes < 1 || numRes > codestream.MaxDecompositionLevels+1 {
 		return fmt.Errorf("jpeg2000: COD declares %d resolution levels, above the %d limit",
@@ -727,7 +747,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		}
 		for i := 0; i < numCB; i++ {
 			off := 3 + i*(1+numLayers*4)
-			metas[i].numBPS = clampBitPlanes(int(tileData[off]))
+			metas[i].numBPS = clampBitPlanes(int(tileData[off]), wide)
 			// Effective layer cumulative length (what we decode)
 			loff := off + 1 + (effLayer-1)*4
 			metas[i].dataLen = int(binary.BigEndian.Uint32(tileData[loff : loff+4]))
@@ -742,7 +762,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		}
 		for i := 0; i < numCB; i++ {
 			off := 2 + i*5
-			metas[i].numBPS = clampBitPlanes(int(tileData[off]))
+			metas[i].numBPS = clampBitPlanes(int(tileData[off]), wide)
 			dl := int(binary.BigEndian.Uint32(tileData[off+1 : off+5]))
 			metas[i].dataLen = dl
 			metas[i].fullLen = dl
@@ -780,11 +800,18 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 						// Part 1 MQ decoder over them silently yields
 						// nothing rather than failing.
 						var decoded []int32
-						if h.IsHTJ2K() {
+						var decoded64 []int64
+						switch {
+						case wide:
+							htDec := entropy.GetHTDecoder(actualW, actualH)
+							decoded64 = append([]int64(nil),
+								htDec.Decode64(cbData, meta.numBPS, bd.bandType)...)
+							entropy.PutHTDecoder(htDec)
+						case h.IsHTJ2K():
 							htDec := entropy.GetHTDecoder(actualW, actualH)
 							decoded = htDec.Decode(cbData, meta.numBPS, bd.bandType)
 							entropy.PutHTDecoder(htDec)
-						} else {
+						default:
 							t1 := entropy.NewT1(actualW, actualH)
 							decoded = t1.Decode(cbData, meta.numBPS, bd.bandType)
 						}
@@ -797,7 +824,11 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 								// file-supplied geometry, so the low end
 								// is checked as well as the high end.
 								if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
-									tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
+									if wide {
+										tc.Data64[dstY*tcWidth+dstX] = decoded64[y*actualW+x]
+									} else {
+										tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
+									}
 								}
 							}
 						}
@@ -813,17 +844,18 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 	return nil
 }
 
-// clampBitPlanes bounds a file-supplied magnitude bit-plane count. Decoded
-// coefficients are int32, so a plane index of 31 or more contributes nothing;
-// the encoder never writes more than 31. Without this cap a single byte in the
+// clampBitPlanes bounds a file-supplied magnitude bit-plane count against the
+// width of the coefficient word this codestream is being decoded into: 31
+// planes for int32, 62 for the int64 a binary32 component needs. A plane index
+// above that contributes nothing. Without the cap a single byte in the
 // code-block table buys 255 full decoding passes over every code-block, which
 // is a denial of service rather than a decode.
-func clampBitPlanes(n int) int {
+func clampBitPlanes(n int, wide bool) int {
 	if n < 0 {
 		return 0
 	}
-	if n > codestream.MaxBitPlanes {
-		return codestream.MaxBitPlanes
+	if limit := codestream.BitPlaneLimit(wide); n > limit {
+		return limit
 	}
 	return n
 }
@@ -1077,6 +1109,10 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 	for c := 0; c < numComp; c++ {
 		componentData[c] = make([]int32, width*height)
 	}
+	var wide *wideDecode
+	if h.WideSamples() {
+		wide = newWideDecode(numComp, width*height)
+	}
 
 	tileDecoder := d.newTileDecoder(cfg, reduce)
 	numTiles, err := d.numTiles()
@@ -1085,13 +1121,17 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 	}
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
-		if err := d.decodeTile(tileDecoder, tileIdx, componentData, width, height, cfg); err != nil {
+		if err := d.decodeTile(tileDecoder, tileIdx, componentData, wide, width, height, cfg); err != nil {
 			return nil, 0, 0, fmt.Errorf("decoding tile %d: %w", tileIdx, err)
 		}
 	}
 
+	if wide != nil {
+		wide.finish(h, componentData)
+	}
+
 	// Apply inverse MCT
-	if h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
+	if wide == nil && h.CodingStyle.MultipleComponentXf != 0 && numComp >= 3 {
 		if h.CodingStyle.IsReversible() {
 			if hasNLT && precision > 16 {
 				mct.InverseRCT32(componentData[0], componentData[1], componentData[2])

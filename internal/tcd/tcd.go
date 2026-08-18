@@ -51,6 +51,12 @@ type TileComponent struct {
 	// Coefficient data
 	Data []int32
 
+	// Wide coefficient data. A binary32 component's reversible 5/3
+	// coefficients need 33 to 35 magnitude bit-planes, which int32 cannot
+	// hold; when the codestream's own magnitude budget says so, the block
+	// decoder writes here and Data is left unused.
+	Data64 []int64
+
 	// Floating point data for 9-7 transform
 	DataFloat []float64
 }
@@ -135,6 +141,9 @@ type CodeBlock struct {
 
 	// Decoded coefficient data
 	Coefficients []int32
+
+	// Decoded coefficient data for a wide tile-component.
+	Coefficients64 []int64
 }
 
 // CodingPass represents a single coding pass.
@@ -236,6 +245,7 @@ type TileDecoder struct {
 	qualityLayerLimit int  // 0 means all layers
 	reduceResolution  int  // number of finest resolution levels to skip
 	sampleLimit       int  // ceiling on samples allocated for one tile
+	wide              bool // coefficients need 64-bit words; see Header.WideSamples
 }
 
 // NewTileDecoder creates a new tile decoder.
@@ -244,6 +254,7 @@ func NewTileDecoder(header *codestream.Header) *TileDecoder {
 		header:      header,
 		htj2k:       header.IsHTJ2K(),
 		sampleLimit: DefaultSampleLimit,
+		wide:        header.WideSamples(),
 	}
 }
 
@@ -292,6 +303,9 @@ func (d *TileDecoder) ReduceResolution() int {
 func (d *TileDecoder) SetHTJ2K(htj2k bool) {
 	d.htj2k = htj2k
 }
+
+// Wide reports whether this codestream's coefficients need 64-bit words.
+func (d *TileDecoder) Wide() bool { return d.wide }
 
 // Tile returns the current tile being decoded.
 func (d *TileDecoder) Tile() *Tile {
@@ -429,6 +443,9 @@ func (d *TileDecoder) InitTile(tileIndex int) error {
 		}
 		total += samples
 		tc.Data = make([]int32, samples)
+		if d.wide {
+			tc.Data64 = make([]int64, samples)
+		}
 
 		// Initialize only the resolutions we need (skip finest N levels)
 		numRes := numDecomp + 1 - reduce
@@ -585,14 +602,19 @@ func (d *TileDecoder) DecodeCodeBlock(cb *CodeBlock, bandType int) error {
 	if numBitPlanes < 0 {
 		numBitPlanes = 0
 	}
-	if numBitPlanes > codestream.MaxBitPlanes {
-		numBitPlanes = codestream.MaxBitPlanes
+	if limit := codestream.BitPlaneLimit(d.wide); numBitPlanes > limit {
+		numBitPlanes = limit
 	}
 
 	if d.htj2k {
 		// Use HTJ2K decoder
 		htDec := entropy.GetHTDecoder(width, height)
-		cb.Coefficients = htDec.Decode(cb.Data, numBitPlanes, bandType)
+		if d.wide {
+			decoded := htDec.Decode64(cb.Data, numBitPlanes, bandType)
+			cb.Coefficients64 = append(cb.Coefficients64[:0], decoded...)
+		} else {
+			cb.Coefficients = htDec.Decode(cb.Data, numBitPlanes, bandType)
+		}
 		entropy.PutHTDecoder(htDec)
 	} else {
 		// Use standard EBCOT decoder
@@ -620,6 +642,14 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 	height := tc.Y1 - tc.Y0
 
 	if width <= 0 || height <= 0 || width*height > len(tc.Data) {
+		return
+	}
+	if d.wide {
+		// The wide path is reversible by construction: WideSamples only
+		// reports a magnitude budget above 32 bits for the 5/3 transform.
+		if numLevels > 0 && width*height <= len(tc.Data64) {
+			dwt.ReconstructMultiLevel53Tile64(tc.Data64, width, height, tc.X0, tc.Y0, numLevels)
+		}
 		return
 	}
 	// Zero decomposition levels still leaves the LL band quantized, so the

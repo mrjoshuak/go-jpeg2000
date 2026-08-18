@@ -89,6 +89,39 @@ for path, n in ((sys.argv[1], 8), (sys.argv[2], 32)):
     open(path, 'wb').write(b'P5\n%d %d\n255\n' % (n, n) + px)
 PYEOF
 
+# Float source rasters, in the one format either oracle carries binary32 on.
+#
+# The content is deliberately hostile: both zeros, both infinities, NaNs
+# including the all-ones pattern, the smallest and largest denormals, FLT_MAX
+# and a spread of exponents and signs. Small positive integers are what hid the
+# 32-bit overflow on this path -- they occupy a handful of magnitude bits, so no
+# coefficient ever needed the 33rd.
+python3 - "$WORK/src.pfm" "$WORK/src3.pfm" <<'PYEOF'
+import struct, sys
+
+N = 32
+SPECIAL = [0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00000,
+           0xffc00000, 0x7fffffff, 0xffffffff, 0x00000001, 0x80000001,
+           0x007fffff, 0x807fffff, 0x7f7fffff, 0xff7fffff, 0x3f800000,
+           0xbf800000]
+
+def bits(i, c):
+    if i < len(SPECIAL):
+        return SPECIAL[i]
+    s = (i * 1664525 + c * 1013904223 + 22695477) & 0xFFFFFFFF
+    s = (s * 1664525 + 1013904223) & 0xFFFFFFFF
+    return s ^ (s >> 15)
+
+for path, nc in ((sys.argv[1], 1), (sys.argv[2], 3)):
+    out = [b'PF\n' if nc == 3 else b'Pf\n', b'%d %d\n-1.0\n' % (N, N)]
+    for row in range(N):
+        y = N - 1 - row
+        for x in range(N):
+            for c in range(nc):
+                out.append(struct.pack('<I', bits(y * N + x, c)))
+    open(path, 'wb').write(b''.join(out))
+PYEOF
+
 if ! have ojph_compress || ! have ojph_expand; then
 	gap "OpenJPH not installed; HTJ2K interoperability unchecked"
 else
@@ -434,6 +467,118 @@ PYEOF
 			fail "read HTJ2K ${tile}x${tile} tiles: $out samples differ"
 		fi
 	done
+
+	# READ side, binary32. This is the direction the capability matrix cannot
+	# cover, and until it was checked no OpenJPH float codestream could be read
+	# at all: the reference writes Cnlt = 0xFFFF, the "all components" form, and
+	# this parser rejected it as an out-of-range component index.
+	#
+	# The decomposition counts matter more here than on the integer path. Each
+	# level widens the coefficients, and the codestream signals that width in
+	# QCD as guard bits and exponents; a decoder that ignores it, or that holds
+	# the coefficients in a word too narrow for it, reconstructs samples that
+	# are shifted rather than obviously wrong.
+	for src in src src3; do
+		for nd in 0 1 2 3 5; do
+			f="$WORK/fr_${src}_$nd.j2c"
+			if ! ojph_compress -i "$WORK/$src.pfm" -o "$f" \
+				-num_decomps "$nd" -reversible true >/dev/null 2>&1; then
+				gap "read float $src -num_decomps $nd: OpenJPH could not produce a fixture"
+				continue
+			fi
+			# Control: the oracle must round-trip its own output bit for bit,
+			# or the comparison below says nothing about this library.
+			#
+			# One of these controls is expected to fail, and it is the reason
+			# the control exists. At zero decomposition levels ojph_compress
+			# signals Mb = 31 for a signed 32-bit component, and the float bit
+			# pattern 0xFFFFFFFF becomes -2^31 under the NLT Type 3 point
+			# transform, which needs 32. OpenJPH loses exactly that one sample
+			# out of 1024 from its own file. This encoder measures the
+			# transformed coefficients rather than assuming the nominal value,
+			# signals 32, and OpenJPH reads it back exactly -- which the write
+			# side below asserts.
+			if ! ojph_expand -i "$f" -o "$f.ctl.pfm" >/dev/null 2>&1 ||
+				! go run ./scripts/floatpfm cmp "$WORK/$src.pfm" "$f.ctl.pfm" >/dev/null 2>&1; then
+				gap "read float $src -num_decomps $nd: oracle control failed, measurement would be meaningless"
+				continue
+			fi
+			if ! out=$(go run ./scripts/floatpfm dec "$f" "$f.ours.pfm" 2>&1); then
+				fail "read float $src -num_decomps $nd: $out"
+				continue
+			fi
+			if out=$(go run ./scripts/floatpfm cmp "$WORK/$src.pfm" "$f.ours.pfm"); then
+				pass "read float binary32 $src -num_decomps $nd: we decode OpenJPH's codestream exactly"
+			else
+				fail "read float binary32 $src -num_decomps $nd: $out"
+			fi
+		done
+	done
+
+	# READ side, binary32, tiled: the geometry and the widened coefficients at
+	# once. 12 and 13 leave a short last tile and put whole tiles at origins
+	# that are odd once halved.
+	for tile in 8 16 12 13; do
+		f="$WORK/frt_$tile.j2c"
+		if ! ojph_compress -i "$WORK/src.pfm" -o "$f" \
+			-tile_size "{$tile,$tile}" -num_decomps 2 -reversible true >/dev/null 2>&1; then
+			gap "read float ${tile}x${tile} tiles: OpenJPH could not produce a fixture"
+			continue
+		fi
+		if ! ojph_expand -i "$f" -o "$f.ctl.pfm" >/dev/null 2>&1 ||
+			! go run ./scripts/floatpfm cmp "$WORK/src.pfm" "$f.ctl.pfm" >/dev/null 2>&1; then
+			gap "read float ${tile}x${tile} tiles: oracle control failed, measurement would be meaningless"
+			continue
+		fi
+		if ! out=$(go run ./scripts/floatpfm dec "$f" "$f.ours.pfm" 2>&1); then
+			fail "read float ${tile}x${tile} tiles: $out"
+			continue
+		fi
+		if out=$(go run ./scripts/floatpfm cmp "$WORK/src.pfm" "$f.ours.pfm"); then
+			pass "read float binary32 ${tile}x${tile} tiles: we decode OpenJPH's codestream exactly"
+		else
+			fail "read float binary32 ${tile}x${tile} tiles: $out"
+		fi
+	done
+
+	# WRITE side, binary32, round-tripped through the oracle at every
+	# resolution count and a tile grid. The capability matrix covers a subset;
+	# this widens it, because the magnitude budget a subband needs grows with
+	# the decomposition level and it is that budget the codestream must signal.
+	for src in src src3; do
+		for nres in 1 2 3 5 6; do
+			f="$WORK/fw_${src}_$nres.j2c"
+			if ! out=$(go run ./scripts/floatpfm enc "$WORK/$src.pfm" "$f" "$nres" 2>&1); then
+				fail "write float $src $nres resolutions: our encoder failed: $out"
+				continue
+			fi
+			if ! err=$(ojph_expand -i "$f" -o "$f.out.pfm" 2>&1); then
+				fail "write float $src $nres resolutions: OpenJPH refused our codestream: $(echo "$err" | grep -oE 'ojph error.*' | head -1 | cut -c1-70)"
+				continue
+			fi
+			if out=$(go run ./scripts/floatpfm cmp "$WORK/$src.pfm" "$f.out.pfm"); then
+				pass "write float binary32 $src $nres resolutions: OpenJPH decodes it exactly"
+			else
+				fail "write float binary32 $src $nres resolutions: $out"
+			fi
+		done
+	done
+	for tile in 8 16 12 13; do
+		f="$WORK/fwt_$tile.j2c"
+		if ! out=$(go run ./scripts/floatpfm enc "$WORK/src.pfm" "$f" 3 "$tile" 2>&1); then
+			fail "write float ${tile}x${tile} tiles: our encoder failed: $out"
+			continue
+		fi
+		if ! err=$(ojph_expand -i "$f" -o "$f.out.pfm" 2>&1); then
+			fail "write float ${tile}x${tile} tiles: OpenJPH refused our codestream: $(echo "$err" | grep -oE 'ojph error.*' | head -1 | cut -c1-70)"
+			continue
+		fi
+		if out=$(go run ./scripts/floatpfm cmp "$WORK/src.pfm" "$f.out.pfm"); then
+			pass "write float binary32 ${tile}x${tile} tiles: OpenJPH decodes it exactly"
+		else
+			fail "write float binary32 ${tile}x${tile} tiles: $out"
+		fi
+	done
 fi
 
 if ! have opj_compress; then
@@ -487,14 +632,41 @@ else
 		fail "capability matrix: generator failed"
 		head -5 "$WORK/matrix.err"
 	else
-		while IFS=$'\t' read -r name comps depth stream ref; do
+		while IFS=$'\t' read -r name kind comps depth stream ref; do
 			if [ "$comps" = "ENCODE_FAIL" ]; then
 				fail "matrix $name: encoder failed"
 				continue
 			fi
-			ext=pgm
-			[ "$comps" = "3" ] && ext=ppm
-			out="$MX/$name.out.$ext"
+			out="$MX/$name.out.$kind"
+
+			# A binary32 component cannot be compared through PGM or PPM.
+			# ojph_expand writes an all-zero raster with maxval 0 for one --
+			# for its own codestreams as much as for ours -- so the float rows
+			# of this matrix used to assert nothing whatever. PFM is the only
+			# raster either oracle carries binary32 on, and the control below
+			# is what distinguishes "the oracle cannot carry this content" from
+			# "our codestream is wrong".
+			if [ "$kind" = pfm ]; then
+				ctl="$MX/$name.ctl"
+				if ! ojph_compress -i "$ref" -o "$ctl.j2c" \
+					-num_decomps 2 -reversible true >/dev/null 2>&1 ||
+					! ojph_expand -i "$ctl.j2c" -o "$ctl.pfm" >/dev/null 2>&1 ||
+					! go run ./scripts/floatpfm cmp "$ref" "$ctl.pfm" >/dev/null 2>&1; then
+					gap "matrix $name: oracle does not round-trip this float raster, measurement would be meaningless"
+					continue
+				fi
+				if ! err=$(ojph_expand -i "$stream" -o "$out" 2>&1); then
+					fail "matrix $name: reference refused our codestream: $(echo "$err" | grep -oE 'ojph error.*' | head -1 | cut -c1-70)"
+					continue
+				fi
+				if d=$(go run ./scripts/floatpfm cmp "$out" "$ref"); then
+					pass "matrix $name: the reference decodes it exactly"
+				else
+					fail "matrix $name: $d"
+				fi
+				continue
+			fi
+
 			if ! err=$(ojph_expand -i "$stream" -o "$out" 2>&1); then
 				fail "matrix $name: reference refused our codestream: $(echo "$err" | grep -oE 'ojph error.*' | head -1 | cut -c1-70)"
 				continue

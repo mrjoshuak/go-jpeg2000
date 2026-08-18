@@ -97,22 +97,28 @@ func (e *encoder) encodeTileAt(tileIdx int) ([]byte, error) {
 		return nil, fmt.Errorf("empty bounds [%d,%d)x[%d,%d)", x0, x1, y0, y1)
 	}
 
-	comps := make([][]int32, e.numComponents)
-	for c := 0; c < e.numComponents; c++ {
-		plane := e.componentData[c]
-		tile := make([]int32, w*h)
-		for row := 0; row < h; row++ {
-			src := (y0+row)*e.width + x0
-			if src+w > len(plane) {
-				return nil, fmt.Errorf("component %d is short of samples", c)
+	var comps [][]int32
+	var comps64 [][]int64
+	if e.wide {
+		comps64 = e.wideTiles[tileIdx]
+	} else {
+		comps = make([][]int32, e.numComponents)
+		for c := 0; c < e.numComponents; c++ {
+			plane := e.componentData[c]
+			tile := make([]int32, w*h)
+			for row := 0; row < h; row++ {
+				src := (y0+row)*e.width + x0
+				if src+w > len(plane) {
+					return nil, fmt.Errorf("component %d is short of samples", c)
+				}
+				copy(tile[row*w:(row+1)*w], plane[src:src+w])
 			}
-			copy(tile[row*w:(row+1)*w], plane[src:src+w])
+			e.transformTile(tile, w, h, x0, y0)
+			comps[c] = tile
 		}
-		e.transformTile(tile, w, h, x0, y0)
-		comps[c] = tile
 	}
 
-	jobs, layout := e.collectJobs(comps, x0, y0, x1, y1)
+	jobs, layout := e.collectJobs(comps, comps64, x0, y0, x1, y1)
 	encoded, numBPS, passes := e.encodeJobs(jobs)
 	return e.createTileHeader(tileIdx, e.assembleTileData(layout, jobs, encoded, numBPS, passes)), nil
 }

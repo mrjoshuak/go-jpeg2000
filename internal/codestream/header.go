@@ -266,11 +266,19 @@ type CapabilitiesMarker struct {
 // Verified against a codestream produced by OpenJPH, which emits 0x00020000.
 const CapPcapHTJ2K uint32 = 0x00020000 // Bit 15, i.e. 1<<(32-15)
 
-// CapCcapHTDefault is the Ccap^15 value for a codestream in which every
-// code-block uses the HT block coder with default parameters. Part 15 requires
-// one 16-bit Ccap field to follow Pcap for each capability bit set in Pcap; a
-// CAP marker carrying Pcap alone is malformed. Matches OpenJPH's output.
-const CapCcapHTDefault uint16 = 0x0022
+// CapCcapHTDefault holds the Ccap^15 bits that do not depend on the
+// codestream's magnitude budget, for a stream in which every code-block uses
+// the HT block coder with default parameters. Part 15 requires one 16-bit Ccap
+// field to follow Pcap for each capability bit set in Pcap; a CAP marker
+// carrying Pcap alone is malformed.
+//
+// The remaining bits are the B_p field, which declares the largest number of
+// magnitude bit-planes any subband carries; the encoder ORs that in. This
+// constant used to be 0x0022, which is B_p = 2 — "at most ten bit-planes" —
+// declared unconditionally, whatever the file actually held, plus a bit whose
+// meaning nothing here relies on. ojph_compress writes B_p alone: 0x0000 for an
+// 8-bit image, 0x000a for 16-bit and 0x0015 for binary32.
+const CapCcapHTDefault uint16 = 0x0000
 
 // IsHTJ2K returns true if the CAP marker indicates HTJ2K mode.
 func (c *CapabilitiesMarker) IsHTJ2K() bool {
@@ -289,10 +297,22 @@ type NLTMarker struct {
 	TransformType  uint8 // Tnlt: 3 = DC level shift (type used for float)
 }
 
+// NLTAllComponents is the Cnlt value that applies one NLT marker segment to
+// every component of the image (ISO/IEC 15444-2 A.3.10). It is what OpenJPH
+// writes for a float codestream, so a decoder that reads Cnlt as a plain
+// component index rejects every conforming float file it is given: 65535 is
+// out of range for any image, and validateAuxMarkers used to say so.
+const NLTAllComponents = 0xFFFF
+
+// covers reports whether this marker segment applies to the given component.
+func (n NLTMarker) covers(component int) bool {
+	return n.ComponentIndex == NLTAllComponents || int(n.ComponentIndex) == component
+}
+
 // HasNLT returns true if the given component has an NLT marker.
 func (h *Header) HasNLT(component int) bool {
 	for _, nlt := range h.NLTMarkers {
-		if int(nlt.ComponentIndex) == component {
+		if nlt.covers(component) {
 			return true
 		}
 	}
@@ -305,7 +325,7 @@ func (h *Header) HasNLT(component int) bool {
 // necessarily the same as the component precision in SIZ.
 func (h *Header) NLTPrecision(component int) (int, bool) {
 	for _, nlt := range h.NLTMarkers {
-		if int(nlt.ComponentIndex) == component {
+		if nlt.covers(component) {
 			return int(nlt.BitDepth&0x7F) + 1, true
 		}
 	}
@@ -569,7 +589,7 @@ func (h *Header) validateQuantization() error {
 // resolution indices which are later used to select a component.
 func (h *Header) validateAuxMarkers() error {
 	for i, nlt := range h.NLTMarkers {
-		if int(nlt.ComponentIndex) >= int(h.NumComponents) {
+		if nlt.ComponentIndex != NLTAllComponents && int(nlt.ComponentIndex) >= int(h.NumComponents) {
 			return fmt.Errorf("NLT %d: component index %d is out of range (%d components)",
 				i, nlt.ComponentIndex, h.NumComponents)
 		}
@@ -650,4 +670,44 @@ func (h *Header) BandMb(res, band int) int {
 		mb = 1
 	}
 	return mb
+}
+
+// MaxBandMb returns the largest Mb any subband of this codestream declares.
+func (h *Header) MaxBandMb() int {
+	numRes := h.CodingStyle.NumResolutions()
+	if numRes < 1 {
+		numRes = 1
+	}
+	if numRes > MaxDecompositionLevels+1 {
+		numRes = MaxDecompositionLevels + 1
+	}
+	m := h.BandMb(0, 0)
+	for res := 1; res < numRes; res++ {
+		for band := 0; band < 3; band++ {
+			if v := h.BandMb(res, band); v > m {
+				m = v
+			}
+		}
+	}
+	return m
+}
+
+// WideSamples reports whether this codestream's own magnitude budget exceeds
+// what a 32-bit sample word can carry, so that its coefficients have to be
+// decoded into 64-bit words.
+//
+// The HT block coder works on 2·|q|, and carries the sign in the top bit, so a
+// 32-bit word holds a magnitude of at most MaxBitPlanes bits. A binary32
+// component after the NLT Type 3 point transform occupies the whole int32
+// range, and one reversible 5/3 decomposition of that needs 33 magnitude bits —
+// 35 once the RCT has widened the chrominance differences. OpenJPH signals
+// exactly that (guard bits 4 or 5 against exponent 30 or 31) and moves the
+// component to 64-bit lines to decode it; a decoder that stays 32-bit wraps
+// every coefficient that overflows and reconstructs different samples.
+//
+// Only the reversible path is considered: the irreversible path carries
+// quantisation indices, which this encoder keeps well inside 32 bits, and its
+// dequantisation is expressed in float64 regardless.
+func (h *Header) WideSamples() bool {
+	return h.CodingStyle.IsReversible() && h.MaxBandMb() > MaxBitPlanes
 }

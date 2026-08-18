@@ -32,12 +32,6 @@ const (
 	bandHH = 2
 )
 
-// subbandDims returns the dimensions of one detail subband, given the
-// dimensions of the resolution level it is split from.
-func subbandDims(resW, resH, band int) (int, int) {
-	return codestream.SubbandDims(resW, resH, band)
-}
-
 // bandDims returns the dimensions of the subband identified by (r, band): the
 // LL band at resolution 0, or one of the three detail bands above it.
 //

@@ -23,6 +23,18 @@ const numUVLCEntries = 75
 
 var uvlcEncTbl [numUVLCEntries]uvlcEntry
 
+// uvlcEntryFor returns the codeword triple for one u value. The table covers
+// every u the block coder can produce — the largest magnitude exponent a
+// 64-bit coefficient word admits is well inside it — and the bound is checked
+// rather than assumed so that a coefficient outside the range the caller
+// promised cannot index past the table.
+func uvlcEntryFor(u int) uvlcEntry {
+	if u < 0 || u >= numUVLCEntries {
+		return uvlcEncTbl[numUVLCEntries-1]
+	}
+	return uvlcEncTbl[u]
+}
+
 func init() {
 	// Codes run from 0 to 31; the extension covers larger values.
 	uvlcEncTbl[0] = uvlcEntry{}
@@ -151,13 +163,17 @@ type msEncoder struct {
 
 func newMSEncoder() *msEncoder { return &msEncoder{maxBits: 8} }
 
-func (m *msEncoder) encode(cwd uint32, cwdLen int) {
+// encode appends cwdLen bits of cwd. cwd is 64 bits wide because a binary32
+// component carried through the NLT Type 3 point transform needs 33 to 35
+// magnitude bit-planes after the reversible 5/3 transform, so a single
+// MagSgn codeword can be wider than 32 bits.
+func (m *msEncoder) encode(cwd uint64, cwdLen int) {
 	for cwdLen > 0 {
 		t := m.maxBits - m.usedBits
 		if cwdLen < t {
 			t = cwdLen
 		}
-		m.tmp |= int(cwd&((1<<uint(t))-1)) << uint(m.usedBits)
+		m.tmp |= int(cwd&(1<<uint(t)-1)) << uint(m.usedBits)
 		m.usedBits += t
 		cwd >>= uint(t)
 		cwdLen -= t
@@ -203,7 +219,13 @@ func terminateMELVLC(m *melEncoder, v *vlcEncoder) {
 // drop: the reference keeps samples pre-shifted into the top of a 32-bit word
 // and uses p = 30 - missing_msbs, but with plain coefficients p = 0 encodes
 // losslessly, which is what the matching decoder's (v_n + 2) >> 1 inverts.
-func encodeCleanupHT(data []int32, width, height, p int) []byte {
+// The type parameter is the width of the coefficient word. int32 covers every
+// integer component the format carries; int64 is needed for a binary32
+// component, whose NLT Type 3 samples fill the whole int32 range and grow to 33
+// to 35 magnitude bits under the reversible 5/3 transform. The arithmetic below
+// is 64-bit in both instantiations, so the two agree sample for sample wherever
+// the narrow one is valid — TestWideAgreesWithNarrow asserts that.
+func encodeCleanupHT[T int32 | int64](data []T, width, height, p int) []byte {
 	if width <= 0 || height <= 0 || p < 0 {
 		return nil
 	}
@@ -218,16 +240,17 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 	lep := make([]uint8, quadCols)
 	lcxp := make([]uint8, quadCols)
 
-	// sampleAt returns the coefficient as OpenJPH's sign-magnitude word.
-	sampleAt := func(x, y int) uint32 {
+	// sampleAt returns the coefficient as OpenJPH's sign-magnitude word, with
+	// the sign in the top bit of a 64-bit word.
+	sampleAt := func(x, y int) uint64 {
 		if x >= width || y >= height {
 			return 0
 		}
-		v := data[y*width+x]
+		v := int64(data[y*width+x])
 		if v < 0 {
-			return uint32(-v) | 0x80000000
+			return uint64(-v) | 1<<63
 		}
-		return uint32(v)
+		return uint64(v)
 	}
 
 	for y := 0; y < height; y += 2 {
@@ -252,7 +275,7 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 			var rho [2]int
 			var eq [8]int
 			var eqmax [2]int
-			var sv [8]uint32
+			var sv [8]uint64
 
 			pairs := 1
 			if x+2 < width {
@@ -270,12 +293,12 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 					}
 					rho[q] |= 1 << uint(n)
 					val--
-					eq[q*4+n] = 32 - bits.LeadingZeros32(val)
+					eq[q*4+n] = 64 - bits.LeadingZeros64(val)
 					if eq[q*4+n] > eqmax[q] {
 						eqmax[q] = eq[q*4+n]
 					}
 					val--
-					sv[q*4+n] = val + (t >> 31) // v_n = 2(mu_p - 1) + s_n
+					sv[q*4+n] = val + (t >> 63) // v_n = 2(mu_p - 1) + s_n
 				}
 			}
 
@@ -321,7 +344,7 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 					}
 					m := uq - int((tuple>>uint(n))&1)
 					if m > 0 {
-						ms.encode(sv[q*4+n]&((1<<uint(m))-1), m)
+						ms.encode(sv[q*4+n]&(1<<uint(m)-1), m)
 					}
 				}
 
@@ -355,21 +378,37 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 			if initial && u0 > 0 && u1 > 0 {
 				mel.encode(min2(u0, u1) > 2)
 			}
+			//
+			// The four-bit extension after the suffixes is what carries u
+			// above 32. Without it the codeword for such a u is the codeword
+			// for u mod 4 + 33, so every quad whose magnitude exponent passes
+			// 32 decodes with the wrong number of magnitude bits and the
+			// MagSgn stream desynchronises from there on. Only a component
+			// wide enough to reach that exponent — a binary32 one — can
+			// produce it, which is why the omission survived.
 			switch {
 			case initial && u0 > 2 && u1 > 2:
-				vlc.encode(int(uvlcEncTbl[u0-2].pre), int(uvlcEncTbl[u0-2].preLen))
-				vlc.encode(int(uvlcEncTbl[u1-2].pre), int(uvlcEncTbl[u1-2].preLen))
-				vlc.encode(int(uvlcEncTbl[u0-2].suf), int(uvlcEncTbl[u0-2].sufLen))
-				vlc.encode(int(uvlcEncTbl[u1-2].suf), int(uvlcEncTbl[u1-2].sufLen))
+				e0, e1 := uvlcEntryFor(u0-2), uvlcEntryFor(u1-2)
+				vlc.encode(int(e0.pre), int(e0.preLen))
+				vlc.encode(int(e1.pre), int(e1.preLen))
+				vlc.encode(int(e0.suf), int(e0.sufLen))
+				vlc.encode(int(e1.suf), int(e1.sufLen))
+				vlc.encode(int(e0.ext), int(e0.extLen))
+				vlc.encode(int(e1.ext), int(e1.extLen))
 			case initial && u0 > 2 && u1 > 0:
-				vlc.encode(int(uvlcEncTbl[u0].pre), int(uvlcEncTbl[u0].preLen))
+				e0 := uvlcEntryFor(u0)
+				vlc.encode(int(e0.pre), int(e0.preLen))
 				vlc.encode(u1-1, 1)
-				vlc.encode(int(uvlcEncTbl[u0].suf), int(uvlcEncTbl[u0].sufLen))
+				vlc.encode(int(e0.suf), int(e0.sufLen))
+				vlc.encode(int(e0.ext), int(e0.extLen))
 			default:
-				vlc.encode(int(uvlcEncTbl[u0].pre), int(uvlcEncTbl[u0].preLen))
-				vlc.encode(int(uvlcEncTbl[u1].pre), int(uvlcEncTbl[u1].preLen))
-				vlc.encode(int(uvlcEncTbl[u0].suf), int(uvlcEncTbl[u0].sufLen))
-				vlc.encode(int(uvlcEncTbl[u1].suf), int(uvlcEncTbl[u1].sufLen))
+				e0, e1 := uvlcEntryFor(u0), uvlcEntryFor(u1)
+				vlc.encode(int(e0.pre), int(e0.preLen))
+				vlc.encode(int(e1.pre), int(e1.preLen))
+				vlc.encode(int(e0.suf), int(e0.sufLen))
+				vlc.encode(int(e1.suf), int(e1.sufLen))
+				vlc.encode(int(e0.ext), int(e0.extLen))
+				vlc.encode(int(e1.ext), int(e1.extLen))
 			}
 		}
 	}

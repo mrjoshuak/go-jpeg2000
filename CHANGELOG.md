@@ -28,6 +28,32 @@ those comparisons and fails the build on regression.
 - Two guard bits are signalled in QCD. With none, Mb fell short of the U_q the
   HT coder produces and conforming decoders rejected the code-blocks outright.
 
+- **Tiling was declared but never implemented.** `generateSIZ` wrote the tile
+  grid into the SIZ marker while `generateTiles` emitted one tile-part holding
+  the whole image, so a decoder partitioned by a grid the data did not follow.
+  Subband coordinates now derive from absolute tile-component coordinates per
+  ISO/IEC 15444-1 B.5, because two tiles of the same size split differently
+  when their origins differ in parity.
+- **The irreversible path signalled quantization it did not perform.** QCD
+  carried Sqcd style 1 (scalar derived) with a five-byte segment holding
+  `(100 - Quality) * 256`, which is neither an exponent nor a mantissa. Now
+  style 2 with an explicit step size per subband, and the coefficients are
+  actually quantized.
+- **The float path computed in int32 and wrapped.** After the NLT Type 3 point
+  transform a binary32 sample fills the int32 range; one 5/3 level then needs
+  33 magnitude bits and the RCT pushes chrominance to 35. Both wrapped, and
+  both wrapped invertibly, so round trips passed while OpenJPH decoded 877 of
+  1024 samples differently. The transform chain is now 64-bit where the
+  magnitude budget requires it.
+- The magnitude budget was under-signalled in three places at once: QCD guard
+  bits, the `Ccap^15` B_p field (a constant declaring at most 10 bit-planes for
+  every file this library ever wrote), and a second independent copy of the QCD
+  exponent rule in the packet-header path that disagreed with the first.
+- The u-VLC never emitted the four-bit extension the standard reserves for
+  u above 32, which 32-bit samples are the first content to reach.
+- `Cnlt = 0xFFFF`, the "all components" form OpenJPH writes, was rejected as an
+  out-of-range component index, so no OpenJPH float codestream could be read.
+
 ### Fixed
 - **The 2D wavelet ran its separable passes in the wrong order**, rows-then-
   columns forward and columns-then-rows inverse. ISO/IEC 15444-1 F.3.8.1 fixes
@@ -77,14 +103,17 @@ those comparisons and fails the build on regression.
 ### Known limitations
 - Part 1 (non-HighThroughput) encoding still writes the private tile container
   and is not interoperable. See the Interoperability section of the README.
-- The interoperability evidence is 8-bit greyscale, single tile, single layer,
-  lossless 5/3, default progression. Multi-component images, the 9/7 path,
-  `EncodeFloat`/`EncodeHalf` output, tiling, subsampling, precincts, multiple
-  layers and other progression orders are covered only by this library's own
-  tests — the same position everything was in before this release. They are
-  unverified, not known-good.
-- The HT encoder emits the cleanup pass only; `EncodeWithRefinement` is not
-  called by the live encode path, so SPP/MRP output is untested.
+- Component subsampling, precinct partitions, multiple quality layers and
+  progression orders other than the default are covered only by this library's
+  own tests. They are unverified, not known-good.
+- The HT encoder emits the cleanup pass only. That is conformant, but leaves no
+  room for quality-layer truncation; `EncodeWithRefinement` is not called by the
+  live encode path.
+- At zero decomposition levels `ojph_compress` signals Mb = 31 for a signed
+  32-bit component and loses the sample 0xFFFFFFFF from its own file. This
+  encoder measures the transformed coefficients rather than trusting the
+  nominal rule, signals 32, and OpenJPH reads our file back exactly. The gate
+  records this as a known gap against the reference, not a defect here.
 
 ## [1.3.0] - 2026-08-17
 

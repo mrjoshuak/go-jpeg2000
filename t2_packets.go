@@ -186,6 +186,7 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 	if numLayers < 1 {
 		numLayers = 1
 	}
+	wide := h.WideSamples()
 
 	// Build the code-block grid for every (component, resolution, band).
 	//
@@ -308,13 +309,35 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 							continue
 						}
 						var coeffs []int32
-						if h.IsHTJ2K() {
+						var coeffs64 []int64
+						switch {
+						case wide && h.IsHTJ2K():
+							// The signalled magnitude budget does not fit a
+							// 32-bit coefficient word; see wide.go.
+							dec := entropy.GetHTDecoder(w, hh)
+							coeffs64 = append([]int64(nil),
+								dec.Decode64(cb.data, numbps, bg.bandType)...)
+							entropy.PutHTDecoder(dec)
+						case h.IsHTJ2K():
 							dec := entropy.GetHTDecoder(w, hh)
 							coeffs = dec.Decode(cb.data, numbps, bg.bandType)
 							entropy.PutHTDecoder(dec)
-						} else {
+						default:
+							// The Part 1 MQ coder carries int32 coefficients
+							// and nothing wider. A codestream that declares a
+							// budget above 32 bits and codes it with MQ is out
+							// of this decoder's reach; widening what MQ
+							// produces at least keeps the data flow consistent
+							// with the wide tile-component, rather than
+							// running the HT decoder over MQ bytes.
 							t1 := entropy.NewT1(w, hh)
 							coeffs = t1.Decode(cb.data, numbps, bg.bandType)
+							if wide {
+								coeffs64 = make([]int64, len(coeffs))
+								for i, v := range coeffs {
+									coeffs64[i] = int64(v)
+								}
+							}
 						}
 						// The offsets are relative to the tile-component
 						// array, which holds the subbands in the Mallat
@@ -325,6 +348,10 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 								dx := sb.ox + bx0 - sb.x0 + xx
 								dy := sb.oy + by0 - sb.y0 + yy
 								if dx < 0 || dy < 0 || dx >= tcW || dy >= tcH {
+									continue
+								}
+								if wide {
+									tc.Data64[dy*tcW+dx] = coeffs64[yy*w+xx]
 									continue
 								}
 								tc.Data[dy*tcW+dx] = coeffs[yy*w+xx]
