@@ -50,7 +50,33 @@ after confirming the oracle round-trips its own output bit-exactly.
 - [x] Standard **T2 packet encoding** written. OpenJPH parses the resulting
       markers and packet headers and reaches block decoding.
 
-### Open — the library is not interoperable until these are done
+### Interoperability achieved (verified against OpenJPH and OpenJPEG)
+
+- [x] **OpenJPH decodes our HTJ2K output exactly** at 32, 64, 128 and 200 px
+      square, single resolution — 0 samples different. Conforming T2 packets are
+      emitted for the HighThroughput path.
+- [x] **We decode OpenJPH's HTJ2K output exactly**, at zero and one
+      decomposition level.
+- [x] **We decode OpenJPEG's Part 1 MQ output exactly**, at one and two
+      resolutions. The MQ block decoder had four independent defects, the first
+      being that only the uniform context was seeded (Table D.7 requires
+      UNIFORM=46, RUN-LENGTH=3, ZC context 0=4), so the arithmetic decoder
+      desynchronised on the first decision of nearly every code-block.
+- [x] The DWT multi-level drivers passed the shrunken level width as the row
+      stride, so from the second decomposition level they walked the wrong
+      memory. A round trip could not see it because both directions made the
+      same mistake.
+- [x] The HT encoder applied initial-stripe u-coding rules to every stripe,
+      emitting a MEL event and the "u > 2" UVLC modes where a conforming
+      decoder expects neither. `TestHTEncodeMatchesOpenJPH` is now byte-exact.
+- [x] Guard bits were 0, making Mb one or two short of the U_q the detail bands
+      produce, so conforming decoders rejected the code-blocks outright.
+- [x] The tag-tree encoder lacked a `known` flag and set leaf values during
+      coding rather than before it, corrupting every packet with more than one
+      code-block per band.
+- [x] `scripts/validate.sh` gates all of the above, including `go test -race`.
+
+### Open — remaining gaps
 
 - [x] The HT block coder was 99.5-100% wrong in both directions; it is now
       correct, verified against OpenJPH rather than by round-trip. The
@@ -77,7 +103,16 @@ after confirming the oracle round-trips its own output bit-exactly.
 - [ ] `PacketDecoder.decodeTagTreeValue` is a unary decode labelled "Simplified".
       It is correct only for a 1x1 tree (a single code-block per precinct).
       (`t2_packets.go` has a correct tag tree; `internal/tcd/t2.go` remains dead.)
-- [ ] **Multi-resolution decoding is broken.** Isolated with a 2x2 matrix:
+- [ ] **The forward DWT is not bit-conformant above one decomposition level.**
+      Our own round trip is exact at every level, and OpenJPH decodes our
+      single-resolution output exactly, but at two levels it differs on 25 of
+      1024 samples — one LSB low, in vertical runs matching the 5-tap synthesis
+      footprint of a single wrong detail coefficient. Self-inverse again: our
+      forward and inverse agree with each other and not with the standard.
+- [ ] **Conforming T2 output is enabled only for HighThroughput.** The Part 1
+      MQ path still writes the private container, because its packet headers
+      need a length per coding pass and only a single length is emitted.
+- [ ] SUPERSEDED: multi-resolution decoding was broken. Isolated with a 2x2 matrix:
       HT at one resolution is exact, MQ at one resolution is 63/64 wrong, HT at
       two resolutions is 63/64 wrong. So T2 and the HT block coder are correct,
       and there are two further defects — in the MQ block decoder and in the
