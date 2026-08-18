@@ -52,13 +52,17 @@ after confirming the oracle round-trips its own output bit-exactly.
 
 ### Open — the library is not interoperable until these are done
 
-- [ ] **The HT block coder does not work.** `TestHTCleanupIsExact` (added here)
-      shows 99.5–100% of coefficients wrong on a plain round-trip. The
-      pre-existing `TestHTEncoderDecoder` passes because it asserts only that
-      signs match, excused by a comment claiming the cleanup pass is lossy. It
-      is not: the cleanup pass codes every magnitude bit down to the coded
-      bitplane, so decode(encode(x)) must equal x.
-- [ ] **There is no T2 packet coding on the live path.** `buildTileData` writes
+- [x] The HT block coder was 99.5-100% wrong in both directions; it is now
+      correct, verified against OpenJPH rather than by round-trip. The
+      pre-existing `TestHTEncoderDecoder` had passed throughout because it
+      asserts only that signs match, excused by a comment claiming the cleanup
+      pass is lossy. It is not: the cleanup pass codes every magnitude bit down
+      to the coded bitplane, so decode(encode(x)) must equal x. That test
+      remains in the false-assurance backlog.
+- [x] T2 packet decoding now exists (`t2_packets.go`) and is wired into
+      `decodeTileData`. The encoder side is written but not yet enabled.
+      Previously:
+- [ ] **There was no T2 packet coding on the live path.** `buildTileData` writes
       a 2-byte code-block count, a 5-byte-per-block table, then raw block data.
       Real tile data is packets with tag-tree-coded headers. `decodeTileData`
       checks that count and, on any real file, does `return nil` — yielding a
