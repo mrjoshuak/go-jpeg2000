@@ -8,7 +8,10 @@
 // coding for improved throughput.
 package entropy
 
-import "sync"
+import (
+	"math/bits"
+	"sync"
+)
 
 // HTDecoder is the High-Throughput JPEG 2000 block decoder.
 type HTDecoder struct {
@@ -76,7 +79,7 @@ type frwdBitstream struct {
 
 // NewHTDecoder creates a new HTJ2K block decoder.
 func NewHTDecoder(width, height int) *HTDecoder {
-	quadCols := (width+1)/2 + 2
+	quadCols := (width+1)/2 + 4
 	return &HTDecoder{
 		data:      make([]int32, width*height),
 		width:     width,
@@ -521,38 +524,97 @@ func (d *HTDecoder) initSPP(data []byte, lcup, len2 int) {
 //
 // The block is scanned in stripes two rows tall; each iteration handles a pair
 // of 2x2 quads spanning four sample columns. Significance patterns come from a
-// VLC table indexed by the context of the preceding quad, and whenever that
+// VLC table indexed by the context of neighbouring quads, and whenever that
 // context is zero the pattern is gated by an event from the MEL run decoder.
-// The previous implementation had neither the MEL gate nor the quad-derived
-// context, and advanced the VLC stream by a four-bit length field that also
-// contained u_off.
+//
+// The initial stripe has no stripe above it, so its context comes only from
+// the quad to the left and kappa is 1. Later stripes take context from the
+// line state written by the stripe above and add its exponent to U_q.
 func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 	width := d.width
 	height := d.height
-	p := numBitplanes
 
 	// Runs of MEL events gate the zero-context quads.
 	run := d.melGetRun()
 
-	for y := 0; y < height; y += 2 {
-		tbl := &vlcTbl0
-		if y != 0 {
-			tbl = &vlcTbl1
+	// Initial stripe.
+	cq := uint32(0)
+	lsp := 0
+	for x := 0; x < width; x += 4 {
+		var qinf [2]uint16
+
+		// One fetch covers both quads: the longest VLC codeword is 7 bits and
+		// u takes at most 8, so 32 bits are always sufficient.
+		vlcVal := d.revFetch(&d.vlc)
+
+		qinf[0] = vlcTbl0[(cq<<7)|(vlcVal&0x7F)]
+		if cq == 0 {
+			// Event counts are doubled, so a run reaching -1 means the event
+			// was a one and the decoded pattern stands; otherwise discard it.
+			run -= 2
+			if run != -1 {
+				qinf[0] = 0
+			}
+			if run < 0 {
+				run = d.melGetRun()
+			}
 		}
-		cq := uint32(0)
+		cq = ((uint32(qinf[0]) & 0x10) >> 4) | ((uint32(qinf[0]) & 0xE0) >> 5)
+		vlcVal = d.revAdvance(&d.vlc, uint32(qinf[0]&0x7))
+
+		qinf[1] = 0
+		if x+2 < width {
+			qinf[1] = vlcTbl0[(cq<<7)|(vlcVal&0x7F)]
+			if cq == 0 {
+				run -= 2
+				if run != -1 {
+					qinf[1] = 0
+				}
+				if run < 0 {
+					run = d.melGetRun()
+				}
+			}
+			cq = ((uint32(qinf[1]) & 0x10) >> 4) | ((uint32(qinf[1]) & 0xE0) >> 5)
+			vlcVal = d.revAdvance(&d.vlc, uint32(qinf[1]&0x7))
+		}
+
+		uvlcMode := ((uint32(qinf[0]) & 0x8) >> 3) | ((uint32(qinf[1]) & 0x8) >> 2)
+		if uvlcMode == 3 {
+			run -= 2
+			if run == -1 {
+				uvlcMode++
+			}
+			if run < 0 {
+				run = d.melGetRun()
+			}
+		}
+		var u [2]uint32
+		consumed := d.decodeInitUVLC(vlcVal, uvlcMode, &u)
+		d.revAdvance(&d.vlc, consumed)
+
+		d.decodeQuad(qinf[0], u[0], x, 0, lsp)
+		d.decodeQuad(qinf[1], u[1], x+2, 0, lsp+1)
+		lsp += 2
+	}
+
+	// Non-initial stripes.
+	for y := 2; y < height; y += 2 {
+		lsp = 0
+		ls0 := d.lineState[0]
+		d.lineState[0] = 0
+		cq = 0
 
 		for x := 0; x < width; x += 4 {
 			var qinf [2]uint16
 
-			// One fetch covers both quads: the longest VLC codeword is 7 bits
-			// and u takes at most 8, so 32 bits are always sufficient.
-			vlcVal := d.revFetch(&d.vlc)
+			// Context, eqn. 2 in ITU T.814: cq already holds sigma^W|sigma^SW
+			// from the previous quad; add sigma^NW|sigma^N and sigma^NE|sigma^NF.
+			cq |= uint32(ls0 >> 7)
+			cq |= uint32(d.lineState[lsp+1]>>5) & 0x4
 
-			qinf[0] = tbl[(cq<<7)|(vlcVal&0x7F)]
+			vlcVal := d.revFetch(&d.vlc)
+			qinf[0] = vlcTbl1[(cq<<7)|(vlcVal&0x7F)]
 			if cq == 0 {
-				// Zero context consumes one MEL event. Event counts are
-				// doubled, so a run reaching -1 means the event was a one and
-				// the decoded pattern stands; otherwise it is discarded.
 				run -= 2
 				if run != -1 {
 					qinf[0] = 0
@@ -561,12 +623,14 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 					run = d.melGetRun()
 				}
 			}
-			cq = ((uint32(qinf[0]) & 0x10) >> 4) | ((uint32(qinf[0]) & 0xE0) >> 5)
+			cq = ((uint32(qinf[0]) & 0x40) >> 5) | ((uint32(qinf[0]) & 0x80) >> 6)
 			vlcVal = d.revAdvance(&d.vlc, uint32(qinf[0]&0x7))
 
 			qinf[1] = 0
 			if x+2 < width {
-				qinf[1] = tbl[(cq<<7)|(vlcVal&0x7F)]
+				cq |= uint32(d.lineState[lsp+1] >> 7)
+				cq |= uint32(d.lineState[lsp+2]>>5) & 0x4
+				qinf[1] = vlcTbl1[(cq<<7)|(vlcVal&0x7F)]
 				if cq == 0 {
 					run -= 2
 					if run != -1 {
@@ -576,28 +640,43 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 						run = d.melGetRun()
 					}
 				}
-				cq = ((uint32(qinf[1]) & 0x10) >> 4) | ((uint32(qinf[1]) & 0xE0) >> 5)
+				cq = ((uint32(qinf[1]) & 0x40) >> 5) | ((uint32(qinf[1]) & 0x80) >> 6)
 				vlcVal = d.revAdvance(&d.vlc, uint32(qinf[1]&0x7))
 			}
 
-			// u_off bits from the quad pair select how U_q is coded; when both
-			// are set a further MEL event distinguishes the two modes.
 			uvlcMode := ((uint32(qinf[0]) & 0x8) >> 3) | ((uint32(qinf[1]) & 0x8) >> 2)
-			if uvlcMode == 3 {
-				run -= 2
-				if run == -1 {
-					uvlcMode++
-				}
-				if run < 0 {
-					run = d.melGetRun()
-				}
-			}
 			var u [2]uint32
-			consumed := d.decodeInitUVLC(vlcVal, uvlcMode, &u)
+			consumed := d.decodeNonInitUVLC(vlcVal, uvlcMode, &u)
 			d.revAdvance(&d.vlc, consumed)
 
-			d.decodeQuadSamples(qinf[0], u[0], x, y, p)
-			d.decodeQuadSamples(qinf[1], u[1], x+2, y, p)
+			// E^max, eqns 5 and 6 in ITU T.814. U_q already carries u_q + 1,
+			// so subtract 2 rather than 1.
+			if r := uint32(qinf[0]) & 0xF0; r&(r-1) != 0 {
+				e := uint32(ls0 & 0x7F)
+				if v := uint32(d.lineState[lsp+1] & 0x7F); v > e {
+					e = v
+				}
+				if e > 2 {
+					u[0] += e - 2
+				}
+			}
+			if r := uint32(qinf[1]) & 0xF0; r&(r-1) != 0 {
+				e := uint32(d.lineState[lsp+1] & 0x7F)
+				if v := uint32(d.lineState[lsp+2] & 0x7F); v > e {
+					e = v
+				}
+				if e > 2 {
+					u[1] += e - 2
+				}
+			}
+
+			ls0 = d.lineState[lsp+2]
+			d.lineState[lsp+1] = 0
+			d.lineState[lsp+2] = 0
+
+			d.decodeQuad(qinf[0], u[0], x, y, lsp)
+			d.decodeQuad(qinf[1], u[1], x+2, y, lsp+1)
+			lsp += 2
 		}
 	}
 }
@@ -923,7 +1002,7 @@ type frwdBitWriter struct {
 
 // NewHTEncoder creates a new HTJ2K block encoder.
 func NewHTEncoder(width, height int) *HTEncoder {
-	quadCols := (width+1)/2 + 2
+	quadCols := (width+1)/2 + 4
 	return &HTEncoder{
 		data:   make([]int32, width*height),
 		width:  width,
@@ -1187,7 +1266,7 @@ func (e *HTEncoder) EncodeWithRefinement(bandType int) ([]byte, int) {
 func (e *HTEncoder) encodeCleanup(numBits int) {
 	width := e.width
 	height := e.height
-	quadCols := (width+1)/2 + 2
+	quadCols := (width+1)/2 + 4
 
 	// Process in 4-row stripes
 	for y := 0; y < height; y += 4 {
@@ -1579,7 +1658,7 @@ func (d *HTDecoder) Resize(width, height int) {
 		d.data = d.data[:dataSize]
 	}
 
-	quadCols := (width+1)/2 + 2
+	quadCols := (width+1)/2 + 4
 	if cap(d.sigma1) < quadCols+1 {
 		d.sigma1 = make([]uint8, quadCols+1)
 		d.sigma2 = make([]uint8, quadCols+1)
@@ -1603,7 +1682,7 @@ func (e *HTEncoder) Resize(width, height int) {
 		e.data = e.data[:dataSize]
 	}
 
-	quadCols := (width+1)/2 + 2
+	quadCols := (width+1)/2 + 4
 	if cap(e.sigma1) < quadCols+1 {
 		e.sigma1 = make([]uint8, quadCols+1)
 		e.sigma2 = make([]uint8, quadCols+1)
@@ -1613,36 +1692,28 @@ func (e *HTEncoder) Resize(width, height int) {
 	}
 }
 
-// decodeQuadSamples decodes the four samples of one 2x2 quad from the MagSgn
-// stream, following ISO/IEC 15444-15 as implemented in OpenJPEG's ht_dec.c.
+// decodeSample decodes sample n of a quad from the MagSgn stream, following
+// ISO/IEC 15444-15 as implemented in OpenJPEG's ht_dec.c.
 //
-// Sample n of the quad sits at (x0 + n>>1, y0 + n&1) and is significant when
-// bit 4+n of qinf is set. The number of magnitude bits is U_q less the EMB e_k
-// bit for that sample (qinf bits 12..15). Bit 0 of the fetched word carries the
-// sign, the EMB e_1 bit (qinf bits 8..11) supplies the MSB, and the bin centre
-// is restored before shifting up by the missing bitplanes.
+// The number of magnitude bits is U_q less the EMB e_k bit for that sample
+// (qinf bits 12..15). Bit 0 of the fetched word carries the sign, the EMB e_1
+// bit (qinf bits 8..11) supplies the MSB, and the bin centre is restored.
 //
-// The previous code read a fixed count of magnitude bits, took the sign from a
-// separate fetch, and ignored the EMB fields and the bitplane shift entirely.
-func (d *HTDecoder) decodeQuadSamples(qinf uint16, uq uint32, x0, y0, p int) {
-	if p < 1 {
-		return
+// It returns v_n, which the caller folds into the line state as the exponent
+// the stripe below uses for context, and whether the sample was significant.
+func (d *HTDecoder) decodeSample(qinf uint16, uq uint32, n, x, y int) (uint32, bool) {
+	if qinf&(0x10<<uint(n)) == 0 {
+		return 0, false
 	}
-	for n := 0; n < 4; n++ {
-		if qinf&(0x10<<uint(n)) == 0 {
-			continue
-		}
-		x, y := x0+(n>>1), y0+(n&1)
-		if x >= d.width || y >= d.height {
-			continue
-		}
-		ms := d.frwdFetch(&d.magSgn)
-		mn := uq - ((uint32(qinf) >> uint(12+n)) & 1)
-		d.frwdAdvance(&d.magSgn, mn)
+	ms := d.frwdFetch(&d.magSgn)
+	mn := uq - ((uint32(qinf) >> uint(12+n)) & 1)
+	d.frwdAdvance(&d.magSgn, mn)
 
-		vn := ms & ((1 << mn) - 1)
-		vn |= ((uint32(qinf) >> uint(8+n)) & 1) << mn
-		vn |= 1 // centre of bin
+	vn := ms & ((1 << mn) - 1)
+	vn |= ((uint32(qinf) >> uint(8+n)) & 1) << mn
+	vn |= 1 // centre of bin
+
+	if x < d.width && y < d.height {
 		// The reference keeps samples in a shifted domain for dequantisation,
 		// storing (v_n + 2) << (p-1) and shifting down by p later. Returning
 		// plain coefficients, those cancel to a single right shift: the
@@ -1652,6 +1723,38 @@ func (d *HTDecoder) decodeQuadSamples(qinf uint16, uq uint32, x0, y0, p int) {
 			mag = -mag
 		}
 		d.data[y*d.width+x] = mag
+	}
+	return vn, true
+}
+
+// expOf returns the exponent E stored in the line state for a decoded v_n.
+func expOf(vn uint32) uint8 {
+	return uint8(32 - bits.LeadingZeros32(vn))
+}
+
+// decodeQuad decodes one 2x2 quad and maintains the line state entries that
+// the next stripe reads as its context. Quad sample n sits at
+// (x0 + n>>1, y0 + n&1); samples 1 and 3 are the bottom row and are the ones
+// that contribute to the line state.
+func (d *HTDecoder) decodeQuad(qinf uint16, uq uint32, x0, y0, lsp int) {
+	d.decodeSample(qinf, uq, 0, x0, y0)
+
+	if vn, ok := d.decodeSample(qinf, uq, 1, x0, y0+1); ok && lsp < len(d.lineState) {
+		t := d.lineState[lsp] & 0x7F // E^NW
+		e := expOf(vn)
+		if t > e {
+			e = t
+		}
+		d.lineState[lsp] = 0x80 | e
+	}
+
+	lsp++
+	d.decodeSample(qinf, uq, 2, x0+1, y0)
+	if lsp < len(d.lineState) {
+		d.lineState[lsp] = 0
+	}
+	if vn, ok := d.decodeSample(qinf, uq, 3, x0+1, y0+1); ok && lsp < len(d.lineState) {
+		d.lineState[lsp] = 0x80 | expOf(vn)
 	}
 }
 
