@@ -66,3 +66,49 @@ func TestHTDecodeOpenJPHBlock(t *testing.T) {
 			firstAt, firstGot, firstWant)
 	}
 }
+
+// TestHTEncodeMatchesOpenJPH encodes the coefficients that OpenJPH encoded and
+// requires the same bytes back.
+//
+// This is a far sharper test than a round-trip: the HT cleanup pass is a
+// deterministic algorithm, so a conforming encoder given these coefficients has
+// exactly one correct output, and openjphBlock is it. A round-trip through our
+// own decoder cannot distinguish a correct encoder from one whose deviations
+// our decoder happens to mirror.
+func TestHTEncodeMatchesOpenJPH(t *testing.T) {
+	got := encodeCleanupHT(openjphCoefficients, 8, 8, 0)
+	if got == nil {
+		t.Fatal("encoder returned nil for non-zero data")
+	}
+	if len(got) != len(openjphBlock) {
+		t.Errorf("length: got %d bytes, want %d", len(got), len(openjphBlock))
+	}
+	n := len(got)
+	if len(openjphBlock) < n {
+		n = len(openjphBlock)
+	}
+	diff, firstAt := 0, -1
+	for i := 0; i < n; i++ {
+		if got[i] != openjphBlock[i] {
+			if firstAt < 0 {
+				firstAt = i
+			}
+			diff++
+		}
+	}
+	if diff != 0 || len(got) != len(openjphBlock) {
+		t.Errorf("%d/%d bytes differ, first at %d", diff, n, firstAt)
+		if firstAt >= 0 {
+			lo := firstAt - 4
+			if lo < 0 {
+				lo = 0
+			}
+			hi := firstAt + 8
+			if hi > n {
+				hi = n
+			}
+			t.Logf("got  [%d:%d] % x", lo, hi, got[lo:hi])
+			t.Logf("want [%d:%d] % x", lo, hi, openjphBlock[lo:hi])
+		}
+	}
+}

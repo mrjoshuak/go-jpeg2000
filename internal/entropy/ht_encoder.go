@@ -341,6 +341,7 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 					cq0 = (rho[q] >> 1) | (rho[q] & 1)
 				} else {
 					cq0 = int(lcxp[lcxIdx]) + (int(lcxp[lcxIdx+1]) << 2)
+					cq0 |= ((rho[q] & 4) >> 1) | ((rho[q] & 8) >> 2)
 				}
 				lcxp[lcxIdx] = uint8((rho[q] & 8) >> 3)
 			}
@@ -370,6 +371,7 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 	}
 
 	terminateMELVLC(mel, vlc)
+	ms.terminate()
 
 	// Assemble: MagSgn forward, then MEL, then VLC reversed, with Scup last.
 	melvlc := len(mel.buf) + len(vlc.buf)
@@ -406,4 +408,26 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// terminate flushes the MagSgn stream's final partial byte, padding the unused
+// bits with ones. A byte that would come out 0xFF is dropped instead, since
+// 0xFF is reserved by the bit-stuffing rule; and a stream that ended exactly on
+// a stuffed byte gives that byte back.
+//
+// Omitting this left the MagSgn segment one byte short, which moved the
+// MEL+VLC boundary and made Scup disagree with the reference by one.
+func (m *msEncoder) terminate() {
+	if m.usedBits != 0 {
+		t := m.maxBits - m.usedBits
+		m.tmp |= (0xFF & ((1 << uint(t)) - 1)) << uint(m.usedBits)
+		m.usedBits += t
+		if m.tmp != 0xFF {
+			m.buf = append(m.buf, byte(m.tmp))
+		}
+		return
+	}
+	if m.maxBits == 7 && len(m.buf) > 0 {
+		m.buf = m.buf[:len(m.buf)-1]
+	}
 }
