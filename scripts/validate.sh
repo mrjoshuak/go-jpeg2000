@@ -251,6 +251,64 @@ else
 fi
 
 echo
+echo "=== capability matrix ==="
+#
+# The checks above cover 8-bit greyscale. This section covers the rest of what
+# the format supports, because a gate that only exercises one corner is how
+# every defect outside that corner survived: the lossy path, tiled images and
+# float components were all non-conforming while the greyscale gate was green.
+#
+if ! have ojph_expand; then
+	gap "OpenJPH not installed; capability matrix unchecked"
+else
+	MX="$WORK/matrix"
+	if ! go run ./scripts/matrixgen "$MX" >"$WORK/matrix.tsv" 2>"$WORK/matrix.err"; then
+		fail "capability matrix: generator failed"
+		head -5 "$WORK/matrix.err"
+	else
+		while IFS=$'\t' read -r name comps depth stream ref; do
+			if [ "$comps" = "ENCODE_FAIL" ]; then
+				fail "matrix $name: encoder failed"
+				continue
+			fi
+			ext=pgm
+			[ "$comps" = "3" ] && ext=ppm
+			out="$MX/$name.out.$ext"
+			if ! err=$(ojph_expand -i "$stream" -o "$out" 2>&1); then
+				fail "matrix $name: reference refused our codestream: $(echo "$err" | grep -oE 'ojph error.*' | head -1 | cut -c1-70)"
+				continue
+			fi
+			# Compare header and raster separately: a wrong maxval means the
+			# precision we signalled is nonsensical even when the samples decode.
+			if d=$(python3 - "$out" "$ref" <<'PYEOF'
+import sys
+def rd(p):
+    d=open(p,'rb').read(); i=0; t=[]
+    while len(t)<4:
+        while d[i] in b' \n\t\r': i+=1
+        s=i
+        while d[i] not in b' \n\t\r': i+=1
+        t.append(d[s:i])
+    return t, d[i+1:]
+ta,a = rd(sys.argv[1]); tb,b = rd(sys.argv[2])
+if ta[3] != tb[3]:
+    print(f"maxval {ta[3].decode()} where the reference raster says {tb[3].decode()}"); sys.exit(1)
+if len(a) != len(b):
+    print(f"raster {len(a)} bytes vs {len(b)}"); sys.exit(1)
+n = sum(1 for x,y in zip(a,b) if x!=y)
+print("exact" if n==0 else f"{n}/{len(b)} samples differ")
+sys.exit(0 if n==0 else 1)
+PYEOF
+			); then
+				pass "matrix $name: the reference decodes it exactly"
+			else
+				fail "matrix $name: $d"
+			fi
+		done <"$WORK/matrix.tsv"
+	fi
+fi
+
+echo
 echo "=== result ==="
 echo "checks run: $CHECKS, failures: $FAILURES, known gaps: $GAPS"
 if [ "$FAILURES" -ne 0 ]; then
