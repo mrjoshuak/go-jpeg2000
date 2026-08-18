@@ -854,6 +854,15 @@ type codeBlockJob struct {
 	width    int
 	height   int
 	bandType int
+
+	// Packet grouping. T2 packets are formed per (component, resolution), so
+	// each code-block must know where it sits in that structure.
+	comp     int
+	res      int
+	bandIdx  int
+	cbx, cby int
+	cbNX     int
+	cbNY     int
 }
 
 // codeBlockResult holds the encoded result.
@@ -1074,6 +1083,11 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 							width:    actualWidth,
 							height:   actualHeight,
 							bandType: bandType,
+							comp:     c,
+							res:      r,
+							bandIdx:  b,
+							cbx:      cbx,
+							cby:      cby,
 						})
 					}
 				}
@@ -1092,17 +1106,30 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 		var metas []cbMeta
 		var allTruncPoints [][]int
 		var allEncoded []byte
+		var encodedList [][]byte
+		var numBPSList []int
 		for _, job := range jobs {
 			numBPS := computeNumBPS(job.data)
 			encoded, tpCopy := e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
 			metas = append(metas, cbMeta{numBPS: uint8(numBPS), dataLen: uint32(len(encoded))})
 			allTruncPoints = append(allTruncPoints, tpCopy)
 			allEncoded = append(allEncoded, encoded...)
+			encodedList = append(encodedList, encoded)
+			numBPSList = append(numBPSList, numBPS)
 		}
 		var tileData []byte
-		if numLayers > 1 {
+		switch {
+		case numLayers > 1:
 			tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
-		} else {
+		default:
+			// TODO: switch to e.buildStandardTileData(jobs, encodedList,
+			// numBPSList) once the T2 decoder handles multiple resolutions.
+			// That call emits conforming packets — OpenJPH parses their headers
+			// and reaches block decoding — but this library's own T2 decoder is
+			// still single-resolution only, so enabling it here breaks our
+			// round-trip for any image with a wavelet.
+			_ = encodedList
+			_ = numBPSList
 			tileData = buildTileData(metas, allEncoded)
 		}
 		return e.createTileHeader(tileIdx, tileData), nil
