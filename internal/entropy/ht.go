@@ -1021,112 +1021,20 @@ func (e *HTEncoder) SetData(data []int32) {
 // bandType specifies the subband (BandLL, BandHL, BandLH, or BandHH).
 // Returns the encoded data.
 func (e *HTEncoder) Encode(bandType int) []byte {
-	width := e.width
-	height := e.height
-
-	// Find the maximum magnitude to determine the number of bitplanes
-	maxMag := int32(0)
+	// Every coefficient zero means an empty code-block, which is signalled by
+	// omitting it from the packet rather than by an empty segment.
+	nonZero := false
 	for _, v := range e.data {
-		if v < 0 {
-			v = -v
-		}
-		if v > maxMag {
-			maxMag = v
+		if v != 0 {
+			nonZero = true
+			break
 		}
 	}
-
-	if maxMag == 0 {
-		// Empty code block
+	if !nonZero {
 		return nil
 	}
-
-	// Count the number of magnitude bits needed
-	numBits := 0
-	for m := maxMag; m > 0; m >>= 1 {
-		numBits++
-	}
-
-	// Estimate output buffer size
-	maxSize := width * height * 2 // Conservative estimate
-	if maxSize < 64 {
-		maxSize = 64
-	}
-
-	// Initialize output buffers
-	e.output = make([]byte, maxSize)
-
-	// Initialize MEL encoder. Both MEL writers append, so this must have zero
-	// length and reserved capacity. Allocating a non-zero length prefixed the
-	// MEL stream with that many zero bytes and inflated melLen below by the
-	// same amount, so a conforming decoder read the MEL segment from the wrong
-	// offset and recovered no significant quads at all.
-	e.mel.data = make([]byte, 0, maxSize/4)
-	e.mel.tmp = 0
-	e.mel.bits = 0
-	e.mel.k = 0
-	e.mel.run = 0
-
-	// Initialize VLC writer (writes backward from end)
-	e.vlc.data = make([]byte, maxSize/2)
-	e.vlc.pos = len(e.vlc.data) - 1
-	e.vlc.tmp = 0
-	e.vlc.bits = 0
-	e.vlc.lastByte = 0
-
-	// Initialize MagSgn writer (writes forward from start)
-	e.magSgn.data = make([]byte, maxSize/2)
-	e.magSgn.pos = 0
-	e.magSgn.tmp = 0
-	e.magSgn.bits = 0
-	e.magSgn.lastByte = 0
-
-	// Clear significance buffers
-	for i := range e.sigma1 {
-		e.sigma1[i] = 0
-		e.sigma2[i] = 0
-	}
-
-	// Encode the cleanup pass
-	e.encodeCleanup(numBits)
-
-	// Flush all streams
-	e.melFlush()
-	e.vlcFlush()
-	e.magSgnFlush()
-
-	// Combine streams into output:
-	// Output format: MagSgn | MEL+VLC | SCUP (2 bytes)
-	//
-	// MagSgn grows forward, MEL and VLC are interleaved growing toward each other
-
-	// Get the actual lengths
-	magSgnLen := e.magSgn.pos
-	melLen := len(e.mel.data)
-	vlcLen := len(e.vlc.data) - e.vlc.pos - 1
-
-	// Calculate SCUP (length of MEL+VLC segment)
-	scup := melLen + vlcLen + 2 // +2 for the SCUP marker itself
-
-	// Build output
-	totalLen := magSgnLen + scup
-	output := make([]byte, totalLen)
-
-	// Copy MagSgn data
-	copy(output[0:magSgnLen], e.magSgn.data[0:magSgnLen])
-
-	// Copy MEL data
-	copy(output[magSgnLen:magSgnLen+melLen], e.mel.data[0:melLen])
-
-	// Copy VLC data (reversed)
-	for i := 0; i < vlcLen; i++ {
-		output[magSgnLen+melLen+i] = e.vlc.data[len(e.vlc.data)-1-i]
-	}
-
-	// Write SCUP at the end (12 bits in last 2 bytes)
-	output[totalLen-2] = byte(scup >> 8)
-	output[totalLen-1] = byte(scup & 0xFF)
-
-	return output
+	// p = 0: encode every magnitude bit. See encodeCleanupHT.
+	return encodeCleanupHT(e.data, e.width, e.height, 0)
 }
 
 // EncodeWithRefinement encodes the code block with cleanup, SPP, and MRP passes.
