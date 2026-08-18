@@ -113,6 +113,10 @@ import (
 func main() {
 	size, _ := strconv.Atoi(os.Args[2])
 	nres, _ := strconv.Atoi(os.Args[3])
+	tile := 0
+	if len(os.Args) > 4 {
+		tile, _ = strconv.Atoi(os.Args[4])
+	}
 	img := image.NewGray(image.Rect(0, 0, size, size))
 	raw := make([]byte, size*size)
 	for y := 0; y < size; y++ {
@@ -127,10 +131,14 @@ func main() {
 		panic(err)
 	}
 	defer f.Close()
-	if err := jp2.Encode(f, img, &jp2.Options{
+	opts := &jp2.Options{
 		HighThroughput: true, Lossless: true,
 		Format: jp2.FormatJ2K, NumResolutions: nres,
-	}); err != nil {
+	}
+	if tile > 0 {
+		opts.TileSize = image.Point{X: tile, Y: tile}
+	}
+	if err := jp2.Encode(f, img, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "encode:", err)
 		os.Exit(1)
 	}
@@ -205,6 +213,28 @@ PYEOF
 		fi
 	done
 
+	# WRITE side, tiled. A tiled image is one tile-part per tile, each coded at
+	# its own absolute origin, and the tile sizes below are chosen to exercise
+	# both cases: 16 and 32 divide 64 evenly, while 20, 24 and 13 leave a short
+	# last row and column, and 20 and 13 put whole tiles at origins that are
+	# odd once halved, which splits their subbands the other way round.
+	for tile in 16 32 20 24 13; do
+		f="$WORK/t_$tile.j2c"
+		if ! go run "$WORK/enc.go" "$f" 64 3 "$tile" >/dev/null 2>&1; then
+			fail "write 64px in ${tile}x${tile} tiles: our encoder failed"
+			continue
+		fi
+		if ! ojph_expand -i "$f" -o "$WORK/t_$tile.out.pgm" >/dev/null 2>&1; then
+			fail "write 64px in ${tile}x${tile} tiles: OpenJPH refused our codestream"
+			continue
+		fi
+		if d=$(cmp_pgm "$WORK/t_$tile.out.pgm" "$f.pgm"); then
+			pass "write 64px in ${tile}x${tile} tiles: OpenJPH decodes it exactly ($d differ)"
+		else
+			fail "write 64px in ${tile}x${tile} tiles: OpenJPH decoded $d samples differently"
+		fi
+	done
+
 	# READ side: do we read what the reference produces, exactly?
 	for src in src src32; do
 		for nd in 0 1 2 3; do
@@ -228,6 +258,28 @@ PYEOF
 			fi
 		done
 	done
+
+	# READ side, tiled: the same geometry from the other direction. src32 is
+	# 32x32, so 12 and 13 leave a short last tile and put tiles at odd origins.
+	for tile in 8 16 12 13; do
+		f="$WORK/rt_$tile.j2c"
+		if ! ojph_compress -i "$WORK/src32.pgm" -o "$f" \
+			-tile_size "{$tile,$tile}" -num_decomps 2 -reversible true >/dev/null 2>&1; then
+			gap "read HTJ2K ${tile}x${tile} tiles: OpenJPH could not produce a fixture"
+			continue
+		fi
+		ojph_expand -i "$f" -o "$WORK/rt_$tile.ctl.pgm" >/dev/null 2>&1
+		if ! cmp -s "$WORK/rt_$tile.ctl.pgm" "$WORK/src32.pgm"; then
+			gap "read HTJ2K ${tile}x${tile} tiles: oracle control failed, measurement would be meaningless"
+			continue
+		fi
+		out=$(go run ./scripts/decodecmp "$f" "$WORK/src32.pgm" 2>&1)
+		if [ "$out" = "0" ]; then
+			pass "read HTJ2K ${tile}x${tile} tiles: we decode OpenJPH's codestream exactly"
+		else
+			fail "read HTJ2K ${tile}x${tile} tiles: $out samples differ"
+		fi
+	done
 fi
 
 if ! have opj_compress; then
@@ -247,6 +299,21 @@ else
 				fail "read Part 1 MQ $src -n $n: $out samples differ"
 			fi
 		done
+	done
+
+	# Tiled Part 1: same geometry, MQ-coded rather than HT.
+	for tile in 8 16 12 13; do
+		f="$WORK/pt_$tile.j2k"
+		if ! opj_compress -i "$WORK/src32.pgm" -o "$f" -t "$tile,$tile" -n 3 -r 1 >/dev/null 2>&1; then
+			gap "read Part 1 ${tile}x${tile} tiles: OpenJPEG could not produce a fixture"
+			continue
+		fi
+		out=$(go run ./scripts/decodecmp "$f" "$WORK/src32.pgm" 2>&1)
+		if [ "$out" = "0" ]; then
+			pass "read Part 1 MQ ${tile}x${tile} tiles: we decode OpenJPEG's codestream exactly"
+		else
+			fail "read Part 1 MQ ${tile}x${tile} tiles: $out samples differ"
+		fi
 	done
 fi
 

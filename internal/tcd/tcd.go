@@ -33,8 +33,16 @@ type TileComponent struct {
 	// Component index
 	Index int
 
-	// Component bounds (may differ due to subsampling)
+	// Component bounds (may differ due to subsampling). With a resolution
+	// reduction in force these are the bounds of the reduced grid, which is
+	// what Data is sized for.
 	X0, Y0, X1, Y1 int
+
+	// Component bounds at full resolution, before any reduction. Every
+	// subband coordinate in the codestream is derived from these
+	// (ISO/IEC 15444-1 B.5), so a decoder that has discarded resolutions
+	// still has to partition with them.
+	FullX0, FullY0, FullX1, FullY1 int
 
 	// Resolution levels
 	Resolutions []*Resolution
@@ -380,6 +388,7 @@ func (d *TileDecoder) InitTile(tileIndex int) error {
 		cy0 := ceilDiv(y0, int(comp.SubsamplingY))
 		cx1 := ceilDiv(x1, int(comp.SubsamplingX))
 		cy1 := ceilDiv(y1, int(comp.SubsamplingY))
+		fx0, fy0, fx1, fy1 := cx0, cy0, cx1, cy1
 
 		// Apply resolution reduction to component bounds
 		for i := 0; i < reduce; i++ {
@@ -390,11 +399,15 @@ func (d *TileDecoder) InitTile(tileIndex int) error {
 		}
 
 		tc := &TileComponent{
-			Index: c,
-			X0:    cx0,
-			Y0:    cy0,
-			X1:    cx1,
-			Y1:    cy1,
+			Index:  c,
+			X0:     cx0,
+			Y0:     cy0,
+			X1:     cx1,
+			Y1:     cy1,
+			FullX0: fx0,
+			FullY0: fy0,
+			FullX1: fx1,
+			FullY1: fy1,
 		}
 
 		// Allocate data
@@ -609,13 +622,23 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 		return
 	}
 
+	// The synthesis runs at the tile-component's own origin: which
+	// coefficients are lowpass depends on whether the coordinate they sit at
+	// is even, and only a tile at the image origin can assume they all are.
+	// At the origin the two forms agree sample for sample, which
+	// TestTileMatchesOriginZero in the dwt package checks.
 	if h.WaveletTransform == 1 {
-		// 5-3 reversible
-		// Use overflow-safe 32-bit DWT when precision > 16 (e.g. float data via NLT)
-		if d.needs32BitDWT() {
-			dwt.ReconstructMultiLevel53_32bit(tc.Data, width, height, numLevels)
+		// 5-3 reversible. The tiled form carries 64-bit intermediates
+		// throughout, so it covers what ReconstructMultiLevel53_32bit exists
+		// for: full-range int32 samples, as the float pipeline produces.
+		if tc.X0 == 0 && tc.Y0 == 0 {
+			if d.needs32BitDWT() {
+				dwt.ReconstructMultiLevel53_32bit(tc.Data, width, height, numLevels)
+			} else {
+				dwt.ReconstructMultiLevel53(tc.Data, width, height, numLevels)
+			}
 		} else {
-			dwt.ReconstructMultiLevel53(tc.Data, width, height, numLevels)
+			dwt.ReconstructMultiLevel53Tile(tc.Data, width, height, tc.X0, tc.Y0, numLevels)
 		}
 	} else {
 		// 9-7 irreversible
@@ -623,7 +646,11 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 		for i, v := range tc.Data {
 			tc.DataFloat[i] = float64(v)
 		}
-		dwt.ReconstructMultiLevel97(tc.DataFloat, width, height, numLevels)
+		if tc.X0 == 0 && tc.Y0 == 0 {
+			dwt.ReconstructMultiLevel97(tc.DataFloat, width, height, numLevels)
+		} else {
+			dwt.ReconstructMultiLevel97Tile(tc.DataFloat, width, height, tc.X0, tc.Y0, numLevels)
+		}
 		for i, v := range tc.DataFloat {
 			tc.Data[i] = int32(v + 0.5)
 		}
@@ -692,12 +719,16 @@ func (e *TileEncoder) InitTile(tileIndex int, componentData [][]int32) {
 		cy1 := ceilDiv(y1, int(comp.SubsamplingY))
 
 		tc := &TileComponent{
-			Index: c,
-			X0:    cx0,
-			Y0:    cy0,
-			X1:    cx1,
-			Y1:    cy1,
-			Data:  componentData[c],
+			Index:  c,
+			X0:     cx0,
+			Y0:     cy0,
+			X1:     cx1,
+			Y1:     cy1,
+			FullX0: cx0,
+			FullY0: cy0,
+			FullX1: cx1,
+			FullY1: cy1,
+			Data:   componentData[c],
 		}
 
 		// Initialize resolutions (similar to decoder)

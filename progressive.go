@@ -218,7 +218,10 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 				tc := tile.Components[comp]
 				tcWidth := tc.X1 - tc.X0
 				tcHeight := tc.Y1 - tc.Y0
-				decodePacketIntoTile(tc.Data, tcWidth, tcHeight, numRes, comp, res, pktData, h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight())
+				decodePacketIntoTile(tc.Data, tcWidth, tcHeight,
+					tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
+					numRes, comp, res, pktData,
+					h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight())
 			}
 		}
 
@@ -339,9 +342,14 @@ func (d *ProgressiveDecoder) hasTileData(tile uint16) bool {
 // decodePacketIntoTile decodes a single (component, resolution) group's
 // mini-table into tile component data. The mini-table has the same format
 // as the full tile data: [2: numCB][per CB: 1 numBPS + 4 dataLen][encoded bytes].
+//
+// x0, y0, x1, y1 are the tile component's absolute coordinates, which is what
+// the subband geometry is derived from; tcWidth and tcHeight bound the array
+// being written into.
 func decodePacketIntoTile(
 	tileData []int32,
 	tcWidth, tcHeight int,
+	x0, y0, x1, y1 int,
 	numRes, comp, res int,
 	pktData []byte,
 	cbWidth, cbHeight int,
@@ -375,62 +383,33 @@ func decodePacketIntoTile(
 		metas[i].dataLen = int(binary.BigEndian.Uint32(pktData[off+1 : off+5]))
 	}
 
-	// Iterate bands and code-blocks for this single resolution
-	numBands := 1
-	if res > 0 {
-		numBands = 3
-	}
-
 	cbIdx := 0
 	dataPos := metaSize
 
-	for b := 0; b < numBands; b++ {
-		bandType := entropy.BandLL
-		if res > 0 {
-			switch b {
-			case 0:
-				bandType = entropy.BandHL
-			case 1:
-				bandType = entropy.BandLH
-			case 2:
-				bandType = entropy.BandHH
-			}
+	// Iterate the bands of this one resolution, in the order the encoder
+	// writes them; see tileBands in subband.go.
+	for _, bd := range tileBands(x0, y0, x1, y1, numRes, cbWidth, cbHeight) {
+		if bd.res != res {
+			continue
 		}
-
-		// Orientation-aware band dimensions; see subband.go. The three detail
-		// bands differ in size whenever the resolution's dimensions are odd.
-		bandW, bandH := bandDims(tcWidth, tcHeight, numRes, res, b)
-
-		xOff, yOff := computeSubbandOffset(tcWidth, tcHeight, numRes, res, bandType)
-
-		for cby := 0; cby*cbHeight < bandH; cby++ {
-			for cbx := 0; cbx*cbWidth < bandW; cbx++ {
+		for cby := 0; cby < bd.cbY; cby++ {
+			for cbx := 0; cbx < bd.cbX; cbx++ {
 				if cbIdx >= numCB {
 					return
 				}
 				meta := metas[cbIdx]
-
-				startX := cbx * cbWidth
-				startY := cby * cbHeight
-				actualW := cbWidth
-				actualH := cbHeight
-				if startX+actualW > bandW {
-					actualW = bandW - startX
-				}
-				if startY+actualH > bandH {
-					actualH = bandH - startY
-				}
+				xOff, yOff, actualW, actualH := bd.blockRect(cbx, cby, cbWidth, cbHeight)
 
 				if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
 					dataPos >= 0 && meta.dataLen <= len(pktData)-dataPos {
 					cbData := pktData[dataPos : dataPos+meta.dataLen]
 					t1 := entropy.NewT1(actualW, actualH)
-					decoded := t1.Decode(cbData, meta.numBPS, bandType)
+					decoded := t1.Decode(cbData, meta.numBPS, bd.bandType)
 
 					for y := 0; y < actualH; y++ {
 						for x := 0; x < actualW; x++ {
-							dstX := xOff + startX + x
-							dstY := yOff + startY + y
+							dstX := xOff + x
+							dstY := yOff + y
 							if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
 								tileData[dstY*tcWidth+dstX] = decoded[y*actualW+x]
 							}

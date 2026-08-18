@@ -24,6 +24,10 @@ type decoder struct {
 	header     *codestream.Header
 	jp2Header  *box.JP2Header
 	codestream []byte
+
+	// tileParts maps a tile index to the byte range of its tile-part data,
+	// built once on first use.
+	tileParts map[int][2]int
 }
 
 // newDecoder creates a new decoder.
@@ -573,48 +577,66 @@ func (d *decoder) decodeTile(
 
 // findTileData locates the tile data bytes for a given tile index
 // within the codestream. Returns nil if not found.
+//
+// The scan is done once and cached. It used to run per tile, which is fine for
+// the one tile this encoder used to write and quadratic in the codestream
+// length now that a tile grid produces one tile-part per tile: a 10000-tile
+// image would rescan the whole codestream 10000 times.
 func (d *decoder) findTileData(tileIdx int) []byte {
+	if d.tileParts == nil {
+		d.tileParts = d.indexTileParts()
+	}
+	r, ok := d.tileParts[tileIdx]
+	if !ok {
+		return nil
+	}
+	return d.codestream[r[0]:r[1]]
+}
+
+// indexTileParts records, for every tile index, the first tile-part that
+// declares it. The walk is byte by byte rather than tile-part by tile-part so
+// that a file whose Psot values do not partition the codestream is treated
+// exactly as the previous per-tile scan treated it.
+func (d *decoder) indexTileParts() map[int][2]int {
 	cs := d.codestream
-	for i := 0; i < len(cs)-13; i++ {
+	out := map[int][2]int{}
+	for i := 0; i+14 <= len(cs); i++ {
 		// Look for SOT marker (0xFF90)
 		if cs[i] != 0xFF || cs[i+1] != 0x90 {
 			continue
 		}
-		if i+14 > len(cs) {
-			break
-		}
 		// Verify Lsot = 10
-		lsot := binary.BigEndian.Uint16(cs[i+2 : i+4])
-		if lsot != 10 {
+		if lsot := binary.BigEndian.Uint16(cs[i+2 : i+4]); lsot != 10 {
 			continue
 		}
-		// Check tile index
-		isot := binary.BigEndian.Uint16(cs[i+4 : i+6])
-		if int(isot) != tileIdx {
-			continue
-		}
-		// Read tile-part length
-		psot := binary.BigEndian.Uint32(cs[i+6 : i+10])
 		// Verify SOD marker at i+12
 		if cs[i+12] != 0xFF || cs[i+13] != 0x93 {
 			continue
 		}
+		isot := int(binary.BigEndian.Uint16(cs[i+4 : i+6]))
+		if _, seen := out[isot]; seen {
+			continue
+		}
+		// Read tile-part length. Psot = 0 means the tile-part runs to the end
+		// of the codestream.
+		psot := binary.BigEndian.Uint32(cs[i+6 : i+10])
 		dataStart := i + 14
-		dataEnd := dataStart
+		dataEnd := len(cs)
 		if psot > 0 {
 			dataEnd = i + int(psot)
-		} else {
-			dataEnd = len(cs)
 		}
 		if dataEnd > len(cs) {
 			dataEnd = len(cs)
 		}
 		if dataStart >= dataEnd {
-			return nil
+			// Recorded as present but empty, so that a later marker sequence
+			// inside this tile-part's data cannot be mistaken for it.
+			out[isot] = [2]int{dataStart, dataStart}
+			continue
 		}
-		return cs[dataStart:dataEnd]
+		out[isot] = [2]int{dataStart, dataEnd}
 	}
-	return nil
+	return out
 }
 
 // decodeTileData parses the tile data metadata table, decodes each
@@ -648,28 +670,16 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		return fmt.Errorf("jpeg2000: COD declares a %dx%d code-block", cbWidth, cbHeight)
 	}
 
-	// Compute expected number of code blocks to validate format
+	// Compute expected number of code blocks to validate format. The geometry
+	// walk is the encoder's, from the tile-component's absolute coordinates.
 	expectedCB := 0
 	for c := 0; c < len(tile.Components); c++ {
 		tc := tile.Components[c]
 		if tc == nil {
 			continue
 		}
-		tcWidth := tc.X1 - tc.X0
-		tcHeight := tc.Y1 - tc.Y0
-		for r := 0; r < numRes; r++ {
-			numBands := 1
-			if r > 0 {
-				numBands = 3
-			}
-			for b := 0; b < numBands; b++ {
-				bandW, bandH := bandDims(tcWidth, tcHeight, numRes, r, b)
-				for cby := 0; cby*cbHeight < bandH; cby++ {
-					for cbx := 0; cbx*cbWidth < bandW; cbx++ {
-						expectedCB++
-					}
-				}
-			}
+		for _, bd := range tileBands(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1, numRes, cbWidth, cbHeight) {
+			expectedCB += bd.cbX * bd.cbY
 		}
 	}
 
@@ -739,8 +749,8 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		}
 	}
 
-	// Iterate code-blocks in the same order as the encoder:
-	// component → resolution → band → code-block
+	// Iterate code-blocks in the same order as the encoder: component, then
+	// the subband walk both sides share.
 	cbIdx := 0
 	dataPos := metaSize
 
@@ -752,83 +762,49 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		tcWidth := tc.X1 - tc.X0
 		tcHeight := tc.Y1 - tc.Y0
 
-		for r := 0; r < numRes; r++ {
-			numBands := 1
-			if r > 0 {
-				numBands = 3
-			}
-
-			for b := 0; b < numBands; b++ {
-				bandType := entropy.BandLL
-				if r > 0 {
-					switch b {
-					case 0:
-						bandType = entropy.BandHL
-					case 1:
-						bandType = entropy.BandLH
-					case 2:
-						bandType = entropy.BandHH
+		for _, bd := range tileBands(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1, numRes, cbWidth, cbHeight) {
+			for cby := 0; cby < bd.cbY; cby++ {
+				for cbx := 0; cbx < bd.cbX; cbx++ {
+					if cbIdx >= numCB {
+						return nil
 					}
-				}
+					meta := metas[cbIdx]
+					xOff, yOff, actualW, actualH := bd.blockRect(cbx, cby, cbWidth, cbHeight)
 
-				// Must match the encoder exactly; see subband.go.
-				bandW, bandH := bandDims(tcWidth, tcHeight, numRes, r, b)
-
-				xOff, yOff := computeSubbandOffset(tcWidth, tcHeight, numRes, r, bandType)
-
-				for cby := 0; cby*cbHeight < bandH; cby++ {
-					for cbx := 0; cbx*cbWidth < bandW; cbx++ {
-						if cbIdx >= numCB {
-							return nil
-						}
-						meta := metas[cbIdx]
-
-						startX := cbx * cbWidth
-						startY := cby * cbHeight
-						actualW := cbWidth
-						actualH := cbHeight
-						if startX+actualW > bandW {
-							actualW = bandW - startX
-						}
-						if startY+actualH > bandH {
-							actualH = bandH - startY
+					if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
+						dataPos >= 0 && meta.dataLen <= len(tileData)-dataPos {
+						cbData := tileData[dataPos : dataPos+meta.dataLen]
+						// Decode with the block coder the codestream
+						// declares. A stream whose CAP marker announces
+						// Part 15 carries HT-coded blocks, and running the
+						// Part 1 MQ decoder over them silently yields
+						// nothing rather than failing.
+						var decoded []int32
+						if h.IsHTJ2K() {
+							htDec := entropy.GetHTDecoder(actualW, actualH)
+							decoded = htDec.Decode(cbData, meta.numBPS, bd.bandType)
+							entropy.PutHTDecoder(htDec)
+						} else {
+							t1 := entropy.NewT1(actualW, actualH)
+							decoded = t1.Decode(cbData, meta.numBPS, bd.bandType)
 						}
 
-						if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
-							dataPos >= 0 && meta.dataLen <= len(tileData)-dataPos {
-							cbData := tileData[dataPos : dataPos+meta.dataLen]
-							// Decode with the block coder the codestream
-							// declares. A stream whose CAP marker announces
-							// Part 15 carries HT-coded blocks, and running the
-							// Part 1 MQ decoder over them silently yields
-							// nothing rather than failing.
-							var decoded []int32
-							if h.IsHTJ2K() {
-								htDec := entropy.GetHTDecoder(actualW, actualH)
-								decoded = htDec.Decode(cbData, meta.numBPS, bandType)
-								entropy.PutHTDecoder(htDec)
-							} else {
-								t1 := entropy.NewT1(actualW, actualH)
-								decoded = t1.Decode(cbData, meta.numBPS, bandType)
-							}
-
-							for y := 0; y < actualH; y++ {
-								for x := 0; x < actualW; x++ {
-									dstX := xOff + startX + x
-									dstY := yOff + startY + y
-									// The subband offset is derived from
-									// file-supplied geometry, so the low end
-									// is checked as well as the high end.
-									if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
-										tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
-									}
+						for y := 0; y < actualH; y++ {
+							for x := 0; x < actualW; x++ {
+								dstX := xOff + x
+								dstY := yOff + y
+								// The subband offset is derived from
+								// file-supplied geometry, so the low end
+								// is checked as well as the high end.
+								if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
+									tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
 								}
 							}
 						}
-
-						dataPos += meta.fullLen
-						cbIdx++
 					}
+
+					dataPos += meta.fullLen
+					cbIdx++
 				}
 			}
 		}

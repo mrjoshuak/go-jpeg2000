@@ -190,25 +190,39 @@ func (d *HTDecoder) initMEL(data []byte, lcup, scup int) bool {
 	m.numRuns = 0
 	m.runs = 0
 
-	// Read initial bytes to align
+	// Prime the bit buffer. Two rules here are easy to get one step out of
+	// step with the reference (mel_init in ht_dec.c), and both of them only
+	// show up on a short MEL segment:
+	//
+	//   - the low nibble of the segment's *last* byte is forced to ones,
+	//     because the MEL and VLC segments may overlap in that byte. The test
+	//     is on the count before this byte is consumed, so it selects the byte
+	//     being read now, not the one after it.
+	//   - once the segment is exhausted the stream reads as 0xFF forever, and
+	//     those bits still count. Stopping early instead leaves the buffer
+	//     short of the padding the run decoder is entitled to.
+	//
+	// Getting either wrong corrupts the first MEL byte, and a code-block whose
+	// only significant sample sits in its last quad then decodes to nothing:
+	// its significance was carried by exactly those MEL bits.
 	num := 4 - (m.pos & 0x3)
 	if num > 4 {
 		num = 4
 	}
-	for i := 0; i < num && m.size > 0; i++ {
-		if m.unstuff && m.pos < len(m.data) && m.data[m.pos] > 0x8F {
+	for i := 0; i < num; i++ {
+		if m.unstuff && m.size > 0 && m.pos < len(m.data) && m.data[m.pos] > 0x8F {
 			return false
 		}
-		var b byte
+		b := byte(0xFF)
 		if m.size > 0 && m.pos < len(m.data) {
 			b = m.data[m.pos]
-			m.pos++
-			m.size--
-		} else {
-			b = 0xFF
 		}
 		if m.size == 1 {
 			b |= 0x0F
+		}
+		if m.size > 0 {
+			m.pos++
+			m.size--
 		}
 		dBits := 8
 		if m.unstuff {

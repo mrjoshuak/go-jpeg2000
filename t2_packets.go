@@ -158,11 +158,15 @@ type cbState struct {
 // bandGeometry describes one subband's code-block grid.
 type bandGeometry struct {
 	bandType int
-	w, h     int
-	cbX, cbY int
-	blocks   []*cbState
-	incl     *tagTree
-	imsb     *tagTree
+	sb       subbandGeom
+	// firstX and firstY are the indices of the first code-block of the
+	// zero-anchored partition that this band overlaps; the grid below is
+	// indexed from zero relative to them.
+	firstX, firstY int
+	cbX, cbY       int
+	blocks         []*cbState
+	incl           *tagTree
+	imsb           *tagTree
 }
 
 // decodeStandardTileData decodes conforming T2 packets for one tile and writes
@@ -184,6 +188,13 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 	}
 
 	// Build the code-block grid for every (component, resolution, band).
+	//
+	// Every coordinate here is absolute: ISO/IEC 15444-1 B.5 derives the
+	// subband coordinates from the tile-component's position in the image, and
+	// B.7 anchors the code-block partition at zero rather than at the band.
+	// A tile away from the image origin differs on both counts, so deriving
+	// them from the tile's size alone reads the packet headers of every tile
+	// but the first against the wrong grid.
 	type resKey struct{ c, r int }
 	grid := map[resKey][]*bandGeometry{}
 	for c := 0; c < len(tile.Components); c++ {
@@ -191,38 +202,39 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 		if tc == nil {
 			continue
 		}
-		tcW := tc.X1 - tc.X0
-		tcH := tc.Y1 - tc.Y0
+		x0, y0, x1, y1 := tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1
 		for r := 0; r < numRes; r++ {
+			// A resolution with no samples has no precinct, so the codestream
+			// holds no packet for it at all (B.6).
+			rw, rh := tileResDims(x0, y0, x1, y1, numRes, r)
+			if rw <= 0 || rh <= 0 {
+				continue
+			}
 			numBands := 1
 			if r > 0 {
 				numBands = 3
 			}
 			var bands []*bandGeometry
 			for b := 0; b < numBands; b++ {
-				// Orientation-aware; see subband.go. Using ceil for all three
-				// detail bands overstates HL and HH by a column, and LH and HH
-				// by a row, whenever the resolution's dimensions are odd.
-				bw, bh := bandDims(tcW, tcH, numRes, r, b)
 				bt := entropy.BandLL
 				if r > 0 {
 					switch b {
-					case 0:
+					case bandHL:
 						bt = entropy.BandHL
-					case 1:
+					case bandLH:
 						bt = entropy.BandLH
 					default:
 						bt = entropy.BandHH
 					}
 				}
-				nx, ny := 0, 0
-				for cbx := 0; cbx*cbWidth < bw; cbx++ {
-					nx++
+				sb := tileBandGeom(x0, y0, x1, y1, numRes, r, b)
+				firstX, nx := codeBlockRange(sb.x0, sb.x1, cbWidth)
+				firstY, ny := codeBlockRange(sb.y0, sb.y1, cbHeight)
+				bg := &bandGeometry{
+					bandType: bt, sb: sb,
+					firstX: firstX, firstY: firstY,
+					cbX: nx, cbY: ny,
 				}
-				for cby := 0; cby*cbHeight < bh; cby++ {
-					ny++
-				}
-				bg := &bandGeometry{bandType: bt, w: bw, h: bh, cbX: nx, cbY: ny}
 				bg.blocks = make([]*cbState, nx*ny)
 				for i := range bg.blocks {
 					bg.blocks[i] = &cbState{lblock: 3}
@@ -269,21 +281,18 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 		for res := 0; res < numRes; res++ {
 			bands := grid[resKey{c, res}]
 			for b, bg := range bands {
-				xOff, yOff := computeSubbandOffset(tcW, tcH, numRes, res, bg.bandType)
+				sb := bg.sb
 				for cby := 0; cby < bg.cbY; cby++ {
+					by0 := max(sb.y0, (bg.firstY+cby)*cbHeight)
+					by1 := min(sb.y1, (bg.firstY+cby+1)*cbHeight)
 					for cbx := 0; cbx < bg.cbX; cbx++ {
 						cb := bg.blocks[cby*bg.cbX+cbx]
 						if !cb.included || len(cb.data) == 0 {
 							continue
 						}
-						w := cbWidth
-						if cbx*cbWidth+w > bg.w {
-							w = bg.w - cbx*cbWidth
-						}
-						hh := cbHeight
-						if cby*cbHeight+hh > bg.h {
-							hh = bg.h - cby*cbHeight
-						}
+						bx0 := max(sb.x0, (bg.firstX+cbx)*cbWidth)
+						bx1 := min(sb.x1, (bg.firstX+cbx+1)*cbWidth)
+						w, hh := bx1-bx0, by1-by0
 						if w <= 0 || hh <= 0 {
 							continue
 						}
@@ -307,10 +316,14 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 							t1 := entropy.NewT1(w, hh)
 							coeffs = t1.Decode(cb.data, numbps, bg.bandType)
 						}
+						// The offsets are relative to the tile-component
+						// array, which holds the subbands in the Mallat
+						// layout: band origin plus the position of this
+						// code-block within the band.
 						for yy := 0; yy < hh; yy++ {
 							for xx := 0; xx < w; xx++ {
-								dx := xOff + cbx*cbWidth + xx
-								dy := yOff + cby*cbHeight + yy
+								dx := sb.ox + bx0 - sb.x0 + xx
+								dy := sb.oy + by0 - sb.y0 + yy
 								if dx < 0 || dy < 0 || dx >= tcW || dy >= tcH {
 									continue
 								}

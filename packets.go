@@ -258,9 +258,6 @@ func (idx *PacketIndex) indexTilePackets(
 	tx1 := min(int(header.TileXOffset)+(tileX+1)*int(header.TileWidth), int(header.ImageWidth))
 	ty1 := min(int(header.TileYOffset)+(tileY+1)*int(header.TileHeight), int(header.ImageHeight))
 
-	tileWidth := tx1 - tx0
-	tileHeight := ty1 - ty0
-
 	tileData := cs[dataStart:dataEnd]
 
 	// Compute expected number of code-blocks (same logic as decodeTileData)
@@ -277,30 +274,24 @@ func (idx *PacketIndex) indexTilePackets(
 
 	for c := 0; c < numComp; c++ {
 		comp := header.ComponentInfo[c]
-		compTileWidth := ceilDivInt(tileWidth, int(comp.SubsamplingX))
-		compTileHeight := ceilDivInt(tileHeight, int(comp.SubsamplingY))
+		// The subband partition is derived from the tile component's absolute
+		// coordinates, so subsampling is applied to the tile's corners rather
+		// than to its size. See tileBands in subband.go, which the encoder and
+		// the tile decoder walk as well.
+		cx0 := ceilDivInt(tx0, int(comp.SubsamplingX))
+		cy0 := ceilDivInt(ty0, int(comp.SubsamplingY))
+		cx1 := ceilDivInt(tx1, int(comp.SubsamplingX))
+		cy1 := ceilDivInt(ty1, int(comp.SubsamplingY))
 
+		perRes := make([]int, numRes)
+		for _, bd := range tileBands(cx0, cy0, cx1, cy1, numRes, cbWidth, cbHeight) {
+			perRes[bd.res] += bd.cbX * bd.cbY
+		}
 		for r := 0; r < numRes; r++ {
-			scale := 1 << (numRes - 1 - r)
-			bandW := ceilDivInt(compTileWidth, scale)
-			bandH := ceilDivInt(compTileHeight, scale)
-
-			// The three detail bands do not share a size when the resolution's
-			// dimensions are odd, so their code-block counts must be summed
-			// rather than one count multiplied by three. See subband.go.
-			cb := 0
-			if r > 0 {
-				for b := 0; b < 3; b++ {
-					bw, bh := subbandDims(bandW, bandH, b)
-					cb += ceilDivInt(bw, cbWidth) * ceilDivInt(bh, cbHeight)
-				}
-			} else {
-				cb = ceilDivInt(bandW, cbWidth) * ceilDivInt(bandH, cbHeight)
-			}
 			key := crKey{c, r}
 			crOrder = append(crOrder, key)
-			crInfos[key] = crCodeBlockInfo{numCodeBlocks: cb}
-			expectedCB += cb
+			crInfos[key] = crCodeBlockInfo{numCodeBlocks: perRes[r]}
+			expectedCB += perRes[r]
 		}
 	}
 

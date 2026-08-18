@@ -312,57 +312,37 @@ func (e *encoder) bandMb(res, bandIdx int) int {
 //
 // Packets are emitted resolution-major, one per (resolution, component), which
 // is the order every progression produces when there is a single precinct and
-// a single layer.
-func (e *encoder) buildStandardTileData(jobs []codeBlockJob, encoded [][]byte, numBPS []int, passes []int) []byte {
+// a single layer. A resolution that has no samples carries no precinct, so it
+// carries no packet either: the layout says which resolutions are present.
+func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, passes []int) []byte {
+	numRes := layout.numRes
+	numComp := 0
+	if numRes > 0 {
+		numComp = len(layout.res) / numRes
+	}
+
+	// The code-block grid of every band comes from the tile geometry, not from
+	// the jobs: a band can legitimately hold no code-blocks, and a packet must
+	// then say nothing about it rather than describe a phantom block.
 	type key struct{ c, r int }
 	bandsFor := map[key][]*t2Band{}
-	maxRes, maxComp := 0, 0
-
-	// Size each band's code-block grid from the jobs that fall in it.
-	dims := map[key]map[int][2]int{}
-	for _, j := range jobs {
-		k := key{j.comp, j.res}
-		if dims[k] == nil {
-			dims[k] = map[int][2]int{}
-		}
-		d := dims[k][j.bandIdx]
-		if j.cbx+1 > d[0] {
-			d[0] = j.cbx + 1
-		}
-		if j.cby+1 > d[1] {
-			d[1] = j.cby + 1
-		}
-		dims[k][j.bandIdx] = d
-		if j.res > maxRes {
-			maxRes = j.res
-		}
-		if j.comp > maxComp {
-			maxComp = j.comp
-		}
-	}
-	for k, bd := range dims {
-		nb := 1
-		if k.r > 0 {
-			nb = 3
-		}
-		bands := make([]*t2Band, nb)
-		for b := 0; b < nb; b++ {
-			d := bd[b]
-			nx, ny := d[0], d[1]
-			if nx < 1 {
-				nx = 1
+	for c := 0; c < numComp; c++ {
+		for r := 0; r < numRes; r++ {
+			rl := layout.at(c, r)
+			if !rl.present {
+				continue
 			}
-			if ny < 1 {
-				ny = 1
+			bands := make([]*t2Band, len(rl.bands))
+			for b, bl := range rl.bands {
+				bands[b] = &t2Band{
+					cbX: bl.cbX, cbY: bl.cbY,
+					blocks: make([]*t2Block, bl.cbX*bl.cbY),
+					incl:   newTagTreeEnc(bl.cbX, bl.cbY),
+					imsb:   newTagTreeEnc(bl.cbX, bl.cbY),
+				}
 			}
-			bands[b] = &t2Band{
-				cbX: nx, cbY: ny,
-				blocks: make([]*t2Block, nx*ny),
-				incl:   newTagTreeEnc(nx, ny),
-				imsb:   newTagTreeEnc(nx, ny),
-			}
+			bandsFor[key{c, r}] = bands
 		}
-		bandsFor[k] = bands
 	}
 
 	// Place each code-block's data.
@@ -414,8 +394,8 @@ func (e *encoder) buildStandardTileData(jobs []codeBlockJob, encoded [][]byte, n
 	}
 
 	var out []byte
-	for res := 0; res <= maxRes; res++ {
-		for c := 0; c <= maxComp; c++ {
+	for res := 0; res < numRes; res++ {
+		for c := 0; c < numComp; c++ {
 			bands := bandsFor[key{c, res}]
 			if bands == nil {
 				continue

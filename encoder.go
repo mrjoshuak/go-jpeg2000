@@ -60,8 +60,11 @@ func (e *encoder) numResolutions() int {
 	if !e.options.HighThroughput {
 		return n
 	}
+	// The decomposition applies to each tile independently, so it is the tile
+	// that has to carry the levels, not the image.
+	tw, th := e.tileExtent()
 	maxRes := 1
-	for d, hh := e.width, e.height; d > 1 && hh > 1; d, hh = (d+1)/2, (hh+1)/2 {
+	for d, hh := tw, th; d > 1 && hh > 1; d, hh = (d+1)/2, (hh+1)/2 {
 		maxRes++
 	}
 	if n > maxRes {
@@ -524,6 +527,14 @@ func (e *encoder) preprocess() error {
 	// base resolution is coded.
 	numLevels := e.numResolutions() - 1
 
+	// A tiled image is transformed one tile at a time, at each tile's own
+	// absolute origin: the wavelet does not run across a tile boundary, and
+	// which coefficients are lowpass depends on where the tile starts. See
+	// transformTile.
+	if e.numTiles() > 1 {
+		return nil
+	}
+
 	for c := 0; c < e.numComponents; c++ {
 		if e.options.Lossless {
 			if e.maxPrecision() > 16 {
@@ -637,14 +648,7 @@ func (e *encoder) generateSIZ() []byte {
 	binary.BigEndian.PutUint32(buf[18:22], 0)
 
 	// Tile size
-	tileWidth := e.width
-	tileHeight := e.height
-	if e.options.TileSize.X > 0 {
-		tileWidth = e.options.TileSize.X
-	}
-	if e.options.TileSize.Y > 0 {
-		tileHeight = e.options.TileSize.Y
-	}
+	tileWidth, tileHeight := e.tileDims()
 	binary.BigEndian.PutUint32(buf[22:26], uint32(tileWidth))
 	binary.BigEndian.PutUint32(buf[26:30], uint32(tileHeight))
 
@@ -864,18 +868,18 @@ func (e *encoder) generateNLT() []byte {
 	return buf
 }
 
-// generateTiles generates tile data.
+// generateTiles generates the tile-part segments, one per tile.
+//
+// A tile grid larger than 1x1 used to be signalled in SIZ and then ignored:
+// the encoder emitted a single tile-part holding packets for the whole image,
+// which every conforming decoder reads as tile 0 of a grid it was told is
+// smaller, so it runs out of geometry inside the first code-block. See
+// encodeTileGrid.
 func (e *encoder) generateTiles() ([]byte, error) {
-	var buf []byte
-
-	// For now, single tile (entire image)
-	tileData, err := e.encodeTile(0)
-	if err != nil {
-		return nil, err
+	if e.numTiles() > 1 {
+		return e.encodeTileGrid()
 	}
-	buf = append(buf, tileData...)
-
-	return buf, nil
+	return e.encodeTile(0)
 }
 
 // codeBlockJob represents a code-block encoding job for parallel processing.
@@ -935,15 +939,10 @@ func computeNumBPS(data []int32) int {
 	return numBPS
 }
 
-// subbandOffset computes the (x, y) offset of a subband within the
-// DWT-decomposed data array for a given resolution and band type.
-func (e *encoder) subbandOffset(res, bandType int) (int, int) {
-	numRes := e.numResolutions()
-	return computeSubbandOffset(e.width, e.height, numRes, res, bandType)
-}
-
 // computeSubbandOffset computes the (x, y) offset of a subband within the
-// DWT-decomposed data array. Used by both encoder and decoder.
+// DWT-decomposed data array of a tile at the image origin. Like bandDims, this
+// is now the origin-zero statement of the rule that the tests hold
+// tileBandGeom to, rather than something the codec calls.
 func computeSubbandOffset(width, height, numRes, res, bandType int) (int, int) {
 	if res == 0 {
 		return 0, 0
@@ -1045,11 +1044,50 @@ func buildMultiLayerTileData(metas []cbMeta, truncPoints [][]int, encoded []byte
 	return tileData
 }
 
-// encodeTile encodes a single tile using parallel code-block encoding.
+// encodeTile encodes the whole image as a single tile-part.
 func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
-	// Collect all code-block jobs
-	var jobs []codeBlockJob
+	jobs, layout := e.collectJobs(e.componentData, 0, 0, e.width, e.height)
+	encoded, numBPS, passes := e.encodeJobs(jobs)
+	return e.createTileHeader(tileIdx, e.assembleTileData(layout, jobs, encoded, numBPS, passes)), nil
+}
 
+// bandLayout is the code-block grid of one subband.
+type bandLayout struct {
+	cbX, cbY int
+}
+
+// resLayout is the code-block partition of one resolution of one
+// tile-component. A resolution with no samples has no precinct and therefore
+// contributes no packet at all (ISO/IEC 15444-1 B.6), which is what present
+// records; that is not the same as a resolution whose bands happen to be
+// empty, and a decoder that reads a packet for it desynchronises.
+type resLayout struct {
+	present bool
+	bands   []bandLayout
+}
+
+// tileLayout holds the resolution layouts of every component of one tile.
+type tileLayout struct {
+	numRes int
+	res    []resLayout
+}
+
+func newTileLayout(numComp, numRes int) *tileLayout {
+	return &tileLayout{numRes: numRes, res: make([]resLayout, numComp*numRes)}
+}
+
+func (l *tileLayout) at(c, r int) *resLayout { return &l.res[c*l.numRes+r] }
+
+// collectJobs builds the code-block encoding jobs for one tile, along with the
+// code-block partition its packet headers have to describe.
+//
+// comps holds one wavelet-transformed array per component, each the size of a
+// tile spanning [x0, x1) x [y0, y1) in image coordinates. Every subband size
+// and offset is derived from those absolute coordinates, because that is what
+// ISO/IEC 15444-1 B.5 derives them from; passing the whole image reproduces
+// the single-tile case exactly. tileBands is the single description of that
+// geometry, and the decoder walks the same one.
+func (e *encoder) collectJobs(comps [][]int32, x0, y0, x1, y1 int) ([]codeBlockJob, *tileLayout) {
 	numRes := e.numResolutions()
 
 	// Code-block size, from the same source of truth generateCOD writes into
@@ -1058,127 +1096,64 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	cbWidthExp, cbHeightExp := e.codeBlockExponents()
 	cbWidth := 1 << cbWidthExp
 	cbHeight := 1 << cbHeightExp
+	stride := x1 - x0
 
-	// First pass: collect all code-block jobs
-	for c := 0; c < e.numComponents; c++ {
-		for r := 0; r < numRes; r++ {
-			var numBands int
-			if r == 0 {
-				numBands = 1 // LL only
-			} else {
-				numBands = 3 // HL, LH, HH
-			}
+	layout := newTileLayout(len(comps), numRes)
+	bands := tileBands(x0, y0, x1, y1, numRes, cbWidth, cbHeight)
+	var jobs []codeBlockJob
 
-			for b := 0; b < numBands; b++ {
-				bandType := entropy.BandLL
-				if r > 0 {
-					switch b {
-					case 0:
-						bandType = entropy.BandHL
-					case 1:
-						bandType = entropy.BandLH
-					case 2:
-						bandType = entropy.BandHH
-					}
+	for c := 0; c < len(comps); c++ {
+		for _, bd := range bands {
+			rl := layout.at(c, bd.res)
+			if !rl.present {
+				rl.present = true
+				n := 1
+				if bd.res > 0 {
+					n = 3
 				}
+				rl.bands = make([]bandLayout, n)
+			}
+			rl.bands[bd.band] = bandLayout{cbX: bd.cbX, cbY: bd.cbY}
 
-				// Orientation-aware: an odd-length signal splits into
-				// ceil/floor halves and HL, LH and HH do not all take the same
-				// one. See subband.go.
-				bandWidth, bandHeight := bandDims(e.width, e.height, numRes, r, b)
-
-				for cby := 0; cby*cbHeight < bandHeight; cby++ {
-					for cbx := 0; cbx*cbWidth < bandWidth; cbx++ {
-						actualWidth := cbWidth
-						actualHeight := cbHeight
-						startX := cbx * cbWidth
-						startY := cby * cbHeight
-						if startX+actualWidth > bandWidth {
-							actualWidth = bandWidth - startX
-						}
-						if startY+actualHeight > bandHeight {
-							actualHeight = bandHeight - startY
-						}
-
-						cbData := e.extractCodeBlockData(c, r, bandType, cbx, cby, cbWidth, cbHeight, bandWidth, bandHeight)
-
-						jobs = append(jobs, codeBlockJob{
-							index:    len(jobs),
-							data:     cbData,
-							width:    actualWidth,
-							height:   actualHeight,
-							bandType: bandType,
-							comp:     c,
-							res:      r,
-							bandIdx:  b,
-							cbx:      cbx,
-							cby:      cby,
-						})
-					}
+			for cby := 0; cby < bd.cbY; cby++ {
+				for cbx := 0; cbx < bd.cbX; cbx++ {
+					ox, oy, w, h := bd.blockRect(cbx, cby, cbWidth, cbHeight)
+					jobs = append(jobs, codeBlockJob{
+						index:    len(jobs),
+						data:     extractCodeBlock(comps[c], stride, ox, oy, w, h),
+						width:    w,
+						height:   h,
+						bandType: bd.bandType,
+						comp:     c,
+						res:      bd.res,
+						bandIdx:  bd.band,
+						cbx:      cbx,
+						cby:      cby,
+					})
 				}
 			}
 		}
 	}
 
-	numLayers := e.options.NumLayers
-	if numLayers <= 0 {
-		numLayers = 1
-	}
+	return jobs, layout
+}
 
-	// Sequential encoding for small job counts or single-threaded mode
-	// Set GOMAXPROCS=1 to force single-threaded encoding
+// encodeJobs runs the block coder over every job, in parallel when there is
+// enough work for it, and returns the encoded segments in job order along with
+// the magnitude bit count and coding-pass count of each.
+func (e *encoder) encodeJobs(jobs []codeBlockJob) ([][]byte, []int, [][]int) {
+	encoded := make([][]byte, len(jobs))
+	numBPS := make([]int, len(jobs))
+	truncPoints := make([][]int, len(jobs))
+
+	// Sequential encoding for small job counts or single-threaded mode.
+	// Set GOMAXPROCS=1 to force single-threaded encoding.
 	if len(jobs) <= 4 || runtime.GOMAXPROCS(0) == 1 {
-		var metas []cbMeta
-		var allTruncPoints [][]int
-		var allEncoded []byte
-		var encodedList [][]byte
-		var numBPSList []int
-		for _, job := range jobs {
-			numBPS := computeNumBPS(job.data)
-			encoded, tpCopy := e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
-			metas = append(metas, cbMeta{numBPS: uint8(numBPS), dataLen: uint32(len(encoded))})
-			allTruncPoints = append(allTruncPoints, tpCopy)
-			allEncoded = append(allEncoded, encoded...)
-			encodedList = append(encodedList, encoded)
-			numBPSList = append(numBPSList, numBPS)
+		for i, job := range jobs {
+			numBPS[i] = computeNumBPS(job.data)
+			encoded[i], truncPoints[i] = e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
 		}
-		var tileData []byte
-		switch {
-		case numLayers > 1:
-			tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
-		default:
-			// TODO: switch to e.buildStandardTileData(jobs, encodedList,
-			// numBPSList) once the T2 decoder handles multiple resolutions.
-			// That call emits conforming packets — OpenJPH parses their headers
-			// and reaches block decoding — but this library's own T2 decoder is
-			// still single-resolution only, so enabling it here breaks our
-			// round-trip for any image with a wavelet.
-			// NOTE: e.buildStandardTileData(jobs, encodedList, numBPSList)
-			// emits conforming T2 packets, and OpenJPH decodes the result to
-			// the exact source samples at one and at two resolution levels.
-			// It is not enabled because this library's own T2 decoder
-			// mis-assigns packet bodies across subbands at res > 0, so turning
-			// it on leaves the library unable to read what it writes (18 tests
-			// red). Enable it here once that decoder defect is fixed.
-			// Conforming T2 packets for HTJ2K, which is verified end to end:
-			// OpenJPH decodes this output to the exact source samples at 32,
-			// 64, 128 and 200 pixels square. The Part 1 MQ path still uses the
-			// private container because its packet headers need a length per
-			// coding pass, which is not implemented yet; signalling one pass
-			// for a multi-pass MQ block mis-sizes the length field.
-			if e.options.HighThroughput {
-				passList := make([]int, len(allTruncPoints))
-				for i, tp := range allTruncPoints {
-					passList[i] = len(tp)
-				}
-				tileData = e.buildStandardTileData(jobs, encodedList, numBPSList, passList)
-				break
-			}
-			_ = encodedList
-			_ = numBPSList
-			tileData = buildTileData(metas, allEncoded)
-		}
-		return e.createTileHeader(tileIdx, tileData), nil
+		return encoded, numBPS, truncPoints
 	}
 
 	// Parallel encoding - use all available cores
@@ -1225,41 +1200,65 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	}()
 
 	// Collect results in order
-	metas := make([]cbMeta, len(jobs))
-	encodedBlocks := make([][]byte, len(jobs))
-	allTruncPoints := make([][]int, len(jobs))
 	for result := range resultChan {
-		metas[result.index] = cbMeta{numBPS: uint8(result.numBPS), dataLen: uint32(len(result.encoded))}
-		encodedBlocks[result.index] = result.encoded
-		allTruncPoints[result.index] = result.truncPoints
+		encoded[result.index] = result.encoded
+		numBPS[result.index] = result.numBPS
+		truncPoints[result.index] = result.truncPoints
 	}
 
-	// Build tile data with metadata table + encoded bytes
+	return encoded, numBPS, truncPoints
+}
+
+// assembleTileData turns the encoded code-blocks of one tile into the bytes
+// that follow its SOD marker.
+func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) []byte {
+	numLayers := e.options.NumLayers
+	if numLayers <= 0 {
+		numLayers = 1
+	}
+
+	metas := make([]cbMeta, len(jobs))
 	var allEncoded []byte
-	for _, encoded := range encodedBlocks {
-		allEncoded = append(allEncoded, encoded...)
+	for i := range jobs {
+		metas[i] = cbMeta{numBPS: uint8(numBPS[i]), dataLen: uint32(len(encoded[i]))}
+		allEncoded = append(allEncoded, encoded[i]...)
 	}
-	var tileData []byte
+
 	if numLayers > 1 {
-		tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
-	} else {
-		numBPSList := make([]int, len(metas))
-		for i, m := range metas {
-			numBPSList[i] = int(m.numBPS)
-		}
-		// See the note in the sequential path.
-		if e.options.HighThroughput {
-			passList := make([]int, len(allTruncPoints))
-			for i, tp := range allTruncPoints {
-				passList[i] = len(tp)
-			}
-			tileData = e.buildStandardTileData(jobs, encodedBlocks, numBPSList, passList)
-		} else {
-			_ = encodedBlocks
-			tileData = buildTileData(metas, allEncoded)
-		}
+		return buildMultiLayerTileData(metas, truncPoints, allEncoded, numLayers)
 	}
-	return e.createTileHeader(tileIdx, tileData), nil
+
+	// Conforming T2 packets for HTJ2K, which is verified end to end: OpenJPH
+	// decodes this output to the exact source samples at 32, 64, 128 and 200
+	// pixels square. The Part 1 MQ path still uses the private container
+	// because its packet headers need a length per coding pass, which is not
+	// implemented yet; signalling one pass for a multi-pass MQ block mis-sizes
+	// the length field.
+	if e.options.HighThroughput {
+		passes := make([]int, len(truncPoints))
+		for i, tp := range truncPoints {
+			passes[i] = len(tp)
+		}
+		return e.buildStandardTileData(layout, jobs, encoded, numBPS, passes)
+	}
+	return buildTileData(metas, allEncoded)
+}
+
+// extractCodeBlock copies one code-block out of a tile-component's
+// coefficient array, whose rows are stride samples apart.
+func extractCodeBlock(data []int32, stride, x, y, w, h int) []int32 {
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	out := make([]int32, w*h)
+	for row := 0; row < h; row++ {
+		src := (y+row)*stride + x
+		if src < 0 || src+w > len(data) {
+			continue
+		}
+		copy(out[row*w:(row+1)*w], data[src:src+w])
+	}
+	return out
 }
 
 // createTileHeader creates the tile-part header.
@@ -1277,41 +1276,6 @@ func (e *encoder) createTileHeader(tileIdx int, tileData []byte) []byte {
 	binary.BigEndian.PutUint16(header[12:14], uint16(codestream.SOD))
 
 	return append(header, tileData...)
-}
-
-// extractCodeBlockData extracts data for a code-block from the
-// DWT-decomposed component data, accounting for subband offsets.
-func (e *encoder) extractCodeBlockData(comp, res, bandType, cbx, cby, cbWidth, cbHeight, bandWidth, bandHeight int) []int32 {
-	actualWidth := cbWidth
-	actualHeight := cbHeight
-	startX := cbx * cbWidth
-	startY := cby * cbHeight
-
-	if startX+actualWidth > bandWidth {
-		actualWidth = bandWidth - startX
-	}
-	if startY+actualHeight > bandHeight {
-		actualHeight = bandHeight - startY
-	}
-
-	// Get subband offset in the DWT-decomposed data array
-	xOff, yOff := e.subbandOffset(res, bandType)
-
-	data := make([]int32, actualWidth*actualHeight)
-	for y := 0; y < actualHeight; y++ {
-		for x := 0; x < actualWidth; x++ {
-			srcX := xOff + startX + x
-			srcY := yOff + startY + y
-			if srcX < e.width && srcY < e.height {
-				srcIdx := srcY*e.width + srcX
-				if srcIdx < len(e.componentData[comp]) {
-					data[y*actualWidth+x] = e.componentData[comp][srcIdx]
-				}
-			}
-		}
-	}
-
-	return data
 }
 
 // writeJP2 writes a JP2 file.
