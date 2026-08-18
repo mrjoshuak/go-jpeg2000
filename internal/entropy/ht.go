@@ -112,7 +112,13 @@ func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int
 	}
 
 	// Parse code block header to get SCUP from the cleanup segment
-	scup := int(data[lcup-1]) + (int(data[lcup-2]&0x0F) << 8)
+	// Scup is packed into the last two bytes of the cleanup segment with the
+	// final byte holding the high bits: Scup = (data[Lcup-1] << 4) | (low
+	// nibble of data[Lcup-2]). Reading it as data[Lcup-1] | (nibble << 8)
+	// produced values larger than Lcup on every conforming stream, so the
+	// bounds check below rejected them and the decoder returned all zeros —
+	// which is exactly what a conforming file decoded to.
+	scup := (int(data[lcup-1]) << 4) | int(data[lcup-2]&0x0F)
 	if scup < 2 || scup > lcup {
 		for i := range d.data {
 			d.data[i] = 0
