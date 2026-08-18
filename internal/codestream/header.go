@@ -600,3 +600,31 @@ func saturateTileCount(n uint64) uint32 {
 	}
 	return uint32(n)
 }
+
+// BandMb returns Mb for a subband: the number of bit-planes the band's
+// coefficients may occupy, which is the quantisation exponent plus the guard
+// bits less one.
+//
+// A code-block's coded bit-plane count is Mb + 1 - (its zero bit-planes), the
+// value the packet header carries in the IMSB tag tree. The block decoder needs
+// it to place the magnitude bits, so reading it wrong yields coefficients that
+// are scaled by a power of two rather than obviously broken.
+func (h *Header) BandMb(res, band int) int {
+	q := h.Quantization
+	// Subbands are ordered LL, then (HL, LH, HH) per resolution level.
+	idx := 0
+	if res > 0 {
+		idx = 1 + (res-1)*3 + band
+	}
+	exp := 0
+	if idx < len(q.StepSizes) {
+		exp = int(q.StepSizes[idx].Exponent)
+	} else if len(q.StepSizes) > 0 {
+		exp = int(q.StepSizes[len(q.StepSizes)-1].Exponent)
+	}
+	mb := q.GuardBits() + exp - 1
+	if mb < 1 {
+		mb = 1
+	}
+	return mb
+}

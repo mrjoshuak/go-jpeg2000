@@ -682,7 +682,11 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 	// Parse metadata table — detect V1 vs V2 format.
 	numCB := int(binary.BigEndian.Uint16(tileData[0:2]))
 	if numCB != expectedCB {
-		return nil // Not our format (likely T2 packets from external encoder)
+		// Not this library's private container, so the tile data is what the
+		// standard actually specifies: a sequence of T2 packets. Decode those.
+		// This used to `return nil`, which produced a blank image with no
+		// error for every conforming file.
+		return d.decodeStandardTileData(tile, tileData)
 	}
 
 	// Check if this is V2 format (multi-layer): the header's NumLayers > 1
