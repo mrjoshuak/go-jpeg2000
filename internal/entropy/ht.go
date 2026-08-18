@@ -516,91 +516,88 @@ func (d *HTDecoder) initSPP(data []byte, lcup, len2 int) {
 	d.frwdRead(&d.spp)
 }
 
-// decodeCleanup decodes the cleanup pass.
+// decodeCleanup decodes the cleanup pass, following ISO/IEC 15444-15 as
+// implemented in OpenJPEG's ht_dec.c.
+//
+// The block is scanned in stripes two rows tall; each iteration handles a pair
+// of 2x2 quads spanning four sample columns. Significance patterns come from a
+// VLC table indexed by the context of the preceding quad, and whenever that
+// context is zero the pattern is gated by an event from the MEL run decoder.
+// The previous implementation had neither the MEL gate nor the quad-derived
+// context, and advanced the VLC stream by a four-bit length field that also
+// contained u_off.
 func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 	width := d.width
 	height := d.height
-	// An HT quad is 2x2 samples, so a stripe is two rows tall and there is one
-	// quad column per two sample columns. This previously used (width+3)/4 and
-	// a four-row stride, which is the geometry of neither the quad nor the
-	// stripe and left three quarters of the block untouched.
-	quadCols := (width + 1) / 2
+	p := numBitplanes
 
-	// Process in 2-row stripes
+	// Runs of MEL events gate the zero-context quads.
+	run := d.melGetRun()
+
 	for y := 0; y < height; y += 2 {
-		isInitial := (y == 0)
+		tbl := &vlcTbl0
+		if y != 0 {
+			tbl = &vlcTbl1
+		}
+		cq := uint32(0)
 
-		// Process each quad pair (two quads of 4 samples each)
-		for qx := 0; qx < quadCols; qx += 2 {
-			// Get VLC codeword
+		for x := 0; x < width; x += 4 {
+			var qinf [2]uint16
+
+			// One fetch covers both quads: the longest VLC codeword is 7 bits
+			// and u takes at most 8, so 32 bits are always sufficient.
 			vlcVal := d.revFetch(&d.vlc)
 
-			// Determine context for first quad
-			var context uint8
-			if isInitial {
-				// Initial line: context from previous quads only
-				if qx > 0 {
-					context = d.sigma1[qx-1] >> 4
+			qinf[0] = tbl[(cq<<7)|(vlcVal&0x7F)]
+			if cq == 0 {
+				// Zero context consumes one MEL event. Event counts are
+				// doubled, so a run reaching -1 means the event was a one and
+				// the decoded pattern stands; otherwise it is discarded.
+				run -= 2
+				if run != -1 {
+					qinf[0] = 0
 				}
-			} else {
-				// Non-initial: context from vertical neighbors too
-				context = (d.sigma1[qx] >> 4) | (d.lineState[qx] >> 4)
+				if run < 0 {
+					run = d.melGetRun()
+				}
+			}
+			cq = ((uint32(qinf[0]) & 0x10) >> 4) | ((uint32(qinf[0]) & 0xE0) >> 5)
+			vlcVal = d.revAdvance(&d.vlc, uint32(qinf[0]&0x7))
+
+			qinf[1] = 0
+			if x+2 < width {
+				qinf[1] = tbl[(cq<<7)|(vlcVal&0x7F)]
+				if cq == 0 {
+					run -= 2
+					if run != -1 {
+						qinf[1] = 0
+					}
+					if run < 0 {
+						run = d.melGetRun()
+					}
+				}
+				cq = ((uint32(qinf[1]) & 0x10) >> 4) | ((uint32(qinf[1]) & 0xE0) >> 5)
+				vlcVal = d.revAdvance(&d.vlc, uint32(qinf[1]&0x7))
 			}
 
-			// Decode first quad using VLC table
-			var tbl *[1024]uint16
-			if isInitial {
-				tbl = &vlcTbl0
-			} else {
-				tbl = &vlcTbl1
+			// u_off bits from the quad pair select how U_q is coded; when both
+			// are set a further MEL event distinguishes the two modes.
+			uvlcMode := ((uint32(qinf[0]) & 0x8) >> 3) | ((uint32(qinf[1]) & 0x8) >> 2)
+			if uvlcMode == 3 {
+				run -= 2
+				if run == -1 {
+					uvlcMode++
+				}
+				if run < 0 {
+					run = d.melGetRun()
+				}
 			}
-
-			// VLC lookup
-			idx := (uint32(context) << 7) | (vlcVal & 0x7F)
-			qinf := tbl[idx]
-			vlcLen := qinf & 0x07
-			rho := (qinf >> 4) & 0x0F
-			uOff1 := (qinf >> 3) & 0x01
-
-			d.revAdvance(&d.vlc, uint32(vlcLen))
-			vlcVal = d.revFetch(&d.vlc)
-
-			// Determine context for second quad
-			context2 := uint8(rho>>2) | (d.sigma1[qx+1] >> 4)
-
-			// Decode second quad
-			idx2 := (uint32(context2) << 7) | (vlcVal & 0x7F)
-			qinf2 := tbl[idx2]
-			vlcLen2 := qinf2 & 0x07
-			rho2 := (qinf2 >> 4) & 0x0F
-			uOff2 := (qinf2 >> 3) & 0x01
-
-			d.revAdvance(&d.vlc, uint32(vlcLen2))
-
-			// Update significance
-			d.sigma1[qx] = uint8(rho)
-			d.sigma1[qx+1] = uint8(rho2)
-
-			// Decode u values if context was 0 and MEL needed
 			var u [2]uint32
-			mode := (uOff1 << 1) | uOff2
-			if mode > 0 {
-				vlcVal = d.revFetch(&d.vlc)
-				var consumed uint32
-				if isInitial {
-					consumed = d.decodeInitUVLC(vlcVal, uint32(mode), &u)
-				} else {
-					consumed = d.decodeNonInitUVLC(vlcVal, uint32(mode), &u)
-				}
-				d.revAdvance(&d.vlc, consumed)
-			} else {
-				u[0] = 1
-				u[1] = 1
-			}
+			consumed := d.decodeInitUVLC(vlcVal, uvlcMode, &u)
+			d.revAdvance(&d.vlc, consumed)
 
-			d.decodeQuadSamples(qinf, u[0], 2*qx, y, numBitplanes)
-
-			d.decodeQuadSamples(qinf2, u[1], 2*(qx+1), y, numBitplanes)
+			d.decodeQuadSamples(qinf[0], u[0], x, y, p)
+			d.decodeQuadSamples(qinf[1], u[1], x+2, y, p)
 		}
 	}
 }
@@ -1646,10 +1643,149 @@ func (d *HTDecoder) decodeQuadSamples(qinf uint16, uq uint32, x0, y0, p int) {
 		vn := ms & ((1 << mn) - 1)
 		vn |= ((uint32(qinf) >> uint(8+n)) & 1) << mn
 		vn |= 1 // centre of bin
-		mag := int32((vn + 2) << uint(p-1))
+		// The reference keeps samples in a shifted domain for dequantisation,
+		// storing (v_n + 2) << (p-1) and shifting down by p later. Returning
+		// plain coefficients, those cancel to a single right shift: the
+		// representation is 2*mu + 0.5, so mu = (v_n + 2) >> 1.
+		mag := int32((vn + 2) >> 1)
 		if ms&1 != 0 {
 			mag = -mag
 		}
 		d.data[y*d.width+x] = mag
 	}
+}
+
+// melRead refills the MEL bit buffer from the MEL segment, undoing the bit
+// stuffing applied by the encoder. Ported from OpenJPEG's ht_dec.c mel_read.
+func (d *HTDecoder) melRead() {
+	m := &d.mel
+	if m.bits > 32 {
+		return
+	}
+
+	val := uint32(0xFFFFFFFF) // feed 0xFF once the segment is exhausted
+	if m.size > 4 {
+		if m.pos+3 < len(m.data) {
+			val = uint32(m.data[m.pos]) | uint32(m.data[m.pos+1])<<8 |
+				uint32(m.data[m.pos+2])<<16 | uint32(m.data[m.pos+3])<<24
+		}
+		m.pos += 4
+		m.size -= 4
+	} else if m.size > 0 {
+		i := uint(0)
+		for m.size > 1 {
+			var v uint32
+			if m.pos < len(m.data) {
+				v = uint32(m.data[m.pos])
+			}
+			m.pos++
+			mask := ^(uint32(0xFF) << i)
+			val = (val & mask) | (v << i)
+			m.size--
+			i += 8
+		}
+		var v uint32
+		if m.pos < len(m.data) {
+			v = uint32(m.data[m.pos])
+		}
+		m.pos++
+		// The MEL and VLC segments may overlap in the final byte.
+		v |= 0x0F
+		mask := ^(uint32(0xFF) << i)
+		val = (val & mask) | (v << i)
+		m.size--
+	}
+
+	bits := 32
+	if m.unstuff {
+		bits--
+	}
+
+	t := val & 0xFF
+	unstuff := (val & 0xFF) == 0xFF
+	if unstuff {
+		bits--
+	}
+	t <<= 8 - b2i(unstuff)
+
+	t |= (val >> 8) & 0xFF
+	unstuff = ((val >> 8) & 0xFF) == 0xFF
+	if unstuff {
+		bits--
+	}
+	t <<= 8 - b2i(unstuff)
+
+	t |= (val >> 16) & 0xFF
+	unstuff = ((val >> 16) & 0xFF) == 0xFF
+	if unstuff {
+		bits--
+	}
+	t <<= 8 - b2i(unstuff)
+
+	t |= (val >> 24) & 0xFF
+	m.unstuff = ((val >> 24) & 0xFF) == 0xFF
+
+	m.tmp |= uint64(t) << uint(64-bits-m.bits)
+	m.bits += bits
+}
+
+func b2i(b bool) uint {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// melDecode decodes MEL codewords into the run queue. Ported from OpenJPEG's
+// ht_dec.c mel_decode.
+func (d *HTDecoder) melDecode() {
+	m := &d.mel
+	if m.bits < 6 {
+		d.melRead()
+	}
+
+	for m.bits >= 6 && m.numRuns < 8 {
+		eval := melExp[m.k]
+		run := 0
+		if m.tmp&(1<<63) != 0 {
+			// A one: a stretch of zero events not terminating in a one.
+			run = (1 << uint(eval)) - 1
+			if m.k+1 < 12 {
+				m.k++
+			} else {
+				m.k = 12
+			}
+			m.tmp <<= 1
+			m.bits--
+			run <<= 1
+		} else {
+			// A zero: a stretch of zero events terminating with a one.
+			run = int(m.tmp>>uint(63-eval)) & ((1 << uint(eval)) - 1)
+			if m.k-1 > 0 {
+				m.k--
+			} else {
+				m.k = 0
+			}
+			m.tmp <<= uint(eval + 1)
+			m.bits -= eval + 1
+			run = (run << 1) + 1
+		}
+		shift := uint(m.numRuns * 7)
+		m.runs &= ^(uint64(0x3F) << shift)
+		m.runs |= uint64(run) << shift
+		m.numRuns++
+	}
+}
+
+// melGetRun returns the next MEL run, decoding more of the segment if the
+// queue is empty. Ported from OpenJPEG's ht_dec.c mel_get_run.
+func (d *HTDecoder) melGetRun() int {
+	m := &d.mel
+	if m.numRuns == 0 {
+		d.melDecode()
+	}
+	t := int(m.runs & 0x7F)
+	m.runs >>= 7
+	m.numRuns--
+	return t
 }
