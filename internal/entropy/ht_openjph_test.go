@@ -37,8 +37,10 @@ var openjphCoefficients = []int32{
 }
 
 func TestHTDecodeOpenJPHBlock(t *testing.T) {
-	// Mb = guard bits + exponent - 1 = 1 + 7 - 1 from the QCD marker.
-	const mb = 7
+	// p = cblk->numbps = Mb + 1 - zero_bplanes. The QCD marker gives
+	// Mb = guard(1) + exponent(7) - 1 = 7, and the packet header's IMSB tag
+	// tree gives 6 zero bitplanes, so p = 7 + 1 - 6 = 2.
+	const mb = 2
 
 	dec := NewHTDecoder(8, 8)
 	got := dec.Decode(openjphBlock, mb, BandLL)

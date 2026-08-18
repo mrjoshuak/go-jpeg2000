@@ -76,7 +76,7 @@ type frwdBitstream struct {
 
 // NewHTDecoder creates a new HTJ2K block decoder.
 func NewHTDecoder(width, height int) *HTDecoder {
-	quadCols := (width + 3) / 4
+	quadCols := (width+1)/2 + 2
 	return &HTDecoder{
 		data:      make([]int32, width*height),
 		width:     width,
@@ -520,10 +520,14 @@ func (d *HTDecoder) initSPP(data []byte, lcup, len2 int) {
 func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 	width := d.width
 	height := d.height
-	quadCols := (width + 3) / 4
+	// An HT quad is 2x2 samples, so a stripe is two rows tall and there is one
+	// quad column per two sample columns. This previously used (width+3)/4 and
+	// a four-row stride, which is the geometry of neither the quad nor the
+	// stripe and left three quarters of the block untouched.
+	quadCols := (width + 1) / 2
 
-	// Process in 4-row stripes
-	for y := 0; y < height; y += 4 {
+	// Process in 2-row stripes
+	for y := 0; y < height; y += 2 {
 		isInitial := (y == 0)
 
 		// Process each quad pair (two quads of 4 samples each)
@@ -554,7 +558,7 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 			// VLC lookup
 			idx := (uint32(context) << 7) | (vlcVal & 0x7F)
 			qinf := tbl[idx]
-			vlcLen := qinf & 0x0F
+			vlcLen := qinf & 0x07
 			rho := (qinf >> 4) & 0x0F
 			uOff1 := (qinf >> 3) & 0x01
 
@@ -567,7 +571,7 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 			// Decode second quad
 			idx2 := (uint32(context2) << 7) | (vlcVal & 0x7F)
 			qinf2 := tbl[idx2]
-			vlcLen2 := qinf2 & 0x0F
+			vlcLen2 := qinf2 & 0x07
 			rho2 := (qinf2 >> 4) & 0x0F
 			uOff2 := (qinf2 >> 3) & 0x01
 
@@ -594,57 +598,9 @@ func (d *HTDecoder) decodeCleanup(numBitplanes int) {
 				u[1] = 1
 			}
 
-			// Decode magnitudes and signs from MagSgn stream
-			for i := 0; i < 4 && qx*4+i < width; i++ {
-				if rho&(1<<i) != 0 {
-					// This sample is significant
-					magVal := d.frwdFetch(&d.magSgn)
-					emb := u[0] // Exponent magnitude bits
+			d.decodeQuadSamples(qinf, u[0], 2*qx, y, numBitplanes)
 
-					// Extract magnitude
-					mag := int32((magVal & ((1 << emb) - 1)) + (1 << (emb - 1)))
-					d.frwdAdvance(&d.magSgn, emb)
-
-					// Extract sign (LSB of next fetch)
-					signVal := d.frwdFetch(&d.magSgn)
-					sign := signVal & 1
-					d.frwdAdvance(&d.magSgn, 1)
-
-					// Store coefficient
-					idx := y*width + qx*4 + i
-					if idx < len(d.data) {
-						if sign != 0 {
-							d.data[idx] = -mag
-						} else {
-							d.data[idx] = mag
-						}
-					}
-				}
-			}
-
-			// Process second quad similarly
-			for i := 0; i < 4 && (qx+1)*4+i < width; i++ {
-				if rho2&(1<<i) != 0 {
-					magVal := d.frwdFetch(&d.magSgn)
-					emb := u[1]
-
-					mag := int32((magVal & ((1 << emb) - 1)) + (1 << (emb - 1)))
-					d.frwdAdvance(&d.magSgn, emb)
-
-					signVal := d.frwdFetch(&d.magSgn)
-					sign := signVal & 1
-					d.frwdAdvance(&d.magSgn, 1)
-
-					idx := y*width + (qx+1)*4 + i
-					if idx < len(d.data) {
-						if sign != 0 {
-							d.data[idx] = -mag
-						} else {
-							d.data[idx] = mag
-						}
-					}
-				}
-			}
+			d.decodeQuadSamples(qinf2, u[1], 2*(qx+1), y, numBitplanes)
 		}
 	}
 }
@@ -970,7 +926,7 @@ type frwdBitWriter struct {
 
 // NewHTEncoder creates a new HTJ2K block encoder.
 func NewHTEncoder(width, height int) *HTEncoder {
-	quadCols := (width + 3) / 4
+	quadCols := (width+1)/2 + 2
 	return &HTEncoder{
 		data:   make([]int32, width*height),
 		width:  width,
@@ -1234,7 +1190,7 @@ func (e *HTEncoder) EncodeWithRefinement(bandType int) ([]byte, int) {
 func (e *HTEncoder) encodeCleanup(numBits int) {
 	width := e.width
 	height := e.height
-	quadCols := (width + 3) / 4
+	quadCols := (width+1)/2 + 2
 
 	// Process in 4-row stripes
 	for y := 0; y < height; y += 4 {
@@ -1626,7 +1582,7 @@ func (d *HTDecoder) Resize(width, height int) {
 		d.data = d.data[:dataSize]
 	}
 
-	quadCols := (width + 3) / 4
+	quadCols := (width+1)/2 + 2
 	if cap(d.sigma1) < quadCols+1 {
 		d.sigma1 = make([]uint8, quadCols+1)
 		d.sigma2 = make([]uint8, quadCols+1)
@@ -1650,12 +1606,50 @@ func (e *HTEncoder) Resize(width, height int) {
 		e.data = e.data[:dataSize]
 	}
 
-	quadCols := (width + 3) / 4
+	quadCols := (width+1)/2 + 2
 	if cap(e.sigma1) < quadCols+1 {
 		e.sigma1 = make([]uint8, quadCols+1)
 		e.sigma2 = make([]uint8, quadCols+1)
 	} else {
 		e.sigma1 = e.sigma1[:quadCols+1]
 		e.sigma2 = e.sigma2[:quadCols+1]
+	}
+}
+
+// decodeQuadSamples decodes the four samples of one 2x2 quad from the MagSgn
+// stream, following ISO/IEC 15444-15 as implemented in OpenJPEG's ht_dec.c.
+//
+// Sample n of the quad sits at (x0 + n>>1, y0 + n&1) and is significant when
+// bit 4+n of qinf is set. The number of magnitude bits is U_q less the EMB e_k
+// bit for that sample (qinf bits 12..15). Bit 0 of the fetched word carries the
+// sign, the EMB e_1 bit (qinf bits 8..11) supplies the MSB, and the bin centre
+// is restored before shifting up by the missing bitplanes.
+//
+// The previous code read a fixed count of magnitude bits, took the sign from a
+// separate fetch, and ignored the EMB fields and the bitplane shift entirely.
+func (d *HTDecoder) decodeQuadSamples(qinf uint16, uq uint32, x0, y0, p int) {
+	if p < 1 {
+		return
+	}
+	for n := 0; n < 4; n++ {
+		if qinf&(0x10<<uint(n)) == 0 {
+			continue
+		}
+		x, y := x0+(n>>1), y0+(n&1)
+		if x >= d.width || y >= d.height {
+			continue
+		}
+		ms := d.frwdFetch(&d.magSgn)
+		mn := uq - ((uint32(qinf) >> uint(12+n)) & 1)
+		d.frwdAdvance(&d.magSgn, mn)
+
+		vn := ms & ((1 << mn) - 1)
+		vn |= ((uint32(qinf) >> uint(8+n)) & 1) << mn
+		vn |= 1 // centre of bin
+		mag := int32((vn + 2) << uint(p-1))
+		if ms&1 != 0 {
+			mag = -mag
+		}
+		d.data[y*d.width+x] = mag
 	}
 }
