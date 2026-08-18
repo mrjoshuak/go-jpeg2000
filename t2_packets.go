@@ -9,7 +9,8 @@ package jpeg2000
 // This library previously wrote and read a private container instead — a
 // two-byte code-block count followed by a fixed-width table — and silently
 // returned a blank image for anything else. That is why no external decoder
-// could read our output and why we recovered nothing from theirs.
+// could read our output and why we recovered nothing from theirs. Both
+// directions are packets now, and the private container is gone.
 
 import (
 	"fmt"
@@ -169,9 +170,122 @@ type bandGeometry struct {
 	imsb           *tagTree
 }
 
+// bandGridFor builds the code-block grid of one resolution of one
+// tile-component, which is what a packet's header describes.
+//
+// Every coordinate is absolute: ISO/IEC 15444-1 B.5 derives the subband
+// coordinates from the tile-component's position in the image, and B.7 anchors
+// the code-block partition at zero rather than at the band. A tile away from
+// the image origin differs on both counts, so deriving them from the tile's
+// size alone reads the packet headers of every tile but the first against the
+// wrong grid.
+//
+// A resolution with no samples has no precinct, so the codestream holds no
+// packet for it at all (B.6); that case returns nil.
+func bandGridFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight int) []*bandGeometry {
+	rw, rh := tileResDims(x0, y0, x1, y1, numRes, res)
+	if rw <= 0 || rh <= 0 {
+		return nil
+	}
+	numBands := 1
+	if res > 0 {
+		numBands = 3
+	}
+	bands := make([]*bandGeometry, 0, numBands)
+	for b := 0; b < numBands; b++ {
+		bt := entropy.BandLL
+		if res > 0 {
+			switch b {
+			case bandHL:
+				bt = entropy.BandHL
+			case bandLH:
+				bt = entropy.BandLH
+			default:
+				bt = entropy.BandHH
+			}
+		}
+		sb := tileBandGeom(x0, y0, x1, y1, numRes, res, b)
+		firstX, nx := codeBlockRange(sb.x0, sb.x1, cbWidth)
+		firstY, ny := codeBlockRange(sb.y0, sb.y1, cbHeight)
+		bg := &bandGeometry{
+			bandType: bt, sb: sb,
+			firstX: firstX, firstY: firstY,
+			cbX: nx, cbY: ny,
+		}
+		bg.blocks = make([]*cbState, nx*ny)
+		for i := range bg.blocks {
+			bg.blocks[i] = &cbState{lblock: 3}
+		}
+		bg.incl = newTagTree(nx, ny)
+		bg.imsb = newTagTree(nx, ny)
+		bands = append(bands, bg)
+	}
+	return bands
+}
+
+// forEachPacket visits the (layer, resolution, component) triple of every
+// packet of one tile, in the order the codestream's progression order places
+// them, for the one-precinct-per-resolution geometry this library writes and
+// the maximal precinct a Scod without a precinct partition declares. Visiting
+// stops when visit returns false.
+//
+// The five orders of Table A.16 differ only in which of layer, resolution and
+// component is outermost once the position index has a single value. Reading or
+// writing a resolution-major sequence for a component-major order recovers the
+// right packets in the wrong places, which a single layer and a single
+// component hide completely.
+//
+// The triples are visited rather than returned as a slice because the layer
+// count comes from the file: a corrupt COD declaring 65535 layers would
+// otherwise buy tens of megabytes from a few hundred bytes of input.
+func forEachPacket(order codestream.ProgressionOrder, numLayers, numRes, numComp int, visit func(layer, res, comp int) bool) {
+	switch order {
+	case codestream.RLCP:
+		for r := 0; r < numRes; r++ {
+			for l := 0; l < numLayers; l++ {
+				for c := 0; c < numComp; c++ {
+					if !visit(l, r, c) {
+						return
+					}
+				}
+			}
+		}
+	case codestream.RPCL:
+		for r := 0; r < numRes; r++ {
+			for c := 0; c < numComp; c++ {
+				for l := 0; l < numLayers; l++ {
+					if !visit(l, r, c) {
+						return
+					}
+				}
+			}
+		}
+	case codestream.PCRL, codestream.CPRL:
+		for c := 0; c < numComp; c++ {
+			for r := 0; r < numRes; r++ {
+				for l := 0; l < numLayers; l++ {
+					if !visit(l, r, c) {
+						return
+					}
+				}
+			}
+		}
+	default: // LRCP
+		for l := 0; l < numLayers; l++ {
+			for r := 0; r < numRes; r++ {
+				for c := 0; c < numComp; c++ {
+					if !visit(l, r, c) {
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
 // decodeStandardTileData decodes conforming T2 packets for one tile and writes
 // the recovered coefficients into the tile components.
-func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error {
+func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualityLimit int) error {
 	h := d.header
 	numRes := int(h.CodingStyle.NumDecompositions) + 1
 	if numRes < 1 || numRes > codestream.MaxDecompositionLevels+1 {
@@ -203,46 +317,11 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 		if tc == nil {
 			continue
 		}
-		x0, y0, x1, y1 := tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1
 		for r := 0; r < numRes; r++ {
-			// A resolution with no samples has no precinct, so the codestream
-			// holds no packet for it at all (B.6).
-			rw, rh := tileResDims(x0, y0, x1, y1, numRes, r)
-			if rw <= 0 || rh <= 0 {
+			bands := bandGridFor(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
+				numRes, r, cbWidth, cbHeight)
+			if bands == nil {
 				continue
-			}
-			numBands := 1
-			if r > 0 {
-				numBands = 3
-			}
-			var bands []*bandGeometry
-			for b := 0; b < numBands; b++ {
-				bt := entropy.BandLL
-				if r > 0 {
-					switch b {
-					case bandHL:
-						bt = entropy.BandHL
-					case bandLH:
-						bt = entropy.BandLH
-					default:
-						bt = entropy.BandHH
-					}
-				}
-				sb := tileBandGeom(x0, y0, x1, y1, numRes, r, b)
-				firstX, nx := codeBlockRange(sb.x0, sb.x1, cbWidth)
-				firstY, ny := codeBlockRange(sb.y0, sb.y1, cbHeight)
-				bg := &bandGeometry{
-					bandType: bt, sb: sb,
-					firstX: firstX, firstY: firstY,
-					cbX: nx, cbY: ny,
-				}
-				bg.blocks = make([]*cbState, nx*ny)
-				for i := range bg.blocks {
-					bg.blocks[i] = &cbState{lblock: 3}
-				}
-				bg.incl = newTagTree(nx, ny)
-				bg.imsb = newTagTree(nx, ny)
-				bands = append(bands, bg)
 			}
 			grid[resKey{c, r}] = bands
 		}
@@ -254,21 +333,26 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 	// maximal precinct, so every code-block of a band falls in one packet.
 	// Progression order only permutes these packets; with one precinct and the
 	// orders in use the resolution-major walk below matches all of them.
-	for layer := 0; layer < numLayers; layer++ {
-		for res := 0; res < numRes; res++ {
-			for c := 0; c < len(tile.Components); c++ {
-				bands := grid[resKey{c, res}]
-				if bands == nil {
-					continue
-				}
-				if err := d.readPacket(r, bands, layer); err != nil {
-					return err
-				}
-				if r.overrun {
-					break
-				}
-			}
+	order := codestream.ProgressionOrder(h.CodingStyle.ProgressionOrder)
+	var perr error
+	forEachPacket(order, numLayers, numRes, len(tile.Components), func(layer, res, c int) bool {
+		bands := grid[resKey{c, res}]
+		if bands == nil {
+			return true
 		}
+		// A quality limit drops the contributions of the later layers, but
+		// their packets still have to be parsed: they carry the inclusion and
+		// length state the packets between them are read against, and their
+		// bodies are what separates one packet from the next.
+		keep := qualityLimit <= 0 || layer < qualityLimit
+		if err := readPacket(r, bands, layer, keep); err != nil {
+			perr = err
+			return false
+		}
+		return !r.overrun
+	})
+	if perr != nil {
+		return perr
 	}
 
 	// Decode every contributing code-block and scatter its coefficients.
@@ -298,13 +382,12 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 							continue
 						}
 						// Mb is the band's total magnitude bit-planes; the
-						// tag-tree above gives how many leading ones are all
+						// tag tree above gives how many leading ones are all
 						// zero in this block, so the coded planes are the
-						// difference. cb.zeroPlanes already holds the decoded
-						// tag-tree value, not the threshold that resolved it,
-						// so there is no extra plane to add back.
+						// difference. The clamp bounds a file-supplied count
+						// against the coefficient word being decoded into.
 						mb := h.BandMb(res, b)
-						numbps := mb - cb.zeroPlanes
+						numbps := clampBitPlanes(mb-cb.zeroPlanes, wide)
 						if numbps < 1 {
 							continue
 						}
@@ -365,8 +448,9 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 	return nil
 }
 
-// readPacket decodes one packet header and body for the given bands.
-func (d *decoder) readPacket(r *pktReader, bands []*bandGeometry, layer int) error {
+// readPacket decodes one packet header and body for the given bands, leaving
+// the reader positioned on the packet that follows.
+func readPacket(r *pktReader, bands []*bandGeometry, layer int, keep bool) error {
 	if r.pos >= len(r.data) {
 		return nil
 	}
@@ -417,6 +501,12 @@ func (d *decoder) readPacket(r *pktReader, bands []*bandGeometry, layer int) err
 					cb.included = true
 				}
 
+				// The pass count sizes the length field that follows it and
+				// is recorded for that reason. The block decoder derives its
+				// own pass structure from the bit-plane count instead, so a
+				// segment holding fewer passes than its bit-planes imply --
+				// which a rate-controlled encoder produces -- is decoded to the
+				// end of the data rather than to the last signalled pass.
 				passes := readNumPasses(r)
 				cb.numPasses += passes
 
@@ -443,7 +533,9 @@ func (d *decoder) readPacket(r *pktReader, bands []*bandGeometry, layer int) err
 		if ct.length < 0 || r.pos+ct.length > len(r.data) {
 			return nil
 		}
-		ct.cb.data = append(ct.cb.data, r.data[r.pos:r.pos+ct.length]...)
+		if keep {
+			ct.cb.data = append(ct.cb.data, r.data[r.pos:r.pos+ct.length]...)
+		}
 		r.pos += ct.length
 	}
 	return nil

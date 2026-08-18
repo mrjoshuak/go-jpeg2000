@@ -3,11 +3,16 @@ package jpeg2000
 // Standard T2 packet encoding.
 //
 // The inverse of t2_packets.go: emit conforming packets so that other
-// implementations can read what this library writes. Previously the encoder
-// wrote a private container (a two-byte code-block count and a fixed-width
-// table), which no conforming decoder can interpret.
+// implementations can read what this library writes. The encoder used to write
+// a private container instead — a two-byte code-block count and a fixed-width
+// table — which no conforming decoder can interpret. Nothing writes it now:
+// both block coders and every quality layer go through the packets below.
 
-import "math/bits"
+import (
+	"math/bits"
+
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+)
 
 // pktWriter emits packet-header bits with JPEG 2000 bit stuffing: after a byte
 // of 0xFF the next byte carries only seven bits, its high bit forced to zero.
@@ -159,11 +164,30 @@ func (t *tagTreeEnc) encode(w *pktWriter, x, y, threshold int) {
 	}
 }
 
-// t2Block is one code-block's contribution to a packet.
+// t2Contribution is what one code-block gives to one quality layer: the bytes
+// of the coding passes that fall in it, and how many passes those are.
+type t2Contribution struct {
+	data   []byte
+	passes int
+}
+
+// t2Block is one code-block across every quality layer.
 type t2Block struct {
-	data       []byte
 	zeroPlanes int
-	numPasses  int
+	layers     []t2Contribution
+
+	// State the packet headers carry from one layer to the next, mirroring
+	// cbState on the decoding side. A block is named in the inclusion tag tree
+	// once, by the layer it first appears in; every later layer signals its
+	// inclusion with a single bit, and the length field keeps growing from the
+	// Lblock the earlier layers established.
+	included bool
+	lblock   int
+}
+
+// contributes reports whether this block gives the layer any bytes.
+func (b *t2Block) contributes(layer int) bool {
+	return b != nil && layer < len(b.layers) && len(b.layers[layer].data) > 0
 }
 
 // t2Band groups the code-blocks of one subband.
@@ -174,6 +198,33 @@ type t2Band struct {
 	imsb     *tagTreeEnc
 }
 
+// setTagTreeLeaves records, for every code-block of a band, the layer it first
+// contributes to and how many of its magnitude bit-planes are all zero.
+//
+// Every leaf value must be in place before any of them is coded: setLeaf
+// recomputes each parent as the minimum of its children, so setting leaves as
+// the packets are written would change a parent after earlier blocks had
+// already been written against the old minimum. That is invisible with one
+// code-block per band and corrupts every packet with more than one.
+func (bg *t2Band) setTagTreeLeaves(numLayers int) {
+	for cby := 0; cby < bg.cbY; cby++ {
+		for cbx := 0; cbx < bg.cbX; cbx++ {
+			cb := bg.blocks[cby*bg.cbX+cbx]
+			first := numLayers
+			for l := 0; l < numLayers; l++ {
+				if cb.contributes(l) {
+					first = l
+					break
+				}
+			}
+			bg.incl.setLeaf(cbx, cby, first)
+			if first < numLayers {
+				bg.imsb.setLeaf(cbx, cby, cb.zeroPlanes)
+			}
+		}
+	}
+}
+
 // encodePacket writes one packet: header then bodies, for the given bands.
 func encodePacket(bands []*t2Band, layer int) []byte {
 	w := &pktWriter{}
@@ -181,7 +232,7 @@ func encodePacket(bands []*t2Band, layer int) []byte {
 	anyIncluded := false
 	for _, bg := range bands {
 		for _, cb := range bg.blocks {
-			if cb != nil && len(cb.data) > 0 {
+			if cb.contributes(layer) {
 				anyIncluded = true
 			}
 		}
@@ -193,57 +244,56 @@ func encodePacket(bands []*t2Band, layer int) []byte {
 	}
 	w.writeBit(1)
 
-	// Every leaf value must be in place before any of them is coded: setLeaf
-	// recomputes each parent as the minimum of its children, so setting leaves
-	// as we go would change a parent after earlier blocks had already been
-	// written against the old minimum. That is invisible with one code-block
-	// per band and corrupts every packet with more than one.
-	for _, bg := range bands {
-		for cby := 0; cby < bg.cbY; cby++ {
-			for cbx := 0; cbx < bg.cbX; cbx++ {
-				cb := bg.blocks[cby*bg.cbX+cbx]
-				if cb != nil && len(cb.data) > 0 {
-					bg.incl.setLeaf(cbx, cby, layer)
-					bg.imsb.setLeaf(cbx, cby, cb.zeroPlanes)
-				} else {
-					// Not included in this layer: a value above it.
-					bg.incl.setLeaf(cbx, cby, layer+1)
-				}
-			}
-		}
-	}
-
 	var bodies [][]byte
 	for _, bg := range bands {
 		for cby := 0; cby < bg.cbY; cby++ {
 			for cbx := 0; cbx < bg.cbX; cbx++ {
 				cb := bg.blocks[cby*bg.cbX+cbx]
-				included := cb != nil && len(cb.data) > 0
+				included := cb.contributes(layer)
 
-				bg.incl.encode(w, cbx, cby, layer+1)
-				if !included {
-					continue
+				if !cb.included {
+					// First inclusion is coded in the tag tree, whose value is
+					// the layer the block first appears in.
+					bg.incl.encode(w, cbx, cby, layer+1)
+					if !included {
+						continue
+					}
+					// Zero bit-planes, coded until fully determined.
+					for th := 1; th <= cb.zeroPlanes+1; th++ {
+						bg.imsb.encode(w, cbx, cby, th)
+					}
+					cb.included = true
+				} else {
+					// Already included: one bit says whether this layer adds
+					// anything.
+					if included {
+						w.writeBit(1)
+					} else {
+						w.writeBit(0)
+						continue
+					}
 				}
 
-				// Zero bit-planes, coded until fully determined.
-				for th := 1; th <= cb.zeroPlanes+1; th++ {
-					bg.imsb.encode(w, cbx, cby, th)
+				ct := cb.layers[layer]
+				passes := ct.passes
+				if passes < 1 {
+					passes = 1
 				}
+				writeNumPasses(w, passes)
 
-				writeNumPasses(w, cb.numPasses)
-
-				// Lblock: emit no increments, then the length in
-				// 3 + floor(log2(passes)) bits, widening if it does not fit.
-				lblock := 3
-				nbits := uint(lblock) + uint(bits.Len(uint(cb.numPasses))-1)
-				for len(cb.data) >= 1<<nbits {
-					lblock++
+				// Lblock: emit one bit per increment the length needs, then a
+				// zero, then the length in lblock + floor(log2(passes)) bits.
+				// Lblock persists across layers, which is why it lives on the
+				// block rather than here.
+				nbits := uint(cb.lblock) + uint(bits.Len(uint(passes))-1)
+				for len(ct.data) >= 1<<nbits {
+					cb.lblock++
 					nbits++
 					w.writeBit(1)
 				}
 				w.writeBit(0)
-				w.writeBits(uint32(len(cb.data)), nbits)
-				bodies = append(bodies, cb.data)
+				w.writeBits(uint32(len(ct.data)), nbits)
+				bodies = append(bodies, ct.data)
 			}
 		}
 	}
@@ -327,18 +377,83 @@ func (e *encoder) bandMb(res, bandIdx int) int {
 	return mb
 }
 
+// layerContributions splits one code-block's coded bytes into quality layers.
+//
+// truncPoints holds the cumulative byte count after each of the block's coding
+// units — one per bit-plane for the MQ coder, a single entry for the HT cleanup
+// pass — so a layer boundary can only fall on one of them. Layer l carries the
+// units up to (l+1)*n/numLayers, which puts the most significant bit-planes in
+// the first layer and refines from there, and the last layer always carries the
+// rest so that decoding every layer reproduces the whole block.
+//
+// The coding-pass count differs between the two block coders. The HT cleanup
+// pass is one pass whatever the magnitude budget; the MQ coder emits three
+// passes per bit-plane except the most significant, which carries a cleanup
+// pass alone, so k bit-planes are 3k-2 passes (ISO/IEC 15444-1 D.3).
+func layerContributions(encoded []byte, truncPoints []int, numLayers int, ht bool) []t2Contribution {
+	out := make([]t2Contribution, numLayers)
+	n := len(truncPoints)
+	if len(encoded) == 0 {
+		return out
+	}
+	if n == 0 {
+		out[0] = t2Contribution{data: encoded, passes: 1}
+		return out
+	}
+	prevBytes, prevPasses := 0, 0
+	for lay := 0; lay < numLayers; lay++ {
+		k := (lay + 1) * n / numLayers
+		if k < 1 {
+			k = 1
+		}
+		if k > n {
+			k = n
+		}
+		cum := truncPoints[k-1]
+		if lay == numLayers-1 {
+			k, cum = n, len(encoded)
+		}
+		if cum > len(encoded) {
+			cum = len(encoded)
+		}
+		if cum <= prevBytes {
+			// This layer adds no bytes, so it names no contribution; the
+			// passes it would have carried fall to the next layer that does.
+			continue
+		}
+		cumPasses := 1
+		if !ht {
+			cumPasses = 3*k - 2
+		}
+		if cumPasses <= prevPasses {
+			cumPasses = prevPasses + 1
+		}
+		out[lay] = t2Contribution{
+			data:   encoded[prevBytes:cum],
+			passes: cumPasses - prevPasses,
+		}
+		prevBytes, prevPasses = cum, cumPasses
+	}
+	return out
+}
+
 // buildStandardTileData assembles conforming T2 packets for one tile from the
 // per-code-block encoded data.
 //
-// Packets are emitted resolution-major, one per (resolution, component), which
-// is the order every progression produces when there is a single precinct and
-// a single layer. A resolution that has no samples carries no precinct, so it
-// carries no packet either: the layout says which resolutions are present.
-func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, passes []int) []byte {
+// Packets are emitted in the progression order the COD marker declares, one per
+// (layer, resolution, component), which is every packet there is when the
+// codestream has a single precinct per resolution. A resolution that has no
+// samples carries no precinct, so it carries no packet either: the layout says
+// which resolutions are present.
+func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) []byte {
 	numRes := layout.numRes
 	numComp := 0
 	if numRes > 0 {
 		numComp = len(layout.res) / numRes
+	}
+	numLayers := e.options.NumLayers
+	if numLayers < 1 {
+		numLayers = 1
 	}
 
 	// The code-block grid of every band comes from the tile geometry, not from
@@ -359,6 +474,9 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 					blocks: make([]*t2Block, bl.cbX*bl.cbY),
 					incl:   newTagTreeEnc(bl.cbX, bl.cbY),
 					imsb:   newTagTreeEnc(bl.cbX, bl.cbY),
+				}
+				for i := range bands[b].blocks {
+					bands[b].blocks[i] = &t2Block{lblock: 3, layers: make([]t2Contribution, numLayers)}
 				}
 			}
 			bandsFor[key{c, r}] = bands
@@ -393,35 +511,45 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 		//
 		// numBPS is the magnitude bit count, which HT carries per quad in U_q
 		// rather than here, so it does not enter this calculation.
-		const htNumBps = 2
-		zp := e.bandMb(j.res, j.bandIdx) + 1 - htNumBps
-		_ = numBPS[i]
+		//
+		// The MQ coder is the other case: it codes real magnitude bit-planes,
+		// so the count that positions them is the block's own numBPS and the
+		// zero bit-planes are the planes of Mb it leaves untouched. Using the
+		// HT constant there told every decoder to start two planes down, which
+		// is why OpenJPEG read our packets without complaint and reconstructed
+		// the wrong samples.
+		zp := e.bandMb(j.res, j.bandIdx) - numBPS[i]
+		if e.htCoder() {
+			const htNumBps = 2
+			zp = e.bandMb(j.res, j.bandIdx) + 1 - htNumBps
+		}
 		if zp < 0 {
 			zp = 0
 		}
-		// The HT cleanup pass is a single coding pass; the MQ coder emits one
-		// per bit-plane pass and the packet header must say how many, or a
-		// decoder mis-sizes the length field that follows.
-		np := 1
-		if i < len(passes) && passes[i] > 0 {
-			np = passes[i]
+		var tp []int
+		if i < len(truncPoints) {
+			tp = truncPoints[i]
 		}
-		bg.blocks[j.cby*bg.cbX+j.cbx] = &t2Block{
-			data:       encoded[i],
-			zeroPlanes: zp,
-			numPasses:  np,
+		cb := bg.blocks[j.cby*bg.cbX+j.cbx]
+		cb.zeroPlanes = zp
+		cb.layers = layerContributions(encoded[i], tp, numLayers, e.htCoder())
+	}
+
+	for _, bands := range bandsFor {
+		for _, bg := range bands {
+			bg.setTagTreeLeaves(numLayers)
 		}
 	}
 
 	var out []byte
-	for res := 0; res < numRes; res++ {
-		for c := 0; c < numComp; c++ {
-			bands := bandsFor[key{c, res}]
-			if bands == nil {
-				continue
-			}
-			out = append(out, encodePacket(bands, 0)...)
+	order := codestream.ProgressionOrder(e.options.ProgressionOrder)
+	forEachPacket(order, numLayers, numRes, numComp, func(layer, res, c int) bool {
+		bands := bandsFor[key{c, res}]
+		if bands == nil {
+			return true
 		}
-	}
+		out = append(out, encodePacket(bands, layer)...)
+		return true
+	})
 	return out
 }

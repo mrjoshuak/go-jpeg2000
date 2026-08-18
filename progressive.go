@@ -1,7 +1,6 @@
 package jpeg2000
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sort"
 
@@ -19,10 +18,10 @@ type DecoderOption func(*ProgressiveDecoder)
 // each call to Reconstruct produces the best image possible from the
 // packets received so far.
 //
-// The current implementation tracks packet reception and determines the
-// appropriate resolution reduction level. Code-block entropy decoding
-// will be added when the T2 packet encode pipeline produces proper
-// per-packet framing with code-block boundaries.
+// Each packet is decoded on its own: a conforming packet header names the
+// code-blocks that contribute and the bytes each contributes, so a packet
+// carries everything needed to place its coefficients. The resolutions that
+// have arrived fix the reduction level the reconstruction is produced at.
 type ProgressiveDecoder struct {
 	header        *codestream.Header
 	receivedPkts  map[PacketAddress][]byte
@@ -220,8 +219,9 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 				tcHeight := tc.Y1 - tc.Y0
 				decodePacketIntoTile(tc.Data, tcWidth, tcHeight,
 					tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
-					numRes, comp, res, pktData,
-					h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight())
+					numRes, res, pktData,
+					h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight(),
+					func(band int) int { return h.BandMb(res, band) }, h.IsHTJ2K())
 			}
 		}
 
@@ -339,22 +339,30 @@ func (d *ProgressiveDecoder) hasTileData(tile uint16) bool {
 	return false
 }
 
-// decodePacketIntoTile decodes a single (component, resolution) group's
-// mini-table into tile component data. The mini-table has the same format
-// as the full tile data: [2: numCB][per CB: 1 numBPS + 4 dataLen][encoded bytes].
+// decodePacketIntoTile decodes one conforming packet into tile component data.
+//
+// The packet is self-contained: its header names the contributing code-blocks,
+// their zero bit-planes and the byte count each contributes, so it can be
+// decoded on its own with no reference to the packets around it. That holds for
+// a single quality layer, which is what this decoder is fed; a later layer of a
+// multi-layer codestream continues state its predecessors established.
 //
 // x0, y0, x1, y1 are the tile component's absolute coordinates, which is what
 // the subband geometry is derived from; tcWidth and tcHeight bound the array
-// being written into.
+// being written into. mb reports the magnitude bit-planes the codestream
+// declares for a band of this resolution, which is what the zero-bit-plane
+// count in the header is measured against.
 func decodePacketIntoTile(
 	tileData []int32,
 	tcWidth, tcHeight int,
 	x0, y0, x1, y1 int,
-	numRes, comp, res int,
+	numRes, res int,
 	pktData []byte,
 	cbWidth, cbHeight int,
+	mb func(band int) int,
+	ht bool,
 ) {
-	if len(pktData) < 2 {
+	if len(pktData) == 0 {
 		return
 	}
 	// Every dimension below divides or bounds a loop; a zero would spin
@@ -366,59 +374,54 @@ func decodePacketIntoTile(
 		return
 	}
 
-	numCB := int(binary.BigEndian.Uint16(pktData[0:2]))
-	metaSize := 2 + numCB*5
-	if len(pktData) < metaSize {
+	bands := bandGridFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight)
+	if bands == nil {
+		return
+	}
+	r := newPktReader(pktData)
+	if err := readPacket(r, bands, 0, true); err != nil {
 		return
 	}
 
-	type decodeMeta struct {
-		numBPS  int
-		dataLen int
-	}
-	metas := make([]decodeMeta, numCB)
-	for i := 0; i < numCB; i++ {
-		off := 2 + i*5
-		metas[i].numBPS = clampBitPlanes(int(pktData[off]), false)
-		metas[i].dataLen = int(binary.BigEndian.Uint32(pktData[off+1 : off+5]))
-	}
-
-	cbIdx := 0
-	dataPos := metaSize
-
-	// Iterate the bands of this one resolution, in the order the encoder
-	// writes them; see tileBands in subband.go.
-	for _, bd := range tileBands(x0, y0, x1, y1, numRes, cbWidth, cbHeight) {
-		if bd.res != res {
-			continue
-		}
-		for cby := 0; cby < bd.cbY; cby++ {
-			for cbx := 0; cbx < bd.cbX; cbx++ {
-				if cbIdx >= numCB {
-					return
+	for b, bg := range bands {
+		sb := bg.sb
+		for cby := 0; cby < bg.cbY; cby++ {
+			by0 := max(sb.y0, (bg.firstY+cby)*cbHeight)
+			by1 := min(sb.y1, (bg.firstY+cby+1)*cbHeight)
+			for cbx := 0; cbx < bg.cbX; cbx++ {
+				cb := bg.blocks[cby*bg.cbX+cbx]
+				if !cb.included || len(cb.data) == 0 {
+					continue
 				}
-				meta := metas[cbIdx]
-				xOff, yOff, actualW, actualH := bd.blockRect(cbx, cby, cbWidth, cbHeight)
-
-				if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
-					dataPos >= 0 && meta.dataLen <= len(pktData)-dataPos {
-					cbData := pktData[dataPos : dataPos+meta.dataLen]
-					t1 := entropy.NewT1(actualW, actualH)
-					decoded := t1.Decode(cbData, meta.numBPS, bd.bandType)
-
-					for y := 0; y < actualH; y++ {
-						for x := 0; x < actualW; x++ {
-							dstX := xOff + x
-							dstY := yOff + y
-							if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
-								tileData[dstY*tcWidth+dstX] = decoded[y*actualW+x]
-							}
+				bx0 := max(sb.x0, (bg.firstX+cbx)*cbWidth)
+				bx1 := min(sb.x1, (bg.firstX+cbx+1)*cbWidth)
+				w, hh := bx1-bx0, by1-by0
+				if w <= 0 || hh <= 0 {
+					continue
+				}
+				numbps := mb(b) - cb.zeroPlanes
+				if numbps < 1 {
+					continue
+				}
+				var coeffs []int32
+				if ht {
+					dec := entropy.GetHTDecoder(w, hh)
+					coeffs = append([]int32(nil), dec.Decode(cb.data, numbps, bg.bandType)...)
+					entropy.PutHTDecoder(dec)
+				} else {
+					t1 := entropy.NewT1(w, hh)
+					coeffs = t1.Decode(cb.data, numbps, bg.bandType)
+				}
+				for yy := 0; yy < hh; yy++ {
+					for xx := 0; xx < w; xx++ {
+						dx := sb.ox + bx0 - sb.x0 + xx
+						dy := sb.oy + by0 - sb.y0 + yy
+						if dx < 0 || dy < 0 || dx >= tcWidth || dy >= tcHeight {
+							continue
 						}
+						tileData[dy*tcWidth+dx] = coeffs[yy*w+xx]
 					}
 				}
-
-				dataPos += meta.dataLen
-				cbIdx++
 			}
 		}
 	}

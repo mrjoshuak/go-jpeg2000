@@ -58,6 +58,17 @@ type encoder struct {
 	qcdSteps     []codestream.StepSize
 }
 
+// htCoder reports whether this codestream's code-blocks are HT-coded.
+//
+// The option asks for it, and a wide component requires it whether it was asked
+// for or not: a binary32 component's coefficients do not fit the int32 word the
+// Part 1 MQ coder in this package works on, so encodeCodeBlock uses the HT coder
+// for them regardless. Every piece of signalling that describes the block coder
+// has to follow the coder actually used — the CAP marker, the COD code-block
+// style, and the packet-header parameters — or the codestream declares Part 1
+// over HT-coded bytes, which no decoder can read.
+func (e *encoder) htCoder() bool { return e.options.HighThroughput || e.wide }
+
 // numResolutions returns the number of resolution levels to encode,
 // defaulting to six when the option is unset. Every part of the encoder must
 // agree on this value: the COD marker records it, and the DWT, the subband
@@ -69,10 +80,10 @@ func (e *encoder) numResolutions() int {
 	}
 	// Clamp to what the image can actually carry: each extra resolution halves
 	// the LL band, so a level whose band would be empty cannot be coded. A
-	// 16x16 image supports at most 5. This applies only on the conforming
-	// path — the private tile container never described the subband grid, so
-	// it tolerated degenerate levels, and clamping there would change the
-	// packet count that existing callers and tests observe.
+	// 16x16 image supports at most 5. This clamp applies to the HT path only,
+	// which is what OpenJPH's own limit follows; the Part 1 path codes the
+	// degenerate levels as the packets the layout says are present, and
+	// clamping there would change the packet count existing callers observe.
 	if !e.options.HighThroughput {
 		return n
 	}
@@ -104,7 +115,7 @@ func (e *encoder) numResolutions() int {
 func (e *encoder) codeBlockExponents() (int, int) {
 	xcb, ycb := e.options.CodeBlockSize.X, e.options.CodeBlockSize.Y
 
-	if e.options.HighThroughput {
+	if e.htCoder() {
 		xcb = log2BlockSize(e.options.HTBlockWidth)
 		ycb = log2BlockSize(e.options.HTBlockHeight)
 	}
@@ -767,7 +778,7 @@ func (e *encoder) generateCodestream() ([]byte, error) {
 	buf = append(buf, siz...)
 
 	// CAP marker (required for HTJ2K mode)
-	if e.options.HighThroughput {
+	if e.htCoder() {
 		cap := e.generateCAP()
 		buf = append(buf, cap...)
 	}
@@ -821,7 +832,7 @@ func (e *encoder) generateSIZ() []byte {
 	// conforming decoder reads the stream as baseline Part 1 and rejects the
 	// HT-coded block data; OpenJPH reports the file as "not a JPH file".
 	rsiz := uint16(e.options.Profile)
-	if e.options.HighThroughput {
+	if e.htCoder() {
 		rsiz |= 0x4000
 	}
 	binary.BigEndian.PutUint16(buf[4:6], rsiz)
@@ -913,7 +924,7 @@ func (e *encoder) generateCOD() []byte {
 
 	// Code-block style flags
 	cbStyle := uint8(0)
-	if e.options.HighThroughput {
+	if e.htCoder() {
 		cbStyle |= codestream.CodeBlockHT // Set HTJ2K flag (0x40)
 	}
 	buf[12] = cbStyle
@@ -1136,12 +1147,6 @@ type codeBlockResult struct {
 	truncPoints []int // byte position after each complete bit-plane
 }
 
-// cbMeta holds per-code-block metadata for the tile data table.
-type cbMeta struct {
-	numBPS  uint8
-	dataLen uint32
-}
-
 // computeNumBPS computes the number of bit-planes from absolute values.
 func computeNumBPS(data []int32) int {
 	maxVal := int32(0)
@@ -1167,83 +1172,6 @@ func computeNumBPS(data []int32) int {
 		maxVal >>= 1
 	}
 	return numBPS
-}
-
-// buildTileData constructs tile data with a metadata table followed by
-// concatenated code-block encoded data. Format:
-//
-//	uint16:  numCodeBlocks
-//	Per CB:  uint8 numBPS + uint32 dataLen
-//	Then:    concatenated encoded bytes
-func buildTileData(metas []cbMeta, encoded []byte) []byte {
-	numCB := len(metas)
-	tableSize := 2 + numCB*5
-	tileData := make([]byte, tableSize+len(encoded))
-	tileData[0] = byte(numCB >> 8)
-	tileData[1] = byte(numCB)
-	for i, m := range metas {
-		off := 2 + i*5
-		tileData[off] = m.numBPS
-		tileData[off+1] = byte(m.dataLen >> 24)
-		tileData[off+2] = byte(m.dataLen >> 16)
-		tileData[off+3] = byte(m.dataLen >> 8)
-		tileData[off+4] = byte(m.dataLen)
-	}
-	copy(tileData[tableSize:], encoded)
-	return tileData
-}
-
-// buildMultiLayerTileData constructs tile data with per-layer cumulative byte
-// counts for each code-block. Format:
-//
-//	uint16:  numCodeBlocks
-//	uint8:   numLayers
-//	Per CB:  uint8 numBPS + numLayers*uint32 cumulativeLen
-//	Then:    concatenated encoded bytes
-//
-// Each cumulativeLen[i] gives the number of bytes from this code-block
-// that belong to layers 0..i. Bit-planes are distributed evenly across
-// layers, with earlier layers getting the most significant bit-planes.
-func buildMultiLayerTileData(metas []cbMeta, truncPoints [][]int, encoded []byte, numLayers int) []byte {
-	numCB := len(metas)
-	tableSize := 2 + 1 + numCB*(1+numLayers*4)
-	tileData := make([]byte, tableSize+len(encoded))
-	tileData[0] = byte(numCB >> 8)
-	tileData[1] = byte(numCB)
-	tileData[2] = byte(numLayers)
-	for i, m := range metas {
-		off := 3 + i*(1+numLayers*4)
-		tileData[off] = m.numBPS
-		nbps := int(m.numBPS)
-		tp := truncPoints[i]
-		for lay := 0; lay < numLayers; lay++ {
-			var cumLen uint32
-			if nbps == 0 {
-				cumLen = 0
-			} else {
-				// Distribute bit-planes across layers proportionally.
-				bpCount := (lay + 1) * nbps / numLayers
-				if bpCount < 1 {
-					bpCount = 1 // always include at least the MSB
-				}
-				if bpCount > nbps {
-					bpCount = nbps
-				}
-				if bpCount > 0 && len(tp) >= bpCount {
-					cumLen = uint32(tp[bpCount-1])
-				} else if bpCount > 0 {
-					cumLen = m.dataLen
-				}
-			}
-			loff := off + 1 + lay*4
-			tileData[loff] = byte(cumLen >> 24)
-			tileData[loff+1] = byte(cumLen >> 16)
-			tileData[loff+2] = byte(cumLen >> 8)
-			tileData[loff+3] = byte(cumLen)
-		}
-	}
-	copy(tileData[tableSize:], encoded)
-	return tileData
 }
 
 // encodeTile encodes the whole image as a single tile-part.
@@ -1431,36 +1359,12 @@ func (e *encoder) encodeJobs(jobs []codeBlockJob) ([][]byte, []int, [][]int) {
 // assembleTileData turns the encoded code-blocks of one tile into the bytes
 // that follow its SOD marker.
 func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) []byte {
-	numLayers := e.options.NumLayers
-	if numLayers <= 0 {
-		numLayers = 1
-	}
-
-	metas := make([]cbMeta, len(jobs))
-	var allEncoded []byte
-	for i := range jobs {
-		metas[i] = cbMeta{numBPS: uint8(numBPS[i]), dataLen: uint32(len(encoded[i]))}
-		allEncoded = append(allEncoded, encoded[i]...)
-	}
-
-	if numLayers > 1 {
-		return buildMultiLayerTileData(metas, truncPoints, allEncoded, numLayers)
-	}
-
-	// Conforming T2 packets for HTJ2K, which is verified end to end: OpenJPH
-	// decodes this output to the exact source samples at 32, 64, 128 and 200
-	// pixels square. The Part 1 MQ path still uses the private container
-	// because its packet headers need a length per coding pass, which is not
-	// implemented yet; signalling one pass for a multi-pass MQ block mis-sizes
-	// the length field.
-	if e.options.HighThroughput {
-		passes := make([]int, len(truncPoints))
-		for i, tp := range truncPoints {
-			passes[i] = len(tp)
-		}
-		return e.buildStandardTileData(layout, jobs, encoded, numBPS, passes)
-	}
-	return buildTileData(metas, allEncoded)
+	// Conforming T2 packets, verified end to end against both references:
+	// OpenJPH decodes the HT output and OpenJPEG the Part 1 MQ output to the
+	// exact source samples. Quality layers are real packets too — one per
+	// (layer, resolution, component) — rather than the private per-layer
+	// length table this encoder used to write.
+	return e.buildStandardTileData(layout, jobs, encoded, numBPS, truncPoints)
 }
 
 // extractCodeBlock copies one code-block out of a tile-component's
@@ -1601,7 +1505,7 @@ func (e *encoder) encodeCodeBlock(job codeBlockJob) ([]byte, []int) {
 		out := entropy.EncodeCleanup64(job.data64, width, height)
 		return out, []int{len(out)}
 	}
-	if e.options.HighThroughput {
+	if e.htCoder() {
 		ht := entropy.GetHTEncoder(width, height)
 		ht.SetData(data)
 		encoded := ht.Encode(bandType)

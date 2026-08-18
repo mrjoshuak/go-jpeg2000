@@ -203,11 +203,13 @@ func parseMainHeader(cs []byte) (*codestream.Header, int, error) {
 
 // indexTilePackets indexes all packets within a tile's data region.
 //
-// The encoder writes code-block data in a flat C->R->B->CB order within each
-// tile, preceded by a metadata table: [2: numCB][per CB: 1 numBPS + 4 dataLen].
-// This function parses that table to determine exact per-code-block sizes,
-// then groups code-blocks by (component, resolution) to build self-contained
-// per-packet mini-tables that can be independently decoded.
+// A conforming packet is self-describing: a tag-tree coded header naming the
+// code-blocks that contribute, their zero bit-planes and the byte count of
+// each, followed by those bytes. Its extent is therefore found by parsing it,
+// and the bytes from one packet's start to the next are exactly that packet.
+//
+// This used to parse a private table that only this library ever wrote, and
+// returned empty packets for every conforming codestream.
 func (idx *PacketIndex) indexTilePackets(
 	header *codestream.Header,
 	tileIndex uint16,
@@ -260,18 +262,18 @@ func (idx *PacketIndex) indexTilePackets(
 
 	tileData := cs[dataStart:dataEnd]
 
-	// Compute expected number of code-blocks (same logic as decodeTileData)
+	// Walk the tile's packets. A conforming packet is self-describing — a
+	// tag-tree coded header naming the contributing code-blocks and the byte
+	// count of each — so its extent is found by parsing it, and the bytes
+	// between one packet's start and the next are exactly that packet.
+	//
+	// This used to parse a private table this library wrote and no other
+	// implementation produces, and returned empty packets for everything else.
 	type crKey struct {
 		comp int
 		res  int
 	}
-	type crCodeBlockInfo struct {
-		numCodeBlocks int
-	}
-	var crOrder []crKey // encoder write order: C→R
-	crInfos := make(map[crKey]crCodeBlockInfo)
-	expectedCB := 0
-
+	grids := make(map[crKey][]*bandGeometry, numComp*numRes)
 	for c := 0; c < numComp; c++ {
 		comp := header.ComponentInfo[c]
 		// The subband partition is derived from the tile component's absolute
@@ -282,100 +284,15 @@ func (idx *PacketIndex) indexTilePackets(
 		cy0 := ceilDivInt(ty0, int(comp.SubsamplingY))
 		cx1 := ceilDivInt(tx1, int(comp.SubsamplingX))
 		cy1 := ceilDivInt(ty1, int(comp.SubsamplingY))
-
-		perRes := make([]int, numRes)
-		for _, bd := range tileBands(cx0, cy0, cx1, cy1, numRes, cbWidth, cbHeight) {
-			perRes[bd.res] += bd.cbX * bd.cbY
-		}
 		for r := 0; r < numRes; r++ {
-			key := crKey{c, r}
-			crOrder = append(crOrder, key)
-			crInfos[key] = crCodeBlockInfo{numCodeBlocks: perRes[r]}
-			expectedCB += perRes[r]
+			grids[crKey{c, r}] = bandGridFor(cx0, cy0, cx1, cy1, numRes, r, cbWidth, cbHeight)
 		}
 	}
 
-	// Parse metadata table
-	if len(tileData) < 2 {
-		return idx.addEmptyPackets(header, tileIndex, numComp, numRes, numLayers)
-	}
+	reader := newPktReader(tileData)
 
-	numCB := int(binary.BigEndian.Uint16(tileData[0:2]))
-	if numCB != expectedCB {
-		// Not our format — fall back to empty packets
-		return idx.addEmptyPackets(header, tileIndex, numComp, numRes, numLayers)
-	}
-
-	metaSize := 2 + numCB*5
-	if len(tileData) < metaSize {
-		return idx.addEmptyPackets(header, tileIndex, numComp, numRes, numLayers)
-	}
-
-	// Read per-code-block metadata
-	type cbMeta struct {
-		numBPS  uint8
-		dataLen uint32
-	}
-	metas := make([]cbMeta, numCB)
-	for i := 0; i < numCB; i++ {
-		off := 2 + i*5
-		metas[i].numBPS = tileData[off]
-		metas[i].dataLen = binary.BigEndian.Uint32(tileData[off+1 : off+5])
-	}
-
-	// Build self-contained mini-tables per (C,R) group.
-	// Each mini-table has the same format as the full tile data:
-	// [2: groupNumCB][per CB: 1 numBPS + 4 dataLen][encoded bytes for these CBs]
-	crData := make(map[crKey][]byte)
-	cbIdx := 0
-	dataPos := metaSize
-
-	for _, key := range crOrder {
-		info := crInfos[key]
-		groupNum := info.numCodeBlocks
-		// groupNum is derived from tile geometry; only its sum is known to
-		// equal numCB, so an individual group is bounded explicitly before it
-		// sizes the two slices below.
-		if groupNum < 0 || groupNum > numCB {
-			return fmt.Errorf("tile %d: code-block group of %d is outside the %d code-blocks the tile declares",
-				tileIndex, groupNum, numCB)
-		}
-
-		// Collect metadata and encoded bytes for this group
-		groupMetaSize := 2 + groupNum*5
-		var groupEncoded []byte
-		groupMetas := make([]cbMeta, groupNum)
-
-		for i := 0; i < groupNum; i++ {
-			if cbIdx >= numCB {
-				break
-			}
-			m := metas[cbIdx]
-			groupMetas[i] = m
-			if int(m.dataLen) > 0 && dataPos+int(m.dataLen) <= len(tileData) {
-				groupEncoded = append(groupEncoded, tileData[dataPos:dataPos+int(m.dataLen)]...)
-			}
-			dataPos += int(m.dataLen)
-			cbIdx++
-		}
-
-		// Build mini-table
-		miniTable := make([]byte, groupMetaSize+len(groupEncoded))
-		miniTable[0] = byte(groupNum >> 8)
-		miniTable[1] = byte(groupNum)
-		for i, m := range groupMetas {
-			off := 2 + i*5
-			miniTable[off] = m.numBPS
-			miniTable[off+1] = byte(m.dataLen >> 24)
-			miniTable[off+2] = byte(m.dataLen >> 16)
-			miniTable[off+3] = byte(m.dataLen >> 8)
-			miniTable[off+4] = byte(m.dataLen)
-		}
-		copy(miniTable[groupMetaSize:], groupEncoded)
-		crData[key] = miniTable
-	}
-
-	// Generate packet addresses in progression order and assign data
+	// Generate packet addresses in progression order and record each packet's
+	// own bytes.
 	order := codestream.ProgressionOrder(header.CodingStyle.ProgressionOrder)
 
 	addPacket := func(l, r, c, p int) {
@@ -386,93 +303,28 @@ func (idx *PacketIndex) indexTilePackets(
 			Component:  uint8(c),
 			Precinct:   uint16(p),
 		}
-		data := crData[crKey{c, r}]
+		var data []byte
+		bands := grids[crKey{c, r}]
+		if bands != nil && !reader.overrun && reader.pos < len(tileData) {
+			from := reader.pos
+			if err := readPacket(reader, bands, l, true); err == nil && !reader.overrun {
+				data = tileData[from:reader.pos]
+			} else {
+				// A packet that does not parse ends the walk: the position of
+				// every packet after it is unknown.
+				reader.overrun = true
+			}
+		}
 		entryIdx := len(idx.entries)
 		idx.entries = append(idx.entries, packetEntry{addr: addr, data: data})
 		idx.addrMap[addr] = entryIdx
 	}
 
-	for l := 0; l < numLayers; l++ {
-		switch order {
-		case codestream.LRCP:
-			for r := 0; r < numRes; r++ {
-				for c := 0; c < numComp; c++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		case codestream.RLCP:
-			for r := 0; r < numRes; r++ {
-				for c := 0; c < numComp; c++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		case codestream.RPCL:
-			for r := 0; r < numRes; r++ {
-				for c := 0; c < numComp; c++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		case codestream.PCRL:
-			for c := 0; c < numComp; c++ {
-				for r := 0; r < numRes; r++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		case codestream.CPRL:
-			for c := 0; c < numComp; c++ {
-				for r := 0; r < numRes; r++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		}
-	}
+	forEachPacket(order, numLayers, numRes, numComp, func(l, r, c int) bool {
+		addPacket(l, r, c, 0)
+		return true
+	})
 
-	return nil
-}
-
-// addEmptyPackets adds empty packet entries for all expected packets.
-func (idx *PacketIndex) addEmptyPackets(
-	header *codestream.Header,
-	tileIndex uint16,
-	numComp, numRes, numLayers int,
-) error {
-	order := codestream.ProgressionOrder(header.CodingStyle.ProgressionOrder)
-
-	addPacket := func(l, r, c, p int) {
-		addr := PacketAddress{
-			Tile:       tileIndex,
-			Resolution: uint8(r),
-			Layer:      uint16(l),
-			Component:  uint8(c),
-			Precinct:   uint16(p),
-		}
-		entryIdx := len(idx.entries)
-		idx.entries = append(idx.entries, packetEntry{addr: addr})
-		idx.addrMap[addr] = entryIdx
-	}
-
-	for l := 0; l < numLayers; l++ {
-		switch order {
-		case codestream.LRCP, codestream.RLCP, codestream.RPCL:
-			for r := 0; r < numRes; r++ {
-				for c := 0; c < numComp; c++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		case codestream.PCRL:
-			for c := 0; c < numComp; c++ {
-				for r := 0; r < numRes; r++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		case codestream.CPRL:
-			for c := 0; c < numComp; c++ {
-				for r := 0; r < numRes; r++ {
-					addPacket(l, r, c, 0)
-				}
-			}
-		}
-	}
 	return nil
 }
 

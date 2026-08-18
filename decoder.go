@@ -12,7 +12,6 @@ import (
 
 	"github.com/mrjoshuak/go-jpeg2000/internal/box"
 	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
-	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
 	"github.com/mrjoshuak/go-jpeg2000/internal/mct"
 	"github.com/mrjoshuak/go-jpeg2000/internal/tcd"
 )
@@ -658,190 +657,17 @@ func (d *decoder) indexTileParts() map[int][2]int {
 	return out
 }
 
-// decodeTileData parses the tile data metadata table, decodes each
-// code-block via T1, and places decoded coefficients into the tile
-// component data arrays at the correct subband positions.
+// decodeTileData decodes one tile's packets into its component coefficient
+// arrays.
 //
-// This only works for codestreams produced by our encoder, which uses a
-// custom metadata table format. For external codestreams (T2 packets),
-// the function validates the format and returns nil if it doesn't match.
-//
-// qualityLimit > 0 limits decoding to that many quality layers (V2 format
-// only; V1 format ignores this since it has no layer structure).
+// qualityLimit > 0 stops the contributions after that many quality layers,
+// which is what Config.QualityLayers asks for.
 func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) error {
 	tileData := d.findTileData(tileIdx)
-	if len(tileData) < 2 {
+	if len(tileData) == 0 {
 		return nil // No tile data
 	}
-
-	h := d.header
-	wide := h.WideSamples()
-	numRes := int(h.CodingStyle.NumDecompositions) + 1
-	if numRes < 1 || numRes > codestream.MaxDecompositionLevels+1 {
-		return fmt.Errorf("jpeg2000: COD declares %d resolution levels, above the %d limit",
-			numRes, codestream.MaxDecompositionLevels+1)
-	}
-	// Use same code-block size as encoder writes to COD. CodeBlockWidth and
-	// CodeBlockHeight clamp the file-supplied exponent, so these are always in
-	// [4,1024]; a zero would make the code-block walk below never terminate.
-	cbWidth := h.CodingStyle.CodeBlockWidth()
-	cbHeight := h.CodingStyle.CodeBlockHeight()
-	if cbWidth <= 0 || cbHeight <= 0 {
-		return fmt.Errorf("jpeg2000: COD declares a %dx%d code-block", cbWidth, cbHeight)
-	}
-
-	// Compute expected number of code blocks to validate format. The geometry
-	// walk is the encoder's, from the tile-component's absolute coordinates.
-	expectedCB := 0
-	for c := 0; c < len(tile.Components); c++ {
-		tc := tile.Components[c]
-		if tc == nil {
-			continue
-		}
-		for _, bd := range tileBands(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1, numRes, cbWidth, cbHeight) {
-			expectedCB += bd.cbX * bd.cbY
-		}
-	}
-
-	// Parse metadata table — detect V1 vs V2 format.
-	numCB := int(binary.BigEndian.Uint16(tileData[0:2]))
-	if numCB != expectedCB {
-		// Not this library's private container, so the tile data is what the
-		// standard actually specifies: a sequence of T2 packets. Decode those.
-		// This used to `return nil`, which produced a blank image with no
-		// error for every conforming file.
-		return d.decodeStandardTileData(tile, tileData)
-	}
-
-	// Check if this is V2 format (multi-layer): the header's NumLayers > 1
-	// and a numLayers byte follows numCB.
-	headerNumLayers := h.CodingStyle.Layers()
-	isV2 := headerNumLayers > 1
-
-	type decodeMeta struct {
-		numBPS  int
-		dataLen int // bytes to decode (may be truncated by quality limit)
-		fullLen int // total bytes in the stream (for advancing dataPos)
-	}
-	metas := make([]decodeMeta, numCB)
-	var metaSize int
-
-	if isV2 {
-		if len(tileData) < 3 {
-			return nil
-		}
-		numLayers := int(tileData[2])
-		if numLayers < 1 {
-			// A zero layer count would index the layer table at a negative
-			// offset from each entry.
-			return nil
-		}
-		metaSize = 3 + numCB*(1+numLayers*4)
-		if len(tileData) < metaSize {
-			return nil
-		}
-		// Determine effective layer limit
-		effLayer := numLayers
-		if qualityLimit > 0 && qualityLimit < numLayers {
-			effLayer = qualityLimit
-		}
-		for i := 0; i < numCB; i++ {
-			off := 3 + i*(1+numLayers*4)
-			metas[i].numBPS = clampBitPlanes(int(tileData[off]), wide)
-			// Effective layer cumulative length (what we decode)
-			loff := off + 1 + (effLayer-1)*4
-			metas[i].dataLen = int(binary.BigEndian.Uint32(tileData[loff : loff+4]))
-			// Full data length (last layer, for advancing dataPos)
-			foff := off + 1 + (numLayers-1)*4
-			metas[i].fullLen = int(binary.BigEndian.Uint32(tileData[foff : foff+4]))
-		}
-	} else {
-		metaSize = 2 + numCB*5
-		if len(tileData) < metaSize {
-			return nil
-		}
-		for i := 0; i < numCB; i++ {
-			off := 2 + i*5
-			metas[i].numBPS = clampBitPlanes(int(tileData[off]), wide)
-			dl := int(binary.BigEndian.Uint32(tileData[off+1 : off+5]))
-			metas[i].dataLen = dl
-			metas[i].fullLen = dl
-		}
-	}
-
-	// Iterate code-blocks in the same order as the encoder: component, then
-	// the subband walk both sides share.
-	cbIdx := 0
-	dataPos := metaSize
-
-	for c := 0; c < len(tile.Components); c++ {
-		tc := tile.Components[c]
-		if tc == nil {
-			continue
-		}
-		tcWidth := tc.X1 - tc.X0
-		tcHeight := tc.Y1 - tc.Y0
-
-		for _, bd := range tileBands(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1, numRes, cbWidth, cbHeight) {
-			for cby := 0; cby < bd.cbY; cby++ {
-				for cbx := 0; cbx < bd.cbX; cbx++ {
-					if cbIdx >= numCB {
-						return nil
-					}
-					meta := metas[cbIdx]
-					xOff, yOff, actualW, actualH := bd.blockRect(cbx, cby, cbWidth, cbHeight)
-
-					if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
-						dataPos >= 0 && meta.dataLen <= len(tileData)-dataPos {
-						cbData := tileData[dataPos : dataPos+meta.dataLen]
-						// Decode with the block coder the codestream
-						// declares. A stream whose CAP marker announces
-						// Part 15 carries HT-coded blocks, and running the
-						// Part 1 MQ decoder over them silently yields
-						// nothing rather than failing.
-						var decoded []int32
-						var decoded64 []int64
-						switch {
-						case wide:
-							htDec := entropy.GetHTDecoder(actualW, actualH)
-							decoded64 = append([]int64(nil),
-								htDec.Decode64(cbData, meta.numBPS, bd.bandType)...)
-							entropy.PutHTDecoder(htDec)
-						case h.IsHTJ2K():
-							htDec := entropy.GetHTDecoder(actualW, actualH)
-							decoded = htDec.Decode(cbData, meta.numBPS, bd.bandType)
-							entropy.PutHTDecoder(htDec)
-						default:
-							t1 := entropy.NewT1(actualW, actualH)
-							decoded = t1.Decode(cbData, meta.numBPS, bd.bandType)
-						}
-
-						for y := 0; y < actualH; y++ {
-							for x := 0; x < actualW; x++ {
-								dstX := xOff + x
-								dstY := yOff + y
-								// The subband offset is derived from
-								// file-supplied geometry, so the low end
-								// is checked as well as the high end.
-								if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
-									if wide {
-										tc.Data64[dstY*tcWidth+dstX] = decoded64[y*actualW+x]
-									} else {
-										tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
-									}
-								}
-							}
-						}
-					}
-
-					dataPos += meta.fullLen
-					cbIdx++
-				}
-			}
-		}
-	}
-
-	return nil
+	return d.decodeStandardTileData(tile, tileData, qualityLimit)
 }
 
 // clampBitPlanes bounds a file-supplied magnitude bit-plane count against the

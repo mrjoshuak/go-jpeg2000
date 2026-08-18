@@ -122,6 +122,49 @@ for path, nc in ((sys.argv[1], 1), (sys.argv[2], 3)):
     open(path, 'wb').write(b''.join(out))
 PYEOF
 
+# Compare a decoded PGM/PPM against the reference raster, tolerating the
+# comment line opj_decompress writes into its header. Prints "exact" or a
+# description of the difference.
+cmp_raster() {
+	python3 - "$1" "$2" <<'PYEOF'
+import sys
+
+def rd(p):
+    d = open(p, 'rb').read()
+    i, t = 0, []
+    while len(t) < 4:
+        while d[i:i+1] in b' \n\t\r':
+            i += 1
+        if d[i:i+1] == b'#':
+            while d[i:i+1] != b'\n':
+                i += 1
+            continue
+        s = i
+        while d[i:i+1] not in b' \n\t\r':
+            i += 1
+        t.append(d[s:i])
+    return t, d[i+1:]
+
+ta, a = rd(sys.argv[1])
+tb, b = rd(sys.argv[2])
+if ta[0] != tb[0]:
+    print("format %s where the reference raster is %s" % (ta[0].decode(), tb[0].decode()))
+    sys.exit(1)
+if ta[3] != tb[3]:
+    print("maxval %s where the reference raster says %s" % (ta[3].decode(), tb[3].decode()))
+    sys.exit(1)
+if len(a) != len(b):
+    print("raster %d bytes vs %d" % (len(a), len(b)))
+    sys.exit(1)
+n = sum(1 for x, y in zip(a, b) if x != y)
+if n:
+    print("%d/%d samples differ, max delta %d"
+          % (n, len(b), max(abs(x - y) for x, y in zip(a, b))))
+    sys.exit(1)
+print("exact")
+PYEOF
+}
+
 if ! have ojph_compress || ! have ojph_expand; then
 	gap "OpenJPH not installed; HTJ2K interoperability unchecked"
 else
@@ -584,6 +627,301 @@ fi
 if ! have opj_compress; then
 	gap "OpenJPEG not installed; Part 1 interoperability unchecked"
 else
+	# WRITE side, Part 1 MQ: does the Part 1 reference read what we produce,
+	# exactly? This is the direction that was unreachable until the encoder
+	# emitted conforming packets for the MQ block coder -- it wrote a private
+	# container instead, which nothing outside this repository can parse.
+	#
+	# The probe drives the public API, so what is measured is what a caller
+	# gets: HighThroughput unset is Part 1, and the same entry point carries
+	# tiles, quality layers, 16-bit samples and three components.
+	cat >"$WORK/p1enc.go" <<'GOEOF'
+//go:build ignore
+
+package main
+
+// p1enc <out.j2k> <size> <nres> [tile] [comps] [depth] [layers] [quality] [order]
+//
+// Encodes a Part 1 (MQ) codestream through the public API and writes the source
+// raster beside it as a PGM or PPM.
+
+import (
+	"bufio"
+	"fmt"
+	"image"
+	"image/color"
+	"os"
+	"strconv"
+
+	jp2 "github.com/mrjoshuak/go-jpeg2000"
+)
+
+// rgbColor is an alpha-free colour. The encoder picks its component count from
+// whether the image's colour model can represent transparency, so this is what
+// makes a three-component image rather than a four-component one.
+type rgbColor struct{ R, G, B uint8 }
+
+func (c rgbColor) RGBA() (r, g, b, a uint32) {
+	return uint32(c.R) * 0x101, uint32(c.G) * 0x101, uint32(c.B) * 0x101, 0xFFFF
+}
+
+var rgbModel = color.ModelFunc(func(c color.Color) color.Color {
+	r, g, b, _ := c.RGBA()
+	return rgbColor{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8)}
+})
+
+type rgbImage struct {
+	pix  []rgbColor
+	rect image.Rectangle
+}
+
+func (m *rgbImage) ColorModel() color.Model { return rgbModel }
+func (m *rgbImage) Bounds() image.Rectangle { return m.rect }
+func (m *rgbImage) At(x, y int) color.Color {
+	if !image.Pt(x, y).In(m.rect) {
+		return rgbColor{}
+	}
+	return m.pix[(y-m.rect.Min.Y)*m.rect.Dx()+(x-m.rect.Min.X)]
+}
+
+func arg(i, def int) int {
+	if i >= len(os.Args) {
+		return def
+	}
+	v, err := strconv.Atoi(os.Args[i])
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func main() {
+	out := os.Args[1]
+	size := arg(2, 32)
+	nres := arg(3, 3)
+	tile := arg(4, 0)
+	comps := arg(5, 1)
+	depth := arg(6, 8)
+	layers := arg(7, 1)
+	quality := arg(8, 0) // 0 asks for lossless
+	order := arg(9, 0)   // Table A.16: 0=LRCP, 1=RLCP, 2=RPCL, 3=PCRL, 4=CPRL
+
+	maxv := (1 << depth) - 1
+	sample := func(x, y, c int) int {
+		v := (20 + ((x*13+y*3+c*57)%200))*maxv/255 + ((x^y)%3)*(maxv/32)
+		if v > maxv {
+			v = maxv
+		}
+		return v
+	}
+
+	var img image.Image
+	switch {
+	case comps == 3:
+		m := &rgbImage{rect: image.Rect(0, 0, size, size), pix: make([]rgbColor, size*size)}
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				m.pix[y*size+x] = rgbColor{
+					uint8(sample(x, y, 0)), uint8(sample(x, y, 1)), uint8(sample(x, y, 2))}
+			}
+		}
+		img = m
+	case depth > 8:
+		m := image.NewGray16(image.Rect(0, 0, size, size))
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				m.SetGray16(x, y, color.Gray16{Y: uint16(sample(x, y, 0))})
+			}
+		}
+		img = m
+	default:
+		m := image.NewGray(image.Rect(0, 0, size, size))
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				m.SetGray(x, y, color.Gray{Y: uint8(sample(x, y, 0))})
+			}
+		}
+		img = m
+	}
+
+	opts := &jp2.Options{
+		HighThroughput: false, // Part 1: the MQ block coder
+		Lossless:       quality == 0,
+		Format:         jp2.FormatJ2K,
+		NumResolutions: nres,
+		NumLayers:      layers,
+
+		ProgressionOrder: jp2.ProgressionOrder(order),
+	}
+	if quality > 0 {
+		opts.Quality = quality
+	}
+	if tile > 0 {
+		opts.TileSize = image.Point{X: tile, Y: tile}
+	}
+	f, err := os.Create(out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := jp2.Encode(f, img, opts); err != nil {
+		fmt.Fprintln(os.Stderr, "encode:", err)
+		os.Exit(1)
+	}
+	f.Close()
+
+	magic, ext := "P5", ".pgm"
+	if comps == 3 {
+		magic, ext = "P6", ".ppm"
+	}
+	rf, err := os.Create(out + ext)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	w := bufio.NewWriter(rf)
+	fmt.Fprintf(w, "%s\n%d %d\n%d\n", magic, size, size, maxv)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			for c := 0; c < comps; c++ {
+				v := sample(x, y, c)
+				if depth > 8 {
+					w.WriteByte(byte(v >> 8))
+				}
+				w.WriteByte(byte(v))
+			}
+		}
+	}
+	w.Flush()
+	rf.Close()
+	fmt.Println(out + ext)
+}
+GOEOF
+
+	# name size nres tile comps depth layers quality
+	p1_write() {
+		local name=$1
+		shift
+		local ext=pgm
+		[ "${4:-1}" = 3 ] && ext=ppm
+		local f="$WORK/p1w_$name.j2k"
+		if ! ref=$(go run "$WORK/p1enc.go" "$f" "$@" 2>&1); then
+			fail "write Part 1 MQ $name: our encoder failed: $(echo "$ref" | head -1)"
+			return
+		fi
+		if ! err=$(opj_decompress -i "$f" -o "$f.out.$ext" 2>&1); then
+			fail "write Part 1 MQ $name: OpenJPEG refused our codestream: $(echo "$err" | grep -i error | head -1 | cut -c1-70)"
+			return
+		fi
+		if d=$(cmp_raster "$f.out.$ext" "$ref"); then
+			pass "write Part 1 MQ $name: OpenJPEG decodes it exactly"
+		else
+			fail "write Part 1 MQ $name: $d"
+		fi
+	}
+
+	# Control: the oracle must round-trip its own output, or a failure below
+	# says nothing about this library.
+	if opj_compress -i "$WORK/src32.pgm" -o "$WORK/p1ctl.j2k" -n 3 -r 1 >/dev/null 2>&1 &&
+		opj_decompress -i "$WORK/p1ctl.j2k" -o "$WORK/p1ctl.pgm" >/dev/null 2>&1 &&
+		cmp_raster "$WORK/p1ctl.pgm" "$WORK/src32.pgm" >/dev/null; then
+		pass "Part 1 oracle control: OpenJPEG round-trips its own codestream exactly"
+	else
+		gap "Part 1 oracle control failed; the write checks below would be meaningless"
+	fi
+
+	# Sizes and decomposition depths. 17 and 25 leave subbands with an odd
+	# width, and six resolutions on a 17-pixel image reduces the LL band to a
+	# single sample.
+	for size in 17 25 32 64 127 200; do
+		for nres in 1 2 3 6; do
+			p1_write "${size}px_${nres}res" "$size" "$nres"
+		done
+	done
+
+	# Tiled: 16 and 32 divide 64 evenly, while 20, 24 and 13 leave a short last
+	# row and column, and 20 and 13 put whole tiles at origins that are odd
+	# once halved.
+	for tile in 16 32 20 24 13; do
+		p1_write "tile$tile" 64 3 "$tile"
+	done
+
+	# Three components (the reversible colour transform) and 16-bit samples.
+	p1_write "rgb8" 64 3 0 3 8
+	p1_write "gray16" 64 3 0 1 16
+
+	# Real quality layers. Every layer is decoded here, so what is asserted is
+	# that splitting a block's coding passes across packets loses nothing.
+	for layers in 2 3 8; do
+		p1_write "layers$layers" 64 3 0 1 8 "$layers"
+	done
+	p1_write "layers4_tiled" 64 3 16 1 8 4
+
+	# Quality layers as an external decoder sees them, one prefix at a time.
+	# Decoding every layer being exact says the split loses nothing; it does not
+	# say the split means anything, because a single layer holding everything
+	# would pass it too. This asserts that each further layer of ours improves
+	# what OpenJPEG reconstructs, which only holds if the coding passes really
+	# are distributed across the packets.
+	f="$WORK/p1w_layers8.j2k"
+	if [ -f "$f" ]; then
+		prev=""
+		monotone=1
+		detail=""
+		for l in 1 2 4 6 8; do
+			opj_decompress -i "$f" -o "$f.l$l.pgm" -l "$l" >/dev/null 2>&1
+			mse=$(python3 - "$f.l$l.pgm" "$f.pgm" <<'PYEOF'
+import sys
+
+def rd(p):
+    d = open(p, 'rb').read()
+    i, t = 0, []
+    while len(t) < 4:
+        while d[i:i+1] in b' \n\t\r':
+            i += 1
+        if d[i:i+1] == b'#':
+            while d[i:i+1] != b'\n':
+                i += 1
+            continue
+        s = i
+        while d[i:i+1] not in b' \n\t\r':
+            i += 1
+        t.append(d[s:i])
+    return d[i+1:]
+
+a, b = rd(sys.argv[1]), rd(sys.argv[2])
+print("%.3f" % (sum((x - y) ** 2 for x, y in zip(a, b)) / max(len(b), 1)))
+PYEOF
+			)
+			detail="$detail l$l=$mse"
+			if [ -n "$prev" ] && ! python3 -c "import sys; sys.exit(0 if float('$mse') <= float('$prev') + 1e-9 else 1)"; then
+				monotone=0
+			fi
+			prev=$mse
+		done
+		if [ "$monotone" = 1 ] && [ "$prev" = "0.000" ]; then
+			pass "write Part 1 MQ 8 quality layers: each prefix OpenJPEG decodes improves, and all eight are exact ($detail )"
+		else
+			fail "write Part 1 MQ 8 quality layers: prefixes do not improve monotonically to exact ($detail )"
+		fi
+	fi
+
+	# Every progression order, with four layers and three components so that
+	# each of layer, resolution and component takes a turn as the outermost
+	# index. A single layer and a single component collapse all five orders
+	# onto the same sequence, which is what let a layer-major walk pass for
+	# every one of them.
+	for order in 0 1 2 3 4; do
+		p1_write "order${order}_layers4" 64 3 0 3 8 4 0 "$order"
+	done
+
+	# Irreversible 9/7 at quality 100, where the step sizes are sized for half
+	# a sample of error, so a decoder that rounds to an integer must return the
+	# source exactly.
+	for nres in 1 3 5; do
+		p1_write "lossy_${nres}res_q100" 64 "$nres" 0 1 8 1 100
+	done
+
 	for src in src src32; do
 		for n in 1 2 3; do
 			f="$WORK/p_${src}_$n.j2k"
@@ -598,6 +936,78 @@ else
 				fail "read Part 1 MQ $src -n $n: $out samples differ"
 			fi
 		done
+	done
+
+	# WRITE side, HT with quality layers. Multiple layers used to be written as
+	# a private per-layer length table rather than as packets; they are real
+	# packets now, one per (layer, resolution, component), with each block's
+	# coding passes split across them.
+	#
+	# OpenJPH is not the oracle here: it refuses any codestream with more than
+	# one quality layer ("The current implementation supports 1 quality layer
+	# only"). OpenJPEG reads both HT block coding and multiple layers, so it is
+	# what gates this corner.
+	cat >"$WORK/enclayers.go" <<'GOEOF'
+//go:build ignore
+
+package main
+
+import (
+	"fmt"
+	"image"
+	"image/color"
+	"os"
+	"strconv"
+
+	jp2 "github.com/mrjoshuak/go-jpeg2000"
+)
+
+func main() {
+	size, _ := strconv.Atoi(os.Args[2])
+	layers, _ := strconv.Atoi(os.Args[3])
+	img := image.NewGray(image.Rect(0, 0, size, size))
+	raw := make([]byte, size*size)
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			v := uint8(20 + ((x*13 + y*3) % 200))
+			img.Set(x, y, color.Gray{Y: v})
+			raw[y*size+x] = v
+		}
+	}
+	f, err := os.Create(os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	if err := jp2.Encode(f, img, &jp2.Options{
+		HighThroughput: true, Lossless: true, NumLayers: layers,
+		Format: jp2.FormatJ2K, NumResolutions: 3,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "encode:", err)
+		os.Exit(1)
+	}
+	ref, _ := os.Create(os.Args[1] + ".pgm")
+	fmt.Fprintf(ref, "P5\n%d %d\n255\n", size, size)
+	ref.Write(raw)
+	ref.Close()
+}
+GOEOF
+
+	for layers in 2 3 8; do
+		f="$WORK/wl_$layers.j2c"
+		if ! go run "$WORK/enclayers.go" "$f" 64 "$layers" >/dev/null 2>&1; then
+			fail "write HTJ2K $layers quality layers: our encoder failed"
+			continue
+		fi
+		if ! err=$(opj_decompress -i "$f" -o "$f.out.pgm" 2>&1); then
+			fail "write HTJ2K $layers quality layers: OpenJPEG refused our codestream: $(echo "$err" | grep -i error | head -1 | cut -c1-70)"
+			continue
+		fi
+		if d=$(cmp_raster "$f.out.pgm" "$f.pgm"); then
+			pass "write HTJ2K $layers quality layers: OpenJPEG decodes it exactly"
+		else
+			fail "write HTJ2K $layers quality layers: $d"
+		fi
 	done
 
 	# Tiled Part 1: same geometry, MQ-coded rather than HT.
