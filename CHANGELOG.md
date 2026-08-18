@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-08-18
+
+### Documentation
+- The feature list contradicted the rest of the README: it advertised "full
+  cleanup + refinement passes (SPP/MRP)" while the implementation-status table
+  and the interoperability section both recorded that the encoder emits the
+  cleanup pass only. Corrected to say what the code does — the encoder writes
+  cleanup, the decoder reads cleanup, SPP and MRP.
+- Tiling, interoperable output and the widened float range were implemented in
+  1.4.0 but never listed as features. Added, with the guarantees each one
+  actually carries.
+- `HTJ2K_REQUIREMENTS.md` still described the pre-implementation state as
+  current. Marked superseded, with the original assessment retained as the
+  specification that was worked to.
+- `CONTRIBUTING.md` now documents `scripts/validate.sh` and why a round-trip
+  test is not sufficient evidence in this codebase.
+
 ## [1.4.0] - 2026-08-18
 
 This release makes the library interoperable. Before it, no other implementation

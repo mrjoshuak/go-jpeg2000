@@ -92,6 +92,43 @@ func Decode(r io.Reader) (image.Image, error) {
 
 ### Testing
 
+Run the validation gate before opening a pull request:
+
+```bash
+bash scripts/validate.sh
+```
+
+It builds, vets, runs the suite under the race detector, and then checks the
+codestreams this library writes and reads against OpenJPH and OpenJPEG. Install
+those first (`brew install openjph openjpeg` on macOS); the gate reports their
+absence as a skipped check rather than failing.
+
+**A round-trip test is not sufficient evidence in this codebase, and historically
+was not sufficient in practice.** Every codec defect found in v1.4.0 was
+self-inverse: the encoder and the decoder deviated from the standard in exactly
+the same way, so each was the other's only witness and the round trip passed
+while no other implementation could read the output and no other
+implementation's output could be read. Among them the 2D wavelet ran its two
+separable passes in the wrong order — an exact inverse of itself — and the float
+path wrapped in int32, invertibly. Both were invisible to a round trip at every
+image size and every resolution count.
+
+So when you touch the codec:
+
+- Assert against the specification, or against a codestream another
+  implementation wrote, rather than against this library's own output.
+- Run a control before every external measurement — confirm the reference tool
+  round-trips its own output first. Two failures this project spent real time on
+  were a broken oracle and a fixture with no signal, both of which look exactly
+  like a genuine defect.
+- Prove a new test can fail. `scripts/mutation/` in the sibling go-openexr
+  repository shows the pattern: break the subject deliberately and confirm the
+  test dies. A test that cannot fail is not coverage.
+- Widen the matrix rather than narrowing the claim. `scripts/matrixgen` covers
+  pixel types, component counts, resolution levels, tilings and both transforms;
+  three whole capabilities were found broken the day it was widened past 8-bit
+  greyscale.
+
 - Write table-driven tests where applicable
 - Include both positive and negative test cases
 - Test edge cases and error conditions

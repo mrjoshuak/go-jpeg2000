@@ -14,13 +14,15 @@ This package provides a native Go implementation of JPEG 2000 encoding and decod
 
 - **Pure Go**: No CGO dependencies, works on all Go-supported platforms
 - **Format Support**: JP2 file format and raw J2K codestream
-- **HTJ2K Support**: High-Throughput JPEG 2000 (ISO/IEC 15444-15) with full cleanup + refinement passes (SPP/MRP)
+- **HTJ2K Support**: High-Throughput JPEG 2000 (ISO/IEC 15444-15). The encoder emits the cleanup pass; the decoder reads cleanup, SPP and MRP
+- **Interoperable Output**: HTJ2K codestreams are decoded bit-exactly by OpenJPH, and OpenJPH's and OpenJPEG's codestreams are decoded bit-exactly by this library. Verified by `scripts/validate.sh` against both reference implementations on every release
+- **Tiling**: `Options.TileSize` partitions the image into independently coded tiles, with subband geometry derived from absolute tile coordinates (ISO/IEC 15444-1 B.5) so tiles at any origin split correctly
 - **Progressive Decode**: Incremental decoding via `ProgressiveDecoder` — feed packets as they arrive, reconstruct at any point
 - **Float Image Output**: `FloatImage` type preserves HDR float precision through the decode pipeline
 - **Packet Extraction**: `ExtractPackets` / `BuildPacketIndex` for server-side progressive streaming
 - **Lossless & Lossy**: Both compression modes supported
 - **Full Colorspace Support**: All 19 ISO/IEC 15444-1 colorspaces with automatic conversion to sRGB
-- **32-bit Float Encoding**: `EncodeFloat` preserves IEEE 754 float32 values via NLT Type 3 markers (bitwise lossless)
+- **32-bit Float Encoding**: `EncodeFloat` preserves IEEE 754 float32 values via NLT Type 3 markers (bitwise lossless), including infinities, NaN payloads, denormals and both zeros. The transform chain widens to 64 bits where the magnitude budget requires it, since a binary32 pattern fills the int32 range after the point transform
 - **Flexible Precision**: 1-32 bit component precision, including 4-bit, 10-bit, 12-bit, and 32-bit float
 - **Standard Library Integration**: Implements `image.Image` interface
 - **Auto-registration**: Registers with Go's `image` package for transparent decode
@@ -276,7 +278,7 @@ jpeg2000/
     ├── box/             # JP2 file format box handling
     ├── codestream/      # J2K codestream marker parsing
     ├── dwt/             # Discrete Wavelet Transform (5-3, 9-7)
-    ├── entropy/         # MQ coder, EBCOT tier-1, HTJ2K (cleanup + SPP/MRP)
+    ├── entropy/         # MQ coder, EBCOT tier-1, HTJ2K (cleanup; decoder also SPP/MRP)
     ├── mct/             # Multi-Component Transform (RCT, ICT)
     └── tcd/             # Tile Coder/Decoder, tier-2
 ```
