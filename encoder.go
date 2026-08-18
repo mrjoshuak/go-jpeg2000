@@ -1135,6 +1135,12 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 			// mis-assigns packet bodies across subbands at res > 0, so turning
 			// it on leaves the library unable to read what it writes (18 tests
 			// red). Enable it here once that decoder defect is fixed.
+			// Conforming T2 output is implemented and verified: OpenJPH decodes
+			// it to the exact source samples at one decomposition level. It is
+			// not yet the default because the HT block encoder still produces
+			// blocks OpenJPH rejects once the detail bands grow (32x32 image,
+			// two resolutions), which would leave the library writing files
+			// neither it nor anything else can read.
 			_ = encodedList
 			_ = numBPSList
 			tileData = buildTileData(metas, allEncoded)
@@ -1204,9 +1210,7 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	if numLayers > 1 {
 		tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
 	} else {
-		// See the note in the sequential path: conforming T2 output is
-		// implemented and verified against OpenJPH, but gated on fixing the
-		// decoder's multi-resolution packet assignment.
+		// See the note in the sequential path.
 		_ = encodedBlocks
 		tileData = buildTileData(metas, allEncoded)
 	}

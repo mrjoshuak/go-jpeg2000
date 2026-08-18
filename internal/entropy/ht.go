@@ -156,6 +156,16 @@ func (d *HTDecoder) DecodeSegments(data []byte, lcup, numBitplanes, bandType int
 		d.lineState[i] = 0
 	}
 
+	// Clear the output before decoding. The cleanup pass writes only the
+	// samples it finds significant, so anything left over from a previous
+	// block would survive — and these decoders are pooled, so "previous block"
+	// means a different subband entirely. The reference zeroes insignificant
+	// positions inside the code-block as it goes; clearing up front is
+	// equivalent and cheaper.
+	for i := range d.data {
+		d.data[i] = 0
+	}
+
 	// Decode the cleanup pass
 	d.decodeCleanup(numBitplanes)
 
