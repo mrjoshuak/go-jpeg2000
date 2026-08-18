@@ -733,7 +733,13 @@ func (e *encoder) generateQCD() []byte {
 
 		// Sqcd: no quantization, guard bits
 		maxPrec := e.maxPrecision()
-		guardBits := uint8(0)
+		// Two guard bits. Mb = guardBits + exponent - 1 bounds U_q, the
+		// per-quad exponent the HT block coder emits in the doubled domain,
+		// and a conforming decoder rejects any block with
+		// U_q > Mb + 2 - numbps. With no guard bits Mb is one or two short of
+		// the U_q the detail bands actually produce, which is why OpenJPH and
+		// OpenJPEG refused those code-blocks.
+		guardBits := uint8(2)
 		if maxPrec > 16 {
 			guardBits = 2 // need more guard bits for 32-bit
 		}

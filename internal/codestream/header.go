@@ -178,7 +178,12 @@ type CodingStyleComponent struct {
 type QuantizationDefault struct {
 	// Sqcd: Quantization style and guard bits
 	QuantizationStyle uint8
-	NumGuardBits      uint8
+	// NumGuardBits holds the raw Sqcd byte; the guard-bit count lives in its
+	// top three bits and is returned by GuardBits. The parser used to store
+	// the already-shifted count here, so GuardBits shifted a second time and
+	// reported zero guard bits for every codestream, which in turn made the
+	// per-band Mb (and so the decoded bit-plane count) too small.
+	NumGuardBits uint8
 
 	// SPqcd: Step sizes
 	// For no quantization: only exponents

@@ -165,6 +165,23 @@ const (
 	NumContexts // Total number of contexts
 )
 
+// resetContexts restores the Table D.7 initial states: every context starts at
+// state index 0 (MPS=0) except the uniform context (state 46), the run-length
+// context (state 3) and zero-coding context 0 (state 4). The 94-entry table
+// above holds each state twice (even = MPS 0, odd = MPS 1), so state index i
+// with MPS 0 is entry 2*i.
+//
+// Omitting the run-length and zero-coding seeds desynchronises the arithmetic
+// coder on the very first decision of a conforming code-block.
+func resetContexts(c *[NumContexts]uint8) {
+	for i := range c {
+		c[i] = 0
+	}
+	c[CtxUni] = 2 * 46
+	c[CtxRL] = 2 * 3
+	c[CtxZC0] = 2 * 4
+}
+
 // MQEncoder implements the MQ arithmetic encoder.
 type MQEncoder struct {
 	// Interval size (A register)
@@ -191,12 +208,7 @@ func NewMQEncoder() *MQEncoder {
 		bp:  0,
 	}
 	e.buf[0] = 0 // Initial byte (bp[-1] in OpenJPEG terms)
-	// Initialize all contexts to state 0 (MPS=0)
-	for i := range e.contexts {
-		e.contexts[i] = 0
-	}
-	// Set uniform context to state 92 (MPS=0)
-	e.contexts[CtxUni] = 92
+	resetContexts(&e.contexts)
 	return e
 }
 
@@ -213,10 +225,7 @@ func (e *MQEncoder) Reset() {
 	}
 	e.buf[0] = 0
 	e.bp = 0
-	for i := range e.contexts {
-		e.contexts[i] = 0
-	}
-	e.contexts[CtxUni] = 92
+	resetContexts(&e.contexts)
 }
 
 // Encode encodes a binary decision (0 or 1) for the given context.
@@ -375,12 +384,7 @@ func NewMQDecoder(data []byte) *MQDecoder {
 		data: data,
 		bp:   -1,
 	}
-	// Initialize all contexts to state 0 (MPS=0)
-	for i := range d.contexts {
-		d.contexts[i] = 0
-	}
-	// Set uniform context to state 92 (MPS=0)
-	d.contexts[CtxUni] = 92
+	resetContexts(&d.contexts)
 
 	// Initialize C register (INITDEC procedure)
 	// C.3.5 Initialization of the decoder
@@ -498,19 +502,21 @@ func (d *MQDecoder) renormDec() {
 
 // ResetContext resets a specific context to its initial state.
 func (d *MQDecoder) ResetContext(ctx int) {
-	if ctx == CtxUni {
-		d.contexts[ctx] = 92
-	} else {
+	switch ctx {
+	case CtxUni:
+		d.contexts[ctx] = 2 * 46
+	case CtxRL:
+		d.contexts[ctx] = 2 * 3
+	case CtxZC0:
+		d.contexts[ctx] = 2 * 4
+	default:
 		d.contexts[ctx] = 0
 	}
 }
 
 // ResetAllContexts resets all contexts to their initial states.
 func (d *MQDecoder) ResetAllContexts() {
-	for i := range d.contexts {
-		d.contexts[i] = 0
-	}
-	d.contexts[CtxUni] = 92
+	resetContexts(&d.contexts)
 }
 
 // RawDecoder implements raw (bypass) mode decoding.

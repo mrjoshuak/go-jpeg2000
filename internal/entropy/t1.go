@@ -179,10 +179,7 @@ func (t *T1) resetMQInlined() {
 	}
 	t.mqBuf[0] = 0
 	t.mqBp = 0
-	for i := range t.mqContexts {
-		t.mqContexts[i] = 0
-	}
-	t.mqContexts[CtxUni] = 92
+	resetContexts(&t.mqContexts)
 }
 
 // mqEncodeInlined is an inlined MQ encode for maximum performance.
@@ -441,40 +438,8 @@ func (t *T1) getSCContext(x, y int) (ctx int, pred int) {
 		}
 	}
 
-	// Determine context and prediction from contributions
-	pred = 0
-	if hc < 0 {
-		pred = 1
-		hc = -hc
-	}
-	if hc == 0 {
-		if vc < 0 {
-			pred = 1
-			vc = -vc
-		}
-	}
-
-	// Map to context
-	ctx = CtxSC0
-	if hc == 1 {
-		if vc == 1 {
-			ctx = CtxSC4
-		} else if vc == 0 {
-			ctx = CtxSC2
-		} else {
-			ctx = CtxSC1
-		}
-	} else if hc == 0 {
-		if vc == 1 {
-			ctx = CtxSC1
-		} else if vc == 0 {
-			ctx = CtxSC0
-		}
-	} else if hc == 2 {
-		ctx = CtxSC3
-	}
-
-	return
+	rel, pred := signContextRelative(hc, vc)
+	return rel + CtxSC0, pred
 }
 
 // getMRContext returns the magnitude refinement context.
@@ -536,34 +501,8 @@ func (t *T1) encodeSignInlined(x, y int) {
 		}
 	}
 
-	// Determine prediction
-	pred := 0
-	if hc < 0 {
-		pred = 1
-		hc = -hc
-	}
-	if hc == 0 && vc < 0 {
-		pred = 1
-		vc = -vc
-	}
-
-	// Map to context
-	ctx := CtxSC0
-	if hc == 1 {
-		if vc == 1 {
-			ctx = CtxSC4
-		} else if vc == 0 {
-			ctx = CtxSC2
-		} else {
-			ctx = CtxSC1
-		}
-	} else if hc == 0 {
-		if vc == 1 {
-			ctx = CtxSC1
-		}
-	} else if hc == 2 {
-		ctx = CtxSC3
-	}
+	rel, pred := signContextRelative(hc, vc)
+	ctx := rel + CtxSC0
 
 	sign := 0
 	if f[idx]&T1SignNeg != 0 {
@@ -582,76 +521,78 @@ func (t *T1) encodeSignificancePassInlined(bp int) {
 	height := t.height
 	bandOffset := t.bandType * 256
 
-	for y := 0; y < height; y++ {
-		rowIdx := (y + 1) * stride
-		dataRowIdx := y * width
-		isFirstRow := y == 0
-		isLastRow := y == height-1
-
+	for y0 := 0; y0 < height; y0 += 4 {
 		for x := 0; x < width; x++ {
-			i := rowIdx + x + 1
-			f := flags[i]
+			for y := y0; y < y0+4 && y < height; y++ {
+				rowIdx := (y + 1) * stride
+				dataRowIdx := y * width
+				isFirstRow := y == 0
+				isLastRow := y == height-1
 
-			if f&T1Sig != 0 {
-				continue
-			}
+				i := rowIdx + x + 1
+				f := flags[i]
 
-			neighbors := flags[i-1] | flags[i+1] | flags[i-stride] | flags[i+stride] |
-				flags[i-stride-1] | flags[i-stride+1] | flags[i+stride-1] | flags[i+stride+1]
-			if neighbors&T1Sig == 0 {
-				continue
-			}
-
-			sig := 0
-			if data[dataRowIdx+x]&bit != 0 {
-				sig = 1
-			}
-
-			var packed uint8
-			if flags[i-1]&T1Sig != 0 {
-				packed |= 0x01
-			}
-			if flags[i+1]&T1Sig != 0 {
-				packed |= 0x02
-			}
-			if flags[i-stride]&T1Sig != 0 {
-				packed |= 0x04
-			}
-			if flags[i+stride]&T1Sig != 0 {
-				packed |= 0x08
-			}
-			if flags[i-stride-1]&T1Sig != 0 {
-				packed |= 0x10
-			}
-			if flags[i-stride+1]&T1Sig != 0 {
-				packed |= 0x20
-			}
-			if flags[i+stride-1]&T1Sig != 0 {
-				packed |= 0x40
-			}
-			if flags[i+stride+1]&T1Sig != 0 {
-				packed |= 0x80
-			}
-			ctx := int(lutZCCtx[bandOffset+int(packed)])
-			t.mqEncodeInlined(ctx, sig)
-
-			if sig != 0 {
-				t.encodeSignInlined(x, y)
-				flags[i] |= T1Sig
-				if !isFirstRow {
-					flags[i-stride] |= T1SigS
+				if f&T1Sig != 0 {
+					continue
 				}
-				if !isLastRow {
-					flags[i+stride] |= T1SigN
+
+				neighbors := flags[i-1] | flags[i+1] | flags[i-stride] | flags[i+stride] |
+					flags[i-stride-1] | flags[i-stride+1] | flags[i+stride-1] | flags[i+stride+1]
+				if neighbors&T1Sig == 0 {
+					continue
 				}
-				if x > 0 {
-					flags[i-1] |= T1SigE
+
+				sig := 0
+				if data[dataRowIdx+x]&bit != 0 {
+					sig = 1
 				}
-				if x < width-1 {
-					flags[i+1] |= T1SigW
+
+				var packed uint8
+				if flags[i-1]&T1Sig != 0 {
+					packed |= 0x01
 				}
+				if flags[i+1]&T1Sig != 0 {
+					packed |= 0x02
+				}
+				if flags[i-stride]&T1Sig != 0 {
+					packed |= 0x04
+				}
+				if flags[i+stride]&T1Sig != 0 {
+					packed |= 0x08
+				}
+				if flags[i-stride-1]&T1Sig != 0 {
+					packed |= 0x10
+				}
+				if flags[i-stride+1]&T1Sig != 0 {
+					packed |= 0x20
+				}
+				if flags[i+stride-1]&T1Sig != 0 {
+					packed |= 0x40
+				}
+				if flags[i+stride+1]&T1Sig != 0 {
+					packed |= 0x80
+				}
+				ctx := int(lutZCCtx[bandOffset+int(packed)])
+				t.mqEncodeInlined(ctx, sig)
+
+				if sig != 0 {
+					t.encodeSignInlined(x, y)
+					flags[i] |= T1Sig
+					if !isFirstRow {
+						flags[i-stride] |= T1SigS
+					}
+					if !isLastRow {
+						flags[i+stride] |= T1SigN
+					}
+					if x > 0 {
+						flags[i-1] |= T1SigE
+					}
+					if x < width-1 {
+						flags[i+1] |= T1SigW
+					}
+				}
+				flags[i] |= T1Visit
 			}
-			flags[i] |= T1Visit
 		}
 	}
 }
@@ -665,37 +606,37 @@ func (t *T1) encodeMagnitudeRefinementPassInlined(bp int) {
 	width := t.width
 	height := t.height
 
-	for y := 0; y < height; y++ {
-		rowIdx := (y + 1) * stride
-		dataRowIdx := y * width
+	for y0 := 0; y0 < height; y0 += 4 {
 		for x := 0; x < width; x++ {
-			idx := rowIdx + x + 1
-			f := flags[idx]
+			for y := y0; y < y0+4 && y < height; y++ {
+				idx := (y+1)*stride + x + 1
+				f := flags[idx]
 
-			if f&T1Sig == 0 || f&T1Visit != 0 {
-				continue
-			}
-
-			refBit := 0
-			if data[dataRowIdx+x]&bit != 0 {
-				refBit = 1
-			}
-
-			var ctx int
-			if f&T1Refine == 0 {
-				neighbors := flags[idx-1] | flags[idx+1] | flags[idx-stride] | flags[idx+stride] |
-					flags[idx-stride-1] | flags[idx-stride+1] | flags[idx+stride-1] | flags[idx+stride+1]
-				if neighbors&T1Sig != 0 {
-					ctx = CtxMag1
-				} else {
-					ctx = CtxMag0
+				if f&T1Sig == 0 || f&T1Visit != 0 {
+					continue
 				}
-			} else {
-				ctx = CtxMag2
-			}
 
-			t.mqEncodeInlined(ctx, refBit)
-			flags[idx] |= T1Refine
+				refBit := 0
+				if data[y*width+x]&bit != 0 {
+					refBit = 1
+				}
+
+				var ctx int
+				if f&T1Refine == 0 {
+					neighbors := flags[idx-1] | flags[idx+1] | flags[idx-stride] | flags[idx+stride] |
+						flags[idx-stride-1] | flags[idx-stride+1] | flags[idx+stride-1] | flags[idx+stride+1]
+					if neighbors&T1Sig != 0 {
+						ctx = CtxMag1
+					} else {
+						ctx = CtxMag0
+					}
+				} else {
+					ctx = CtxMag2
+				}
+
+				t.mqEncodeInlined(ctx, refBit)
+				flags[idx] |= T1Refine
+			}
 		}
 	}
 }
@@ -973,136 +914,32 @@ func (t *T1) EncodeSafe(bandType int) []byte {
 // encodeSignificancePass encodes the significance propagation pass.
 func (t *T1) encodeSignificancePass(bp int) {
 	bit := int32(1) << bp
-	stride := t.width + 2
-	flags := t.flags
-	data := t.data
-	width := t.width
-	height := t.height
-	bandType := t.bandType
-	bandOffset := bandType * 256 // Pre-calculate for LUT
 
-	for y := 0; y < height; y++ {
-		rowIdx := (y + 1) * stride
-		dataRowIdx := y * width
-		isFirstRow := y == 0
-		isLastRow := y == height-1
-
-		// Process 4 coefficients at a time (unrolled)
-		x := 0
-		for ; x+4 <= width; x += 4 {
-			idx := rowIdx + x + 1
-
-			// Process 4 coefficients
-			for dx := 0; dx < 4; dx++ {
-				i := idx + dx
-				f := flags[i]
-
-				if f&T1Sig != 0 {
+	for y0 := 0; y0 < t.height; y0 += 4 {
+		for x := 0; x < t.width; x++ {
+			for y := y0; y < y0+4 && y < t.height; y++ {
+				if t.hasFlag(x, y, T1Sig) {
+					continue
+				}
+				if !t.hasSignificantNeighbor(x, y) {
 					continue
 				}
 
-				// Check significant neighbors
-				neighbors := flags[i-1] | flags[i+1] | flags[i-stride] | flags[i+stride] |
-					flags[i-stride-1] | flags[i-stride+1] | flags[i+stride-1] | flags[i+stride+1]
-				if neighbors&T1Sig == 0 {
-					continue
-				}
-
-				// Encode significance bit
 				sig := 0
-				if data[dataRowIdx+x+dx]&bit != 0 {
+				if t.data[y*t.width+x]&bit != 0 {
 					sig = 1
 				}
 
-				// Inline LUT context lookup
-				var packed uint8
-				if flags[i-1]&T1Sig != 0 {
-					packed |= 0x01
-				}
-				if flags[i+1]&T1Sig != 0 {
-					packed |= 0x02
-				}
-				if flags[i-stride]&T1Sig != 0 {
-					packed |= 0x04
-				}
-				if flags[i+stride]&T1Sig != 0 {
-					packed |= 0x08
-				}
-				if flags[i-stride-1]&T1Sig != 0 {
-					packed |= 0x10
-				}
-				if flags[i-stride+1]&T1Sig != 0 {
-					packed |= 0x20
-				}
-				if flags[i+stride-1]&T1Sig != 0 {
-					packed |= 0x40
-				}
-				if flags[i+stride+1]&T1Sig != 0 {
-					packed |= 0x80
-				}
-				ctx := int(lutZCCtx[bandOffset+int(packed)])
+				ctx := t.getZCContext(x, y, t.bandType)
 				t.mqEnc.Encode(ctx, sig)
 
 				if sig != 0 {
-					t.encodeSign(x+dx, y)
-					flags[i] |= T1Sig
-					if !isFirstRow {
-						flags[i-stride] |= T1SigS
-					}
-					if !isLastRow {
-						flags[i+stride] |= T1SigN
-					}
-					if x+dx > 0 {
-						flags[i-1] |= T1SigE
-					}
-					if x+dx < width-1 {
-						flags[i+1] |= T1SigW
-					}
+					t.encodeSign(x, y)
+					t.setFlag(x, y, T1Sig)
+					t.updateNeighborFlags(x, y)
 				}
-				flags[i] |= T1Visit
+				t.setFlag(x, y, T1Visit)
 			}
-		}
-
-		// Handle remaining coefficients
-		for ; x < width; x++ {
-			idx := rowIdx + x + 1
-			f := flags[idx]
-
-			if f&T1Sig != 0 {
-				continue
-			}
-
-			neighbors := flags[idx-1] | flags[idx+1] | flags[idx-stride] | flags[idx+stride] |
-				flags[idx-stride-1] | flags[idx-stride+1] | flags[idx+stride-1] | flags[idx+stride+1]
-			if neighbors&T1Sig == 0 {
-				continue
-			}
-
-			sig := 0
-			if data[dataRowIdx+x]&bit != 0 {
-				sig = 1
-			}
-
-			ctx := t.getZCContext(x, y, bandType)
-			t.mqEnc.Encode(ctx, sig)
-
-			if sig != 0 {
-				t.encodeSign(x, y)
-				flags[idx] |= T1Sig
-				if !isFirstRow {
-					flags[idx-stride] |= T1SigS
-				}
-				if !isLastRow {
-					flags[idx+stride] |= T1SigN
-				}
-				if x > 0 {
-					flags[idx-1] |= T1SigE
-				}
-				if x < width-1 {
-					flags[idx+1] |= T1SigW
-				}
-			}
-			flags[idx] |= T1Visit
 		}
 	}
 }
@@ -1134,41 +971,41 @@ func (t *T1) encodeMagnitudeRefinementPass(bp int) {
 	width := t.width
 	height := t.height
 
-	for y := 0; y < height; y++ {
-		rowIdx := (y + 1) * stride
-		dataRowIdx := y * width
+	for y0 := 0; y0 < height; y0 += 4 {
 		for x := 0; x < width; x++ {
-			idx := rowIdx + x + 1
-			f := flags[idx]
+			for y := y0; y < y0+4 && y < height; y++ {
+				idx := (y+1)*stride + x + 1
+				f := flags[idx]
 
-			// Only process coefficients that are significant and not visited
-			if f&T1Sig == 0 || f&T1Visit != 0 {
-				continue
-			}
-
-			// Encode refinement bit
-			refBit := 0
-			if data[dataRowIdx+x]&bit != 0 {
-				refBit = 1
-			}
-
-			// Get MR context (inlined)
-			var ctx int
-			if f&T1Refine == 0 {
-				// Check if any neighbor is significant
-				neighbors := flags[idx-1] | flags[idx+1] | flags[idx-stride] | flags[idx+stride] |
-					flags[idx-stride-1] | flags[idx-stride+1] | flags[idx+stride-1] | flags[idx+stride+1]
-				if neighbors&T1Sig != 0 {
-					ctx = CtxMag1
-				} else {
-					ctx = CtxMag0
+				// Only process coefficients that are significant and not visited
+				if f&T1Sig == 0 || f&T1Visit != 0 {
+					continue
 				}
-			} else {
-				ctx = CtxMag2
-			}
 
-			t.mqEnc.Encode(ctx, refBit)
-			flags[idx] |= T1Refine
+				// Encode refinement bit
+				refBit := 0
+				if data[y*width+x]&bit != 0 {
+					refBit = 1
+				}
+
+				// Get MR context (inlined)
+				var ctx int
+				if f&T1Refine == 0 {
+					// Check if any neighbor is significant
+					neighbors := flags[idx-1] | flags[idx+1] | flags[idx-stride] | flags[idx+stride] |
+						flags[idx-stride-1] | flags[idx-stride+1] | flags[idx+stride-1] | flags[idx+stride+1]
+					if neighbors&T1Sig != 0 {
+						ctx = CtxMag1
+					} else {
+						ctx = CtxMag0
+					}
+				} else {
+					ctx = CtxMag2
+				}
+
+				t.mqEnc.Encode(ctx, refBit)
+				flags[idx] |= T1Refine
+			}
 		}
 	}
 }
@@ -1316,28 +1153,36 @@ func (t *T1) Decode(data []byte, numBPS int, bandType int) []int32 {
 }
 
 // decodeSignificancePass decodes the significance propagation pass.
+//
+// Every coding pass walks the code-block in stripes of four rows, column by
+// column within a stripe (ISO/IEC 15444-1 D.2). This pass and the magnitude
+// refinement pass previously walked it in raster order, which visits the same
+// coefficients but in a different sequence, so each decision was decoded
+// against the state left by the wrong predecessor.
 func (t *T1) decodeSignificancePass(bp int) {
 	bit := int32(1) << bp
 
-	for y := 0; y < t.height; y++ {
+	for y0 := 0; y0 < t.height; y0 += 4 {
 		for x := 0; x < t.width; x++ {
-			if t.hasFlag(x, y, T1Sig) {
-				continue
-			}
-			if !t.hasSignificantNeighbor(x, y) {
-				continue
-			}
+			for y := y0; y < y0+4 && y < t.height; y++ {
+				if t.hasFlag(x, y, T1Sig) {
+					continue
+				}
+				if !t.hasSignificantNeighbor(x, y) {
+					continue
+				}
 
-			ctx := t.getZCContext(x, y, t.bandType)
-			sig := t.mqDec.Decode(ctx)
+				ctx := t.getZCContext(x, y, t.bandType)
+				sig := t.mqDec.Decode(ctx)
 
-			if sig != 0 {
-				t.data[y*t.width+x] = bit
-				t.decodeSign(x, y)
-				t.setFlag(x, y, T1Sig)
-				t.updateNeighborFlags(x, y)
+				if sig != 0 {
+					t.data[y*t.width+x] = bit
+					t.decodeSign(x, y)
+					t.setFlag(x, y, T1Sig)
+					t.updateNeighborFlags(x, y)
+				}
+				t.setFlag(x, y, T1Visit)
 			}
-			t.setFlag(x, y, T1Visit)
 		}
 	}
 }
@@ -1355,17 +1200,19 @@ func (t *T1) decodeSign(x, y int) {
 func (t *T1) decodeMagnitudeRefinementPass(bp int) {
 	bit := int32(1) << bp
 
-	for y := 0; y < t.height; y++ {
+	for y0 := 0; y0 < t.height; y0 += 4 {
 		for x := 0; x < t.width; x++ {
-			if !t.hasFlag(x, y, T1Sig) || t.hasFlag(x, y, T1Visit) {
-				continue
-			}
+			for y := y0; y < y0+4 && y < t.height; y++ {
+				if !t.hasFlag(x, y, T1Sig) || t.hasFlag(x, y, T1Visit) {
+					continue
+				}
 
-			ctx := t.getMRContext(x, y)
-			if t.mqDec.Decode(ctx) != 0 {
-				t.data[y*t.width+x] |= bit
+				ctx := t.getMRContext(x, y)
+				if t.mqDec.Decode(ctx) != 0 {
+					t.data[y*t.width+x] |= bit
+				}
+				t.setFlag(x, y, T1Refine)
 			}
-			t.setFlag(x, y, T1Refine)
 		}
 	}
 }

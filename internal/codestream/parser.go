@@ -500,7 +500,7 @@ func (p *Parser) readQCD() error {
 		return fmt.Errorf("QCD: quantization style %d is not defined (max %d)", st, MaxQuantizationStyle)
 	}
 	p.header.Quantization.QuantizationStyle = sqcd & 0x1F
-	p.header.Quantization.NumGuardBits = sqcd >> 5
+	p.header.Quantization.NumGuardBits = sqcd
 
 	// Read step sizes based on quantization style
 	remaining := int(length) - 3
@@ -590,7 +590,7 @@ func (p *Parser) readQCC() error {
 	qcc := QuantizationComponent{
 		ComponentIndex:    compIndex,
 		QuantizationStyle: sqcc & 0x1F,
-		NumGuardBits:      sqcc >> 5,
+		NumGuardBits:      sqcc,
 	}
 
 	remaining := int(length) - headerBytes - 1
@@ -1248,7 +1248,7 @@ func (p *Parser) readQCDInto(qcd *QuantizationDefault) error {
 		return fmt.Errorf("QCD: quantization style %d is not defined (max %d)", st, MaxQuantizationStyle)
 	}
 	qcd.QuantizationStyle = sqcd & 0x1F
-	qcd.NumGuardBits = sqcd >> 5
+	qcd.NumGuardBits = sqcd
 
 	remaining := int(length) - 3
 	if remaining < 0 {
@@ -1332,7 +1332,7 @@ func (p *Parser) readQCCInto(m map[uint16]QuantizationComponent) error {
 	qcc := QuantizationComponent{
 		ComponentIndex:    compIndex,
 		QuantizationStyle: sqcc & 0x1F,
-		NumGuardBits:      sqcc >> 5,
+		NumGuardBits:      sqcc,
 	}
 
 	remaining := int(length) - headerBytes - 1

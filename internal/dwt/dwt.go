@@ -354,16 +354,24 @@ func putFloatBuf(buf []float64) {
 // Forward2D53 performs a 2D forward 5-3 wavelet transform.
 // data is a row-major 2D array with the given dimensions.
 func Forward2D53(data []int32, width, height int) {
+	forward2D53Stride(data, width, width, height)
+}
+
+// forward2D53Stride transforms the top-left width x height sub-rectangle of a
+// row-major array whose rows are stride samples apart. Multi-level
+// decomposition needs this: the LL subband of level N is a sub-rectangle of
+// the full-width array, not a compact width-wide array of its own.
+func forward2D53Stride(data []int32, stride, width, height int) {
 	// Transform rows - unroll by 4 for better pipelining
 	y := 0
 	for ; y+4 <= height; y += 4 {
-		Forward53(data[y*width:(y+1)*width], width)
-		Forward53(data[(y+1)*width:(y+2)*width], width)
-		Forward53(data[(y+2)*width:(y+3)*width], width)
-		Forward53(data[(y+3)*width:(y+4)*width], width)
+		Forward53(data[y*stride:y*stride+width], width)
+		Forward53(data[(y+1)*stride:(y+1)*stride+width], width)
+		Forward53(data[(y+2)*stride:(y+2)*stride+width], width)
+		Forward53(data[(y+3)*stride:(y+3)*stride+width], width)
 	}
 	for ; y < height; y++ {
-		Forward53(data[y*width:(y+1)*width], width)
+		Forward53(data[y*stride:y*stride+width], width)
 	}
 
 	// Transform columns using pooled buffer
@@ -373,7 +381,7 @@ func Forward2D53(data []int32, width, height int) {
 	for ; x+4 <= width; x += 4 {
 		// Extract 4 columns
 		for yy := 0; yy < height; yy++ {
-			rowStart := yy * width
+			rowStart := yy * stride
 			col[yy] = data[rowStart+x]
 			col[height+yy] = data[rowStart+x+1]
 			col[2*height+yy] = data[rowStart+x+2]
@@ -386,7 +394,7 @@ func Forward2D53(data []int32, width, height int) {
 		Forward53(col[3*height:4*height], height)
 		// Write back
 		for yy := 0; yy < height; yy++ {
-			rowStart := yy * width
+			rowStart := yy * stride
 			data[rowStart+x] = col[yy]
 			data[rowStart+x+1] = col[height+yy]
 			data[rowStart+x+2] = col[2*height+yy]
@@ -396,11 +404,11 @@ func Forward2D53(data []int32, width, height int) {
 	// Handle remaining columns
 	for ; x < width; x++ {
 		for yy := 0; yy < height; yy++ {
-			col[yy] = data[yy*width+x]
+			col[yy] = data[yy*stride+x]
 		}
 		Forward53(col[:height], height)
 		for yy := 0; yy < height; yy++ {
-			data[yy*width+x] = col[yy]
+			data[yy*stride+x] = col[yy]
 		}
 	}
 	putIntBuf(col)
@@ -408,43 +416,51 @@ func Forward2D53(data []int32, width, height int) {
 
 // Inverse2D53 performs a 2D inverse 5-3 wavelet transform.
 func Inverse2D53(data []int32, width, height int) {
+	inverse2D53Stride(data, width, width, height)
+}
+
+// inverse2D53Stride is Inverse2D53 over a sub-rectangle with an explicit stride.
+func inverse2D53Stride(data []int32, stride, width, height int) {
 	// Transform columns first (reverse order of forward)
 	col := getIntBuf(height)
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
-			col[y] = data[y*width+x]
+			col[y] = data[y*stride+x]
 		}
 		Inverse53(col, height)
 		for y := 0; y < height; y++ {
-			data[y*width+x] = col[y]
+			data[y*stride+x] = col[y]
 		}
 	}
 	putIntBuf(col)
 
 	// Transform rows
 	for y := 0; y < height; y++ {
-		row := data[y*width : (y+1)*width]
-		Inverse53(row, width)
+		Inverse53(data[y*stride:y*stride+width], width)
 	}
 }
 
 // Forward2D97 performs a 2D forward 9-7 wavelet transform.
 func Forward2D97(data []float64, width, height int) {
+	forward2D97Stride(data, width, width, height)
+}
+
+// forward2D97Stride is Forward2D97 over a sub-rectangle with an explicit stride.
+func forward2D97Stride(data []float64, stride, width, height int) {
 	// Transform rows
 	for y := 0; y < height; y++ {
-		row := data[y*width : (y+1)*width]
-		Forward97(row, width)
+		Forward97(data[y*stride:y*stride+width], width)
 	}
 
 	// Transform columns using pooled buffer
 	col := getFloatBuf(height)
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
-			col[y] = data[y*width+x]
+			col[y] = data[y*stride+x]
 		}
 		Forward97(col, height)
 		for y := 0; y < height; y++ {
-			data[y*width+x] = col[y]
+			data[y*stride+x] = col[y]
 		}
 	}
 	putFloatBuf(col)
@@ -452,23 +468,27 @@ func Forward2D97(data []float64, width, height int) {
 
 // Inverse2D97 performs a 2D inverse 9-7 wavelet transform.
 func Inverse2D97(data []float64, width, height int) {
+	inverse2D97Stride(data, width, width, height)
+}
+
+// inverse2D97Stride is Inverse2D97 over a sub-rectangle with an explicit stride.
+func inverse2D97Stride(data []float64, stride, width, height int) {
 	// Transform columns first
 	col := getFloatBuf(height)
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
-			col[y] = data[y*width+x]
+			col[y] = data[y*stride+x]
 		}
 		Inverse97(col, height)
 		for y := 0; y < height; y++ {
-			data[y*width+x] = col[y]
+			data[y*stride+x] = col[y]
 		}
 	}
 	putFloatBuf(col)
 
 	// Transform rows
 	for y := 0; y < height; y++ {
-		row := data[y*width : (y+1)*width]
-		Inverse97(row, width)
+		Inverse97(data[y*stride:y*stride+width], width)
 	}
 }
 
@@ -529,20 +549,26 @@ func Inverse53_32bit(data []int32, length int) {
 // Forward2D53_32bit performs a 2D forward 5-3 wavelet transform
 // with overflow-safe arithmetic for 32-bit data.
 func Forward2D53_32bit(data []int32, width, height int) {
+	forward2D53Stride32bit(data, width, width, height)
+}
+
+// forward2D53Stride32bit is Forward2D53_32bit over a sub-rectangle with an
+// explicit stride.
+func forward2D53Stride32bit(data []int32, stride, width, height int) {
 	// Transform rows
 	for y := 0; y < height; y++ {
-		Forward53_32bit(data[y*width:(y+1)*width], width)
+		Forward53_32bit(data[y*stride:y*stride+width], width)
 	}
 
 	// Transform columns
 	col := getIntBuf(height)
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
-			col[y] = data[y*width+x]
+			col[y] = data[y*stride+x]
 		}
 		Forward53_32bit(col[:height], height)
 		for y := 0; y < height; y++ {
-			data[y*width+x] = col[y]
+			data[y*stride+x] = col[y]
 		}
 	}
 	putIntBuf(col)
@@ -551,22 +577,28 @@ func Forward2D53_32bit(data []int32, width, height int) {
 // Inverse2D53_32bit performs a 2D inverse 5-3 wavelet transform
 // with overflow-safe arithmetic for 32-bit data.
 func Inverse2D53_32bit(data []int32, width, height int) {
+	inverse2D53Stride32bit(data, width, width, height)
+}
+
+// inverse2D53Stride32bit is Inverse2D53_32bit over a sub-rectangle with an
+// explicit stride.
+func inverse2D53Stride32bit(data []int32, stride, width, height int) {
 	// Transform columns first (reverse order of forward)
 	col := getIntBuf(height)
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
-			col[y] = data[y*width+x]
+			col[y] = data[y*stride+x]
 		}
 		Inverse53_32bit(col[:height], height)
 		for y := 0; y < height; y++ {
-			data[y*width+x] = col[y]
+			data[y*stride+x] = col[y]
 		}
 	}
 	putIntBuf(col)
 
 	// Transform rows
 	for y := 0; y < height; y++ {
-		Inverse53_32bit(data[y*width:(y+1)*width], width)
+		Inverse53_32bit(data[y*stride:y*stride+width], width)
 	}
 }
 
@@ -575,7 +607,7 @@ func Inverse2D53_32bit(data []int32, width, height int) {
 func DecomposeMultiLevel53_32bit(data []int32, width, height, levels int) {
 	w, h := width, height
 	for level := 0; level < levels; level++ {
-		Forward2D53_32bit(data, w, h)
+		forward2D53Stride32bit(data, width, w, h)
 		w = (w + 1) / 2
 		h = (h + 1) / 2
 	}
@@ -593,7 +625,7 @@ func ReconstructMultiLevel53_32bit(data []int32, width, height, levels int) {
 	}
 
 	for level := levels - 1; level >= 0; level-- {
-		Inverse2D53_32bit(data, dims[level].w, dims[level].h)
+		inverse2D53Stride32bit(data, width, dims[level].w, dims[level].h)
 	}
 }
 
@@ -648,7 +680,7 @@ func Dequantize(data []int32, stepSize float64) []float64 {
 func DecomposeMultiLevel53(data []int32, width, height, levels int) {
 	w, h := width, height
 	for level := 0; level < levels; level++ {
-		Forward2D53(data, w, h)
+		forward2D53Stride(data, width, w, h)
 		w = (w + 1) / 2
 		h = (h + 1) / 2
 	}
@@ -667,7 +699,7 @@ func ReconstructMultiLevel53(data []int32, width, height, levels int) {
 
 	// Reconstruct from coarsest to finest
 	for level := levels - 1; level >= 0; level-- {
-		Inverse2D53(data, dims[level].w, dims[level].h)
+		inverse2D53Stride(data, width, dims[level].w, dims[level].h)
 	}
 }
 
@@ -675,7 +707,7 @@ func ReconstructMultiLevel53(data []int32, width, height, levels int) {
 func DecomposeMultiLevel97(data []float64, width, height, levels int) {
 	w, h := width, height
 	for level := 0; level < levels; level++ {
-		Forward2D97(data, w, h)
+		forward2D97Stride(data, width, w, h)
 		w = (w + 1) / 2
 		h = (h + 1) / 2
 	}
@@ -692,6 +724,6 @@ func ReconstructMultiLevel97(data []float64, width, height, levels int) {
 	}
 
 	for level := levels - 1; level >= 0; level-- {
-		Inverse2D97(data, dims[level].w, dims[level].h)
+		inverse2D97Stride(data, width, dims[level].w, dims[level].h)
 	}
 }

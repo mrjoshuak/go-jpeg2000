@@ -270,7 +270,8 @@ func (e *encoder) bandMb(res, bandIdx int) int {
 		idx = 1 + (res-1)*3 + bandIdx
 	}
 	maxPrec := e.maxPrecision()
-	guardBits := 0
+	// Must match generateQCD.
+	guardBits := 2
 	if maxPrec > 16 {
 		guardBits = 2
 	}

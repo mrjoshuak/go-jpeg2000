@@ -290,8 +290,14 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 						if w <= 0 || hh <= 0 {
 							continue
 						}
+						// Mb is the band's total magnitude bit-planes; the
+						// tag-tree above gives how many leading ones are all
+						// zero in this block, so the coded planes are the
+						// difference. cb.zeroPlanes already holds the decoded
+						// tag-tree value, not the threshold that resolved it,
+						// so there is no extra plane to add back.
 						mb := h.BandMb(res, b)
-						numbps := mb + 1 - cb.zeroPlanes
+						numbps := mb - cb.zeroPlanes
 						if numbps < 1 {
 							continue
 						}

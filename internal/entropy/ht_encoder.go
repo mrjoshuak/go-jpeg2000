@@ -346,18 +346,22 @@ func encodeCleanupHT(data []int32, width, height, p int) []byte {
 				lcxp[lcxIdx] = uint8((rho[q] & 8) >> 3)
 			}
 
-			// u values for the pair.
+			// u values for the pair. The extra MEL event and the two
+			// "u > 2" prefix modes exist only on the initial stripe: below
+			// it, kappa comes from the context, so a conforming decoder
+			// reads mode 3 as two plain prefixes plus two suffixes
+			// (decode_noninit_uvlc) and never consults MEL for u.
 			u0, u1 := uqv[0], uqv[1]
-			if u0 > 0 && u1 > 0 {
+			if initial && u0 > 0 && u1 > 0 {
 				mel.encode(min2(u0, u1) > 2)
 			}
 			switch {
-			case u0 > 2 && u1 > 2:
+			case initial && u0 > 2 && u1 > 2:
 				vlc.encode(int(uvlcEncTbl[u0-2].pre), int(uvlcEncTbl[u0-2].preLen))
 				vlc.encode(int(uvlcEncTbl[u1-2].pre), int(uvlcEncTbl[u1-2].preLen))
 				vlc.encode(int(uvlcEncTbl[u0-2].suf), int(uvlcEncTbl[u0-2].sufLen))
 				vlc.encode(int(uvlcEncTbl[u1-2].suf), int(uvlcEncTbl[u1-2].sufLen))
-			case u0 > 2 && u1 > 0:
+			case initial && u0 > 2 && u1 > 0:
 				vlc.encode(int(uvlcEncTbl[u0].pre), int(uvlcEncTbl[u0].preLen))
 				vlc.encode(u1-1, 1)
 				vlc.encode(int(uvlcEncTbl[u0].suf), int(uvlcEncTbl[u0].sufLen))

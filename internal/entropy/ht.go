@@ -236,7 +236,14 @@ func (d *HTDecoder) initVLC(data []byte, lcup, scup int) {
 		b := v.data[v.pos]
 		v.pos--
 		v.tmp = uint64(b >> 4)
-		v.bits = 4 - uint32((v.tmp&7)>>2) // Check standard
+		// Reference rev_init: bits = 4 - ((tmp & 7) == 7). The half byte is
+		// short by one bit only when its low three bits are all ones, which is
+		// the stuffing case; treating 4, 5 and 6 the same way dropped a bit and
+		// desynchronised the whole VLC stream.
+		v.bits = 4
+		if v.tmp&7 == 7 {
+			v.bits = 3
+		}
 		v.unstuff = (b | 0x0F) > 0x8F
 	}
 

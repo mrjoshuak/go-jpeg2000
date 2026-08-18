@@ -59,7 +59,7 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 	mqBp := 0
 	mqBuf := t.mqBuf
 	var mqContexts [NumContexts]uint8
-	mqContexts[CtxUni] = 92
+	resetContexts(&mqContexts)
 
 	flags := t.flags
 	data := t.data
@@ -71,132 +71,70 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 		bit := int32(1) << bp
 
 		// ============ SIGNIFICANCE PROPAGATION PASS ============
-		for y := 0; y < height; y++ {
-			rowStart := (y + 1) * stride
-			dataRowStart := y * width
-			isFirstRow := y == 0
-			isLastRow := y == height-1
-
-			// Get pointer to start of row (at x=0, which is index rowStart+1)
-			fRowPtr := unsafe.Add(flagsBase, rowStart+1)
-			dRowPtr := unsafe.Add(dataBase, dataRowStart*4)
-
+		for y0 := 0; y0 < height; y0 += 4 {
 			for x := 0; x < width; x++ {
-				fPtr := unsafe.Add(fRowPtr, x)
-				f := *(*T1Flags)(fPtr)
+				for y := y0; y < y0+4 && y < height; y++ {
+					rowStart := (y + 1) * stride
+					dataRowStart := y * width
+					isFirstRow := y == 0
+					isLastRow := y == height-1
 
-				if f&T1Sig != 0 {
-					continue
-				}
+					// Get pointer to start of row (at x=0, which is index rowStart+1)
+					fRowPtr := unsafe.Add(flagsBase, rowStart+1)
+					dRowPtr := unsafe.Add(dataBase, dataRowStart*4)
 
-				// Quick check using cardinal neighbor flags
-				cardinalSigs := f & (T1SigN | T1SigS | T1SigE | T1SigW)
+					fPtr := unsafe.Add(fRowPtr, x)
+					f := *(*T1Flags)(fPtr)
 
-				var fW, fE, fN, fS, fNW, fNE, fSW, fSE T1Flags
-				if cardinalSigs == 0 {
-					// No cardinal neighbors significant - only check diagonals
-					fNW = *(*T1Flags)(unsafe.Add(fPtr, offsetNW))
-					fNE = *(*T1Flags)(unsafe.Add(fPtr, offsetNE))
-					fSW = *(*T1Flags)(unsafe.Add(fPtr, offsetSW))
-					fSE = *(*T1Flags)(unsafe.Add(fPtr, offsetSE))
-					if (fNW|fNE|fSW|fSE)&T1Sig == 0 {
+					if f&T1Sig != 0 {
 						continue
 					}
-				} else {
-					fW = *(*T1Flags)(unsafe.Add(fPtr, -1))
-					fE = *(*T1Flags)(unsafe.Add(fPtr, 1))
-					fN = *(*T1Flags)(unsafe.Add(fPtr, offsetN))
-					fS = *(*T1Flags)(unsafe.Add(fPtr, offsetS))
-					fNW = *(*T1Flags)(unsafe.Add(fPtr, offsetNW))
-					fNE = *(*T1Flags)(unsafe.Add(fPtr, offsetNE))
-					fSW = *(*T1Flags)(unsafe.Add(fPtr, offsetSW))
-					fSE = *(*T1Flags)(unsafe.Add(fPtr, offsetSE))
-				}
 
-				coeff := *(*int32)(unsafe.Add(dRowPtr, x*4))
-				sig := int(coeff>>bp) & 1
+					// Quick check using cardinal neighbor flags
+					cardinalSigs := f & (T1SigN | T1SigS | T1SigE | T1SigW)
 
-				// Build ZC context
-				packed := uint8(fW&T1Sig) |
-					(uint8(fE&T1Sig) << 1) |
-					(uint8(fN&T1Sig) << 2) |
-					(uint8(fS&T1Sig) << 3) |
-					(uint8(fNW&T1Sig) << 4) |
-					(uint8(fNE&T1Sig) << 5) |
-					(uint8(fSW&T1Sig) << 6) |
-					(uint8(fSE&T1Sig) << 7)
-				ctx := int(lutZCCtx[bandOffset+int(packed)])
-
-				// INLINE MQ ENCODE
-				stateIdx := mqContexts[ctx]
-				qe := mqQe[stateIdx]
-				mps := stateIdx & 1
-				mqA -= qe
-
-				if uint8(sig) == mps {
-					if (mqA & 0x8000) == 0 {
-						if mqA < qe {
-							mqA = qe
-						} else {
-							mqC += qe
-						}
-						mqContexts[ctx] = mqNMPS[stateIdx]
-						for (mqA & 0x8000) == 0 {
-							mqA <<= 1
-							mqC <<= 1
-							mqCT--
-							if mqCT == 0 {
-								mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
-							}
+					var fW, fE, fN, fS, fNW, fNE, fSW, fSE T1Flags
+					if cardinalSigs == 0 {
+						// No cardinal neighbors significant - only check diagonals
+						fNW = *(*T1Flags)(unsafe.Add(fPtr, offsetNW))
+						fNE = *(*T1Flags)(unsafe.Add(fPtr, offsetNE))
+						fSW = *(*T1Flags)(unsafe.Add(fPtr, offsetSW))
+						fSE = *(*T1Flags)(unsafe.Add(fPtr, offsetSE))
+						if (fNW|fNE|fSW|fSE)&T1Sig == 0 {
+							continue
 						}
 					} else {
-						mqC += qe
+						fW = *(*T1Flags)(unsafe.Add(fPtr, -1))
+						fE = *(*T1Flags)(unsafe.Add(fPtr, 1))
+						fN = *(*T1Flags)(unsafe.Add(fPtr, offsetN))
+						fS = *(*T1Flags)(unsafe.Add(fPtr, offsetS))
+						fNW = *(*T1Flags)(unsafe.Add(fPtr, offsetNW))
+						fNE = *(*T1Flags)(unsafe.Add(fPtr, offsetNE))
+						fSW = *(*T1Flags)(unsafe.Add(fPtr, offsetSW))
+						fSE = *(*T1Flags)(unsafe.Add(fPtr, offsetSE))
 					}
-				} else {
-					if mqA < qe {
-						mqC += qe
-					} else {
-						mqA = qe
-					}
-					mqContexts[ctx] = mqNLPS[stateIdx]
-					for (mqA & 0x8000) == 0 {
-						mqA <<= 1
-						mqC <<= 1
-						mqCT--
-						if mqCT == 0 {
-							mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
-						}
-					}
-				}
 
-				if sig != 0 {
-					wSig := int(fW&T1Sig) >> 0
-					wChi := int(fW&T1SignNeg) >> 3
-					eSig := int(fE&T1Sig) >> 0
-					eChi := int(fE&T1SignNeg) >> 3
-					nSig := int(fN&T1Sig) >> 0
-					nChi := int(fN&T1SignNeg) >> 3
-					sSig := int(fS&T1Sig) >> 0
-					sChi := int(fS&T1SignNeg) >> 3
+					coeff := *(*int32)(unsafe.Add(dRowPtr, x*4))
+					sig := int(coeff>>bp) & 1
 
-					scIdx := wSig | (wChi << 1) | (eSig << 2) | (eChi << 3) |
-						(nSig << 4) | (nChi << 5) | (sSig << 6) | (sChi << 7)
+					// Build ZC context
+					packed := uint8(fW&T1Sig) |
+						(uint8(fE&T1Sig) << 1) |
+						(uint8(fN&T1Sig) << 2) |
+						(uint8(fS&T1Sig) << 3) |
+						(uint8(fNW&T1Sig) << 4) |
+						(uint8(fNE&T1Sig) << 5) |
+						(uint8(fSW&T1Sig) << 6) |
+						(uint8(fSE&T1Sig) << 7)
+					ctx := int(lutZCCtx[bandOffset+int(packed)])
 
-					ctx := int(lutSignCtx[scIdx]) + CtxSC0
-					pred := int(lutSignPred[scIdx])
-
-					sign := 0
-					if f&T1SignNeg != 0 {
-						sign = 1
-					}
-					decision := sign ^ pred
-
+					// INLINE MQ ENCODE
 					stateIdx := mqContexts[ctx]
 					qe := mqQe[stateIdx]
 					mps := stateIdx & 1
 					mqA -= qe
 
-					if uint8(decision) == mps {
+					if uint8(sig) == mps {
 						if (mqA & 0x8000) == 0 {
 							if mqA < qe {
 								mqA = qe
@@ -232,78 +170,161 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 						}
 					}
 
-					*(*T1Flags)(fPtr) |= T1Sig
-					if !isFirstRow {
-						*(*T1Flags)(unsafe.Add(fPtr, offsetN)) |= T1SigS
+					if sig != 0 {
+						wSig := int(fW&T1Sig) >> 0
+						wChi := int(fW&T1SignNeg) >> 3
+						eSig := int(fE&T1Sig) >> 0
+						eChi := int(fE&T1SignNeg) >> 3
+						nSig := int(fN&T1Sig) >> 0
+						nChi := int(fN&T1SignNeg) >> 3
+						sSig := int(fS&T1Sig) >> 0
+						sChi := int(fS&T1SignNeg) >> 3
+
+						scIdx := wSig | (wChi << 1) | (eSig << 2) | (eChi << 3) |
+							(nSig << 4) | (nChi << 5) | (sSig << 6) | (sChi << 7)
+
+						ctx := int(lutSignCtx[scIdx]) + CtxSC0
+						pred := int(lutSignPred[scIdx])
+
+						sign := 0
+						if f&T1SignNeg != 0 {
+							sign = 1
+						}
+						decision := sign ^ pred
+
+						stateIdx := mqContexts[ctx]
+						qe := mqQe[stateIdx]
+						mps := stateIdx & 1
+						mqA -= qe
+
+						if uint8(decision) == mps {
+							if (mqA & 0x8000) == 0 {
+								if mqA < qe {
+									mqA = qe
+								} else {
+									mqC += qe
+								}
+								mqContexts[ctx] = mqNMPS[stateIdx]
+								for (mqA & 0x8000) == 0 {
+									mqA <<= 1
+									mqC <<= 1
+									mqCT--
+									if mqCT == 0 {
+										mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
+									}
+								}
+							} else {
+								mqC += qe
+							}
+						} else {
+							if mqA < qe {
+								mqC += qe
+							} else {
+								mqA = qe
+							}
+							mqContexts[ctx] = mqNLPS[stateIdx]
+							for (mqA & 0x8000) == 0 {
+								mqA <<= 1
+								mqC <<= 1
+								mqCT--
+								if mqCT == 0 {
+									mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
+								}
+							}
+						}
+
+						*(*T1Flags)(fPtr) |= T1Sig
+						if !isFirstRow {
+							*(*T1Flags)(unsafe.Add(fPtr, offsetN)) |= T1SigS
+						}
+						if !isLastRow {
+							*(*T1Flags)(unsafe.Add(fPtr, offsetS)) |= T1SigN
+						}
+						if x > 0 {
+							*(*T1Flags)(unsafe.Add(fPtr, -1)) |= T1SigE
+						}
+						if x < width-1 {
+							*(*T1Flags)(unsafe.Add(fPtr, 1)) |= T1SigW
+						}
 					}
-					if !isLastRow {
-						*(*T1Flags)(unsafe.Add(fPtr, offsetS)) |= T1SigN
-					}
-					if x > 0 {
-						*(*T1Flags)(unsafe.Add(fPtr, -1)) |= T1SigE
-					}
-					if x < width-1 {
-						*(*T1Flags)(unsafe.Add(fPtr, 1)) |= T1SigW
-					}
+					*(*T1Flags)(fPtr) |= T1Visit
 				}
-				*(*T1Flags)(fPtr) |= T1Visit
 			}
 		}
 
 		// ============ MAGNITUDE REFINEMENT PASS ============
-		for y := 0; y < height; y++ {
-			rowStart := (y + 1) * stride
-			dataRowStart := y * width
-
-			fRowPtr := unsafe.Add(flagsBase, rowStart+1)
-			dRowPtr := unsafe.Add(dataBase, dataRowStart*4)
-
+		for y0 := 0; y0 < height; y0 += 4 {
 			for x := 0; x < width; x++ {
-				fPtr := unsafe.Add(fRowPtr, x)
-				f := *(*T1Flags)(fPtr)
+				for y := y0; y < y0+4 && y < height; y++ {
+					rowStart := (y + 1) * stride
+					dataRowStart := y * width
 
-				if f&T1Sig == 0 || f&T1Visit != 0 {
-					continue
-				}
+					fRowPtr := unsafe.Add(flagsBase, rowStart+1)
+					dRowPtr := unsafe.Add(dataBase, dataRowStart*4)
 
-				coeff := *(*int32)(unsafe.Add(dRowPtr, x*4))
-				refBit := 0
-				if coeff&bit != 0 {
-					refBit = 1
-				}
+					fPtr := unsafe.Add(fRowPtr, x)
+					f := *(*T1Flags)(fPtr)
 
-				var ctx int
-				if f&T1Refine == 0 {
-					fW := *(*T1Flags)(unsafe.Add(fPtr, -1))
-					fE := *(*T1Flags)(unsafe.Add(fPtr, 1))
-					fN := *(*T1Flags)(unsafe.Add(fPtr, offsetN))
-					fS := *(*T1Flags)(unsafe.Add(fPtr, offsetS))
-					fNW := *(*T1Flags)(unsafe.Add(fPtr, offsetNW))
-					fNE := *(*T1Flags)(unsafe.Add(fPtr, offsetNE))
-					fSW := *(*T1Flags)(unsafe.Add(fPtr, offsetSW))
-					fSE := *(*T1Flags)(unsafe.Add(fPtr, offsetSE))
-					if (fW|fE|fN|fS|fNW|fNE|fSW|fSE)&T1Sig != 0 {
-						ctx = CtxMag1
-					} else {
-						ctx = CtxMag0
+					if f&T1Sig == 0 || f&T1Visit != 0 {
+						continue
 					}
-				} else {
-					ctx = CtxMag2
-				}
 
-				stateIdx := mqContexts[ctx]
-				qe := mqQe[stateIdx]
-				mps := stateIdx & 1
-				mqA -= qe
+					coeff := *(*int32)(unsafe.Add(dRowPtr, x*4))
+					refBit := 0
+					if coeff&bit != 0 {
+						refBit = 1
+					}
 
-				if uint8(refBit) == mps {
-					if (mqA & 0x8000) == 0 {
-						if mqA < qe {
-							mqA = qe
+					var ctx int
+					if f&T1Refine == 0 {
+						fW := *(*T1Flags)(unsafe.Add(fPtr, -1))
+						fE := *(*T1Flags)(unsafe.Add(fPtr, 1))
+						fN := *(*T1Flags)(unsafe.Add(fPtr, offsetN))
+						fS := *(*T1Flags)(unsafe.Add(fPtr, offsetS))
+						fNW := *(*T1Flags)(unsafe.Add(fPtr, offsetNW))
+						fNE := *(*T1Flags)(unsafe.Add(fPtr, offsetNE))
+						fSW := *(*T1Flags)(unsafe.Add(fPtr, offsetSW))
+						fSE := *(*T1Flags)(unsafe.Add(fPtr, offsetSE))
+						if (fW|fE|fN|fS|fNW|fNE|fSW|fSE)&T1Sig != 0 {
+							ctx = CtxMag1
+						} else {
+							ctx = CtxMag0
+						}
+					} else {
+						ctx = CtxMag2
+					}
+
+					stateIdx := mqContexts[ctx]
+					qe := mqQe[stateIdx]
+					mps := stateIdx & 1
+					mqA -= qe
+
+					if uint8(refBit) == mps {
+						if (mqA & 0x8000) == 0 {
+							if mqA < qe {
+								mqA = qe
+							} else {
+								mqC += qe
+							}
+							mqContexts[ctx] = mqNMPS[stateIdx]
+							for (mqA & 0x8000) == 0 {
+								mqA <<= 1
+								mqC <<= 1
+								mqCT--
+								if mqCT == 0 {
+									mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
+								}
+							}
 						} else {
 							mqC += qe
 						}
-						mqContexts[ctx] = mqNMPS[stateIdx]
+					} else {
+						if mqA < qe {
+							mqC += qe
+						} else {
+							mqA = qe
+						}
+						mqContexts[ctx] = mqNLPS[stateIdx]
 						for (mqA & 0x8000) == 0 {
 							mqA <<= 1
 							mqC <<= 1
@@ -312,27 +333,10 @@ func (t *T1) EncodeFast5(bandType int) []byte {
 								mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
 							}
 						}
-					} else {
-						mqC += qe
 					}
-				} else {
-					if mqA < qe {
-						mqC += qe
-					} else {
-						mqA = qe
-					}
-					mqContexts[ctx] = mqNLPS[stateIdx]
-					for (mqA & 0x8000) == 0 {
-						mqA <<= 1
-						mqC <<= 1
-						mqCT--
-						if mqCT == 0 {
-							mqBp, mqC, mqCT = mqByteOutLocal(mqBuf, mqBp, mqC)
-						}
-					}
-				}
 
-				*(*T1Flags)(fPtr) |= T1Refine
+					*(*T1Flags)(fPtr) |= T1Refine
+				}
 			}
 		}
 

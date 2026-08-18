@@ -49,61 +49,56 @@ func init() {
 			v := n + s             // vertical count
 			d := nw + ne + sw + se // diagonal count
 
+			// ISO/IEC 15444-1 Table D.1. The vertically high-pass band (LH)
+			// exchanges the horizontal and vertical counts; every other band
+			// uses the horizontal-first ordering.
 			var ctx int
 			switch bandType {
-			case BandHL: // HL band - swap h and v
+			case BandHL:
 				h, v = v, h
 				fallthrough
-			case BandLL, BandLH: // LL/LH bands use same rules
-				if h == 2 {
-					ctx = 8
-				} else if h == 1 {
-					if v >= 1 {
-						ctx = 7
-					} else if d >= 1 {
-						ctx = 6
-					} else {
-						ctx = 5
-					}
-				} else if v == 2 {
-					ctx = 4
-				} else if v == 1 {
-					if d >= 1 {
-						ctx = 3
-					} else {
-						ctx = 2
-					}
-				} else if d >= 2 {
-					ctx = 1
-				} else {
+			case BandLL, BandLH:
+				switch {
+				case h == 0 && v == 0 && d == 0:
 					ctx = 0
-				}
-			case BandHH: // HH band
-				hv := h + v
-				if hv >= 3 {
+				case h == 0 && v == 0 && d == 1:
+					ctx = 1
+				case h == 0 && v == 0:
+					ctx = 2
+				case h == 0 && v == 1:
+					ctx = 3
+				case h == 0:
+					ctx = 4
+				case h == 1 && v == 0 && d == 0:
+					ctx = 5
+				case h == 1 && v == 0:
+					ctx = 6
+				case h == 1:
+					ctx = 7
+				default:
 					ctx = 8
-				} else if hv == 2 {
-					if d >= 2 {
-						ctx = 7
-					} else if d >= 1 {
-						ctx = 6
-					} else {
-						ctx = 5
-					}
-				} else if hv == 1 {
-					if d >= 2 {
-						ctx = 4
-					} else {
-						ctx = 3
-					}
-				} else {
-					if d >= 2 {
-						ctx = 2
-					} else if d >= 1 {
-						ctx = 1
-					} else {
-						ctx = 0
-					}
+				}
+			case BandHH:
+				hv := h + v
+				switch {
+				case d == 0 && hv == 0:
+					ctx = 0
+				case d == 0 && hv == 1:
+					ctx = 1
+				case d == 0:
+					ctx = 2
+				case d == 1 && hv == 0:
+					ctx = 3
+				case d == 1 && hv == 1:
+					ctx = 4
+				case d == 1:
+					ctx = 5
+				case d == 2 && hv == 0:
+					ctx = 6
+				case d == 2:
+					ctx = 7
+				default:
+					ctx = 8
 				}
 			}
 			lutZCCtx[bandType*256+packed] = uint8(ctx)
@@ -115,39 +110,8 @@ func init() {
 	for hc := -2; hc <= 2; hc++ {
 		for vc := -2; vc <= 2; vc++ {
 			idx := (hc+2)*5 + (vc + 2)
-
-			h := hc
-			v := vc
-			pred := 0
-			if h < 0 {
-				pred = 1
-				h = -h
-			}
-			if h == 0 && v < 0 {
-				pred = 1
-				v = -v
-			}
-
-			var ctx int
-			if h == 1 {
-				if v == 1 {
-					ctx = CtxSC4
-				} else if v == 0 {
-					ctx = CtxSC2
-				} else {
-					ctx = CtxSC1
-				}
-			} else if h == 0 {
-				if v == 1 {
-					ctx = CtxSC1
-				} else if v == 0 {
-					ctx = CtxSC0
-				}
-			} else if h == 2 {
-				ctx = CtxSC3
-			}
-
-			lutSCCtx[idx] = uint8((ctx << 1) | pred)
+			ctx, pred := signContextRelative(hc, vc)
+			lutSCCtx[idx] = uint8(((ctx + CtxSC0) << 1) | pred)
 		}
 	}
 
@@ -197,38 +161,55 @@ func init() {
 			}
 		}
 
-		// Compute prediction
-		pred := 0
-		if hc < 0 {
-			pred = 1
-			hc = -hc
-		}
-		if hc == 0 && vc < 0 {
-			pred = 1
-			vc = -vc
-		}
-
-		// Compute context (0-4)
-		ctx := uint8(0) // CtxSC0 relative
-		if hc == 1 {
-			if vc == 1 {
-				ctx = 4 // CtxSC4
-			} else if vc == 0 {
-				ctx = 2 // CtxSC2
-			} else {
-				ctx = 1 // CtxSC1
-			}
-		} else if hc == 0 {
-			if vc == 1 {
-				ctx = 1 // CtxSC1
-			}
-		} else if hc == 2 {
-			ctx = 3 // CtxSC3
-		}
-
-		lutSignCtx[i] = ctx
+		ctx, pred := signContextRelative(hc, vc)
+		lutSignCtx[i] = uint8(ctx)
 		lutSignPred[i] = uint8(pred)
 	}
+}
+
+// signContextRelative implements ISO/IEC 15444-1 Table D.3. hc and vc are the
+// raw horizontal and vertical sign contributions (each neighbour contributes
+// +1 when significant and positive, -1 when significant and negative), so they
+// arrive in [-2, 2]; the standard clamps each to [-1, 1] before the lookup.
+// The returned context is relative to CtxSC0 and pred is the XOR bit.
+//
+// The previous table clamped neither contribution and mapped hc == 1 one
+// context too low, so every sign decision on a conforming stream used the wrong
+// adaptive state.
+func signContextRelative(hc, vc int) (ctx, pred int) {
+	if hc > 1 {
+		hc = 1
+	} else if hc < -1 {
+		hc = -1
+	}
+	if vc > 1 {
+		vc = 1
+	} else if vc < -1 {
+		vc = -1
+	}
+
+	// The XOR bit is taken from the unnegated contributions.
+	if hc < 0 || (hc == 0 && vc < 0) {
+		pred = 1
+	}
+
+	if hc < 0 {
+		hc, vc = -hc, -vc
+	}
+
+	switch {
+	case hc == 0 && vc == 0:
+		ctx = 0
+	case hc == 0:
+		ctx = 1
+	case vc < 0:
+		ctx = 2
+	case vc == 0:
+		ctx = 3
+	default:
+		ctx = 4
+	}
+	return ctx, pred
 }
 
 // getZCContextFast returns ZC context using packed flags and LUT.
