@@ -35,6 +35,21 @@ after confirming the oracle round-trips its own output bit-exactly.
       conforming decoder could read the result. Now routed through
       `encodeCodeBlock`, which selects the coder the markers declare.
 
+### Progress since (same day)
+
+- [x] HT block **decoder** now decodes an OpenJPH-written code-block exactly
+      (`TestHTDecodeOpenJPHBlock`, 64/64). Five ported defects: Scup packing,
+      the VLC length mask, quad geometry, sample placement, and the complete
+      absence of MEL run decoding.
+- [x] HT block **encoder** ported from OpenJPH with the standard VLC tables
+      generated from its `table0.h`/`table1.h`. Round-trips exactly at every
+      block size (`TestHTCleanupIsExact`).
+- [x] Standard **T2 packet decoding** with real multi-level tag trees. A
+      single-resolution OpenJPH HTJ2K codestream now decodes exactly, 0/64
+      samples different — the first conforming decode this library has managed.
+- [x] Standard **T2 packet encoding** written. OpenJPH parses the resulting
+      markers and packet headers and reaches block decoding.
+
 ### Open — the library is not interoperable until these are done
 
 - [ ] **The HT block coder does not work.** `TestHTCleanupIsExact` (added here)
@@ -57,6 +72,27 @@ after confirming the oracle round-trips its own output bit-exactly.
       dead code with respect to the public API.
 - [ ] `PacketDecoder.decodeTagTreeValue` is a unary decode labelled "Simplified".
       It is correct only for a 1x1 tree (a single code-block per precinct).
+      (`t2_packets.go` has a correct tag tree; `internal/tcd/t2.go` remains dead.)
+- [ ] **Multi-resolution decoding is broken.** Isolated with a 2x2 matrix:
+      HT at one resolution is exact, MQ at one resolution is 63/64 wrong, HT at
+      two resolutions is 63/64 wrong. So T2 and the HT block coder are correct,
+      and there are two further defects — in the MQ block decoder and in the
+      wavelet path — that are unrelated to the HT work.
+- [ ] **The T2 encoder is written but not wired in.** Enabling it broke four
+      passing tests, because our own T2 decoder is single-resolution only, so
+      the library could no longer read its own output for any image with a
+      wavelet. See the TODO in `encoder.go`. Order: fix multi-resolution decode,
+      then enable the encoder.
+- [ ] **The `p = 0` convention is self-inverse.** `encodeCleanupHT` encodes with
+      no bitplane shift and the decoder inverts with `(v_n + 2) >> 1`, ignoring
+      p entirely. The two agree, which is why the round-trip is exact, but the
+      reference positions magnitudes by `p = numbps` and signals that count in
+      the packet header. OpenJPH reads our header, then fails in
+      `ojph_codeblock.cpp:221` decoding the block. `TestHTEncodeMatchesOpenJPH`
+      is at 69/70 bytes, the one difference being the MEL terminate byte.
+      Note the U_q values our encoder computes match the decoder's ground truth
+      exactly, so the significance and magnitude coding is right; it is the
+      bitplane positioning that is not.
 
 ### Consequence for go-openexr
 
