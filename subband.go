@@ -1,6 +1,9 @@
 package jpeg2000
 
-import "github.com/mrjoshuak/go-jpeg2000/internal/entropy"
+import (
+	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
+	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
+)
 
 // Subband geometry.
 //
@@ -16,6 +19,10 @@ import "github.com/mrjoshuak/go-jpeg2000/internal/entropy"
 // claimed a 9-wide HL band where the standard defines an 8-wide one, so the
 // code-block partition, the packet headers and the coefficient placement were
 // all one column too wide.
+//
+// The arithmetic itself lives in internal/codestream, so that the tile decoder,
+// which cannot import this package, dequantizes exactly the rectangles this one
+// quantized.
 
 // Band orientation indices, matching the order subbands appear in a packet at
 // resolution levels above zero.
@@ -28,23 +35,7 @@ const (
 // subbandDims returns the dimensions of one detail subband, given the
 // dimensions of the resolution level it is split from.
 func subbandDims(resW, resH, band int) (int, int) {
-	lowW, highW := (resW+1)/2, resW/2
-	lowH, highH := (resH+1)/2, resH/2
-	switch band {
-	case bandHL:
-		return highW, lowH
-	case bandLH:
-		return lowW, highH
-	default: // bandHH
-		return highW, highH
-	}
-}
-
-// resolutionDims returns the dimensions of resolution level r for a tile
-// component of the given size, i.e. ceil(size / 2^(numRes-1-r)).
-func resolutionDims(tcW, tcH, numRes, r int) (int, int) {
-	scale := 1 << uint(numRes-1-r)
-	return (tcW + scale - 1) / scale, (tcH + scale - 1) / scale
+	return codestream.SubbandDims(resW, resH, band)
 }
 
 // bandDims returns the dimensions of the subband identified by (r, band): the
@@ -57,11 +48,13 @@ func resolutionDims(tcW, tcH, numRes, r int) (int, int) {
 // TestTileGeometryMatchesOriginZero pins the general form to — that agreement
 // is what shows the tiling work left untiled output alone.
 func bandDims(tcW, tcH, numRes, r, band int) (int, int) {
-	w, h := resolutionDims(tcW, tcH, numRes, r)
-	if r == 0 {
-		return w, h
-	}
-	return subbandDims(w, h, band)
+	return codestream.BandDims(tcW, tcH, numRes, r, band)
+}
+
+// computeSubbandOffset computes the (x, y) offset of a subband within the
+// DWT-decomposed data array. Used by both encoder and decoder.
+func computeSubbandOffset(width, height, numRes, res, bandType int) (int, int) {
+	return codestream.SubbandOffset(width, height, numRes, res, bandType)
 }
 
 // Tile geometry.

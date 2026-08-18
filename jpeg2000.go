@@ -225,8 +225,21 @@ type Options struct {
 	Lossless bool
 
 	// Quality specifies the compression quality (1-100).
-	// Only used when Lossless is false.
-	// Higher values mean better quality but larger files.
+	// Only used when Lossless is false. Zero means 100.
+	//
+	// It is an error budget rather than a scale factor: it fixes the largest
+	// difference, in sample counts, between a decoded sample and the source.
+	// 100 asks for half a count at 8-bit precision and each ten points below
+	// doubles that, with the budget scaling with the sample range so a 16-bit
+	// image is held to the same relative accuracy. The quantization step sizes
+	// the QCD marker carries are derived from that budget and the synthesis
+	// gain of each subband, so the guarantee holds for any conforming decoder,
+	// not only for this one. See "Lossy 9/7" in the README.
+	//
+	// Half a count cannot survive rounding to an integer sample, so 100
+	// reproduces 8-bit input exactly. Two limits can widen the steps past what
+	// was asked at deep decompositions: the five-bit QCD exponent field, and
+	// the 30 bit-plane ceiling the block coder imposes.
 	Quality int
 
 	// CompressionRatio specifies the target compression ratio.

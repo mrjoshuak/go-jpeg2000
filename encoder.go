@@ -40,6 +40,13 @@ type encoder struct {
 	isFloat  bool
 	floatImg *FloatImage
 	halfImg  *HalfImage
+
+	// Quantization state for the irreversible path, set by
+	// transformIrreversible and read by generateQCD and bandMb. Those two must
+	// agree: the QCD exponent a decoder reads is what fixes Mb, and the
+	// zero-bit-plane counts in the packet headers are written relative to it.
+	qcdGuardBits int
+	qcdSteps     []codestream.StepSize
 }
 
 // numResolutions returns the number of resolution levels to encode,
@@ -529,43 +536,205 @@ func (e *encoder) preprocess() error {
 
 	// A tiled image is transformed one tile at a time, at each tile's own
 	// absolute origin: the wavelet does not run across a tile boundary, and
-	// which coefficients are lowpass depends on where the tile starts. See
-	// transformTile.
+	// which coefficients are lowpass depends on where the tile starts.
+	// transformTile dispatches on Lossless itself.
 	if e.numTiles() > 1 {
 		return nil
 	}
 
+	// Untiled irreversible: transformIrreversible also applies the explicit
+	// quantisation the 9/7 path signals in QCD.
+	if !e.options.Lossless {
+		e.transformIrreversible(numLevels)
+		return nil
+	}
+
 	for c := 0; c < e.numComponents; c++ {
-		if e.options.Lossless {
-			if e.maxPrecision() > 16 {
-				dwt.DecomposeMultiLevel53_32bit(e.componentData[c], e.width, e.height, numLevels)
-			} else {
-				dwt.DecomposeMultiLevel53(e.componentData[c], e.width, e.height, numLevels)
-			}
+		if e.maxPrecision() > 16 {
+			dwt.DecomposeMultiLevel53_32bit(e.componentData[c], e.width, e.height, numLevels)
 		} else {
-			// Convert to float for 9-7 transform
-			dataFloat := make([]float64, len(e.componentData[c]))
-			for i, v := range e.componentData[c] {
-				dataFloat[i] = float64(v)
-			}
-			dwt.DecomposeMultiLevel97(dataFloat, e.width, e.height, numLevels)
-			// Convert back with quantization
-			quality := e.options.Quality
-			if quality <= 0 {
-				quality = 100 // Default to lossless if quality not set
-			}
-			stepSize := 1.0 / float64(quality)
-			for i, v := range dataFloat {
-				if v >= 0 {
-					e.componentData[c][i] = int32(v/stepSize + 0.5)
-				} else {
-					e.componentData[c][i] = int32(v/stepSize - 0.5)
-				}
-			}
+			dwt.DecomposeMultiLevel53(e.componentData[c], e.width, e.height, numLevels)
 		}
 	}
 
 	return nil
+}
+
+// maxQuantIndexBits caps the magnitude of a quantization index. The HT block
+// coder doubles the magnitude before coding it (val = t + t in the reference
+// encoder), so an index must leave room for that doubling and for the sign in a
+// 32-bit word.
+const maxQuantIndexBits = 28
+
+// maxBandMb caps Mb, the bit-plane count a subband may declare.
+//
+// A code-block signals numbps = 2, so its zero bit-plane count is Mb - 1, and
+// the HT block decoder derives the position it places magnitudes at as
+// p = 30 - (zero bit-planes). ISO/IEC 15444-15 leaves no room below that:
+// OpenJPH takes its "p < 0" error path at 31 zero planes
+// (ojph_block_decoder32.cpp:768) and OpenJPEG computes the same p. Mb of 31 or
+// more therefore produces a file that this library reads back correctly and no
+// other implementation does — measured, at eight resolution levels, as a decode
+// in which 65151 of 65536 samples differ.
+const maxBandMb = 30
+
+// transformIrreversible applies the 9/7 wavelet transform and the Annex E
+// quantizer, and records the QCD parameters the codestream must then carry.
+//
+// The step sizes cannot be chosen independently of the data: the QCD exponent
+// fixes Mb, the number of bit-planes a subband is allowed to occupy, and the
+// packet headers and the block coder both derive the coded magnitude range from
+// it. So the coefficients are measured first, then the step sizes are widened
+// if the indices would not fit, and only then are the guard bits set so that
+// Mb covers what the block coder will actually emit.
+func (e *encoder) transformIrreversible(numLevels int) {
+	numRes := numLevels + 1
+	prec := e.maxPrecision()
+
+	coefs := make([][]float64, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		coefs[c] = make([]float64, len(e.componentData[c]))
+		for i, v := range e.componentData[c] {
+			coefs[c][i] = float64(v)
+		}
+		dwt.DecomposeMultiLevel97(coefs[c], e.width, e.height, numLevels)
+	}
+
+	// Largest coefficient magnitude in each subband, over every component.
+	numBands := 3*numLevels + 1
+	bandMax := make([]float64, numBands)
+	codestream.ForEachSubband(e.width, e.height, numRes, func(sb codestream.SubbandRect) {
+		m := 0.0
+		for _, data := range coefs {
+			for y := 0; y < sb.H; y++ {
+				row := (sb.Y0 + y) * e.width
+				for x := 0; x < sb.W; x++ {
+					if v := math.Abs(data[row+sb.X0+x]); v > m {
+						m = v
+					}
+				}
+			}
+		}
+		if sb.Index < len(bandMax) {
+			bandMax[sb.Index] = m
+		}
+	})
+
+	steps := packStepSizes(idealStepSizes(numRes, e.options.Quality, prec), numRes, prec)
+
+	// Widen every step size by the same power of two until the indices fit and
+	// no subband declares more bit-planes than the block coder can place.
+	// Halving the exponent field doubles Δ_b, which drops one bit from every
+	// index and one from every Mb, and leaves Mb − (index bits) unchanged.
+	guard := guardBitsFor(bandMax, steps, numRes, prec)
+	for indexBits(bandMax, steps, numRes, prec) > maxQuantIndexBits ||
+		guard+maxStepExponent(steps)-1 > maxBandMb {
+		widened := false
+		for i := range steps {
+			if steps[i].Exponent > 1 {
+				steps[i].Exponent--
+				widened = true
+			}
+		}
+		if !widened {
+			break
+		}
+		guard = guardBitsFor(bandMax, steps, numRes, prec)
+	}
+
+	e.qcdGuardBits = guard
+	e.qcdSteps = steps
+
+	// Quantize in place, one step size per subband.
+	codestream.ForEachSubband(e.width, e.height, numRes, func(sb codestream.SubbandRect) {
+		if sb.Index >= len(steps) {
+			return
+		}
+		delta := steps[sb.Index].Delta(prec + codestream.BandGainLog2(sb.Res, sb.Detail))
+		for c := 0; c < e.numComponents; c++ {
+			for y := 0; y < sb.H; y++ {
+				row := (sb.Y0 + y) * e.width
+				for x := 0; x < sb.W; x++ {
+					i := row + sb.X0 + x
+					e.componentData[c][i] = quantizeIndex(coefs[c][i], delta)
+				}
+			}
+		}
+	})
+}
+
+// guardBitsFor returns the guard-bit count Mb = G + ε_b − 1 needs so that it
+// covers every subband. A conforming decoder rejects a code-block whose
+// per-quad exponent U_q exceeds Mb, and the HT coder emits U_q equal to the bit
+// count of twice the index magnitude, one more than the magnitude itself.
+func guardBitsFor(bandMax []float64, steps []codestream.StepSize, numRes, prec int) int {
+	guard := 2
+	for res := 0; res < numRes; res++ {
+		details := 1
+		if res > 0 {
+			details = 3
+		}
+		for detail := 0; detail < details; detail++ {
+			idx := codestream.BandIndex(res, detail)
+			if idx >= len(steps) || idx >= len(bandMax) {
+				continue
+			}
+			rb := prec + codestream.BandGainLog2(res, detail)
+			bits := magnitudeBits(bandMax[idx] / steps[idx].Delta(rb))
+			if g := bits + 2 - int(steps[idx].Exponent); g > guard {
+				guard = g
+			}
+		}
+	}
+	if guard > 7 {
+		guard = 7
+	}
+	return guard
+}
+
+// maxStepExponent returns the largest exponent in a step-size list.
+func maxStepExponent(steps []codestream.StepSize) int {
+	m := 0
+	for _, s := range steps {
+		if int(s.Exponent) > m {
+			m = int(s.Exponent)
+		}
+	}
+	return m
+}
+
+// indexBits returns the largest number of magnitude bits any quantization
+// index will need under the given step sizes.
+func indexBits(bandMax []float64, steps []codestream.StepSize, numRes, prec int) int {
+	worst := 0
+	for res := 0; res < numRes; res++ {
+		details := 1
+		if res > 0 {
+			details = 3
+		}
+		for detail := 0; detail < details; detail++ {
+			idx := codestream.BandIndex(res, detail)
+			if idx >= len(steps) || idx >= len(bandMax) {
+				continue
+			}
+			rb := prec + codestream.BandGainLog2(res, detail)
+			if b := magnitudeBits(bandMax[idx] / steps[idx].Delta(rb)); b > worst {
+				worst = b
+			}
+		}
+	}
+	return worst
+}
+
+// magnitudeBits returns the number of bits needed for the integer part of v.
+func magnitudeBits(v float64) int {
+	if !(v >= 1) {
+		return 0
+	}
+	if math.IsInf(v, 0) {
+		return 63
+	}
+	return int(math.Floor(math.Log2(v))) + 1
 }
 
 // generateCodestream generates the JPEG 2000 codestream.
@@ -779,25 +948,48 @@ func (e *encoder) generateQCD() []byte {
 			buf[5+i] = uint8(exp) << 3
 		}
 	} else {
-		// Scalar derived quantization
-		length := 5
+		// Scalar expounded quantization: an exponent/mantissa pair per
+		// subband, in the order LL, then HL, LH, HH of each resolution level
+		// (ISO/IEC 15444-1 A.6.4, Table A.28 style 2).
+		//
+		// This used to declare style 1, scalar derived, and then write a
+		// single sixteen-bit field that was neither an exponent nor a
+		// mantissa but (100 - quality) * 256. OpenJPH refuses the file
+		// outright — "Scalar derived quantization is not supported yet in QCD
+		// marker", ojph_params.cpp:1926 — and a decoder that did accept it
+		// would derive step sizes unrelated to the ones the encoder used,
+		// because nothing on the encoding side ever read that field back.
+		guard, steps := e.quantizationParameters()
+
+		length := 3 + 2*numBands
 		buf = make([]byte, 2+length)
 		binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.QCD))
 		binary.BigEndian.PutUint16(buf[2:4], uint16(length))
-
-		// Sqcd: scalar derived, 1 guard bit
-		buf[4] = codestream.QuantizationScalarDerived | (1 << 5)
-
-		// Base step size
-		stepSize := uint16(0x4000) // Default step size
-		if e.options.Quality > 0 {
-			// Adjust based on quality
-			stepSize = uint16((100 - e.options.Quality) * 256)
+		buf[4] = codestream.QuantizationScalarExpounded | (uint8(guard) << 5)
+		for i := 0; i < numBands; i++ {
+			var s codestream.StepSize
+			if i < len(steps) {
+				s = steps[i]
+			}
+			binary.BigEndian.PutUint16(buf[5+2*i:7+2*i],
+				uint16(s.Exponent)<<11|(s.Mantissa&0x07FF))
 		}
-		binary.BigEndian.PutUint16(buf[5:7], stepSize)
 	}
 
 	return buf
+}
+
+// quantizationParameters returns the guard-bit count and per-subband step sizes
+// the irreversible path settled on. transformIrreversible always runs before
+// any marker is written; the fallback keeps a caller that reaches here without
+// having transformed anything from writing a zero-length step-size list.
+func (e *encoder) quantizationParameters() (int, []codestream.StepSize) {
+	if len(e.qcdSteps) > 0 {
+		return e.qcdGuardBits, e.qcdSteps
+	}
+	numRes := e.numResolutions()
+	prec := e.maxPrecision()
+	return 2, packStepSizes(idealStepSizes(numRes, e.options.Quality, prec), numRes, prec)
 }
 
 // generateCOM generates the COM marker segment.
@@ -939,32 +1131,10 @@ func computeNumBPS(data []int32) int {
 	return numBPS
 }
 
-// computeSubbandOffset computes the (x, y) offset of a subband within the
-// DWT-decomposed data array of a tile at the image origin. Like bandDims, this
-// is now the origin-zero statement of the rule that the tests hold
-// tileBandGeom to, rather than something the codec calls.
-func computeSubbandOffset(width, height, numRes, res, bandType int) (int, int) {
-	if res == 0 {
-		return 0, 0
-	}
-	decompLevel := numRes - 1 - res
-	w, h := width, height
-	for i := 0; i < decompLevel; i++ {
-		w = (w + 1) / 2
-		h = (h + 1) / 2
-	}
-	halfW := (w + 1) / 2
-	halfH := (h + 1) / 2
-	switch bandType {
-	case entropy.BandHL:
-		return halfW, 0
-	case entropy.BandLH:
-		return 0, halfH
-	case entropy.BandHH:
-		return halfW, halfH
-	default:
-		return 0, 0
-	}
+// subbandOffset computes the (x, y) offset of a subband within the
+// DWT-decomposed data array for a given resolution and band type.
+func (e *encoder) subbandOffset(res, bandType int) (int, int) {
+	return computeSubbandOffset(e.width, e.height, e.numResolutions(), res, bandType)
 }
 
 // buildTileData constructs tile data with a metadata table followed by

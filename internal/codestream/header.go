@@ -328,6 +328,24 @@ type TilePartHeader struct {
 	PackedPacketHeaders     []byte
 }
 
+// MaxPrecision returns the largest component precision the SIZ marker
+// declares. The QCD marker carries one default set of step sizes for every
+// component, so the nominal dynamic range those step sizes are relative to has
+// to be a single number; this encoder writes them against the widest component
+// and the decoder reads them the same way.
+func (h *Header) MaxPrecision() int {
+	m := 0
+	for _, ci := range h.ComponentInfo {
+		if p := ci.Precision(); p > m {
+			m = p
+		}
+	}
+	if m == 0 {
+		m = 8
+	}
+	return m
+}
+
 // IsHTJ2K returns true if this header indicates HTJ2K (High-Throughput) mode.
 // HTJ2K is detected via the CAP marker or the CodeBlockHT flag in COD/COC.
 func (h *Header) IsHTJ2K() bool {

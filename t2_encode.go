@@ -290,6 +290,18 @@ func (e *encoder) bandMb(res, bandIdx int) int {
 	if res > 0 {
 		idx = 1 + (res-1)*3 + bandIdx
 	}
+	if !e.options.Lossless {
+		guard, steps := e.quantizationParameters()
+		exp := 0
+		if idx < len(steps) {
+			exp = int(steps[idx].Exponent)
+		}
+		mb := guard + exp - 1
+		if mb < 1 {
+			mb = 1
+		}
+		return mb
+	}
 	maxPrec := e.maxPrecision()
 	// Must match generateQCD.
 	guardBits := 2

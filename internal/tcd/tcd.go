@@ -10,6 +10,7 @@ package tcd
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
 	"github.com/mrjoshuak/go-jpeg2000/internal/dwt"
@@ -618,7 +619,13 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 	width := tc.X1 - tc.X0
 	height := tc.Y1 - tc.Y0
 
-	if numLevels == 0 || width <= 0 || height <= 0 || width*height > len(tc.Data) {
+	if width <= 0 || height <= 0 || width*height > len(tc.Data) {
+		return
+	}
+	// Zero decomposition levels still leaves the LL band quantized, so the
+	// irreversible path has work to do even when the transform does not. Only
+	// the reversible path can return here.
+	if numLevels == 0 && h.WaveletTransform == 1 {
 		return
 	}
 
@@ -641,20 +648,63 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 			dwt.ReconstructMultiLevel53Tile(tc.Data, width, height, tc.X0, tc.Y0, numLevels)
 		}
 	} else {
-		// 9-7 irreversible
+		// 9-7 irreversible. What the block coder carries is not a coefficient
+		// but a quantization index, so it has to be scaled by the subband's
+		// step size before the transform can undo anything. This step used to
+		// be missing entirely: the indices went straight into the inverse
+		// transform, which is only correct when every step size is one.
 		tc.DataFloat = make([]float64, len(tc.Data))
-		for i, v := range tc.Data {
-			tc.DataFloat[i] = float64(v)
-		}
+		// Dequantise first — the irreversible path carries explicit step
+		// sizes — then reconstruct with the tile-aware transform, since a tile
+		// away from the image origin has a different subband parity.
+		d.dequantize(tc, width, height, numLevels)
 		if tc.X0 == 0 && tc.Y0 == 0 {
 			dwt.ReconstructMultiLevel97(tc.DataFloat, width, height, numLevels)
 		} else {
 			dwt.ReconstructMultiLevel97Tile(tc.DataFloat, width, height, tc.X0, tc.Y0, numLevels)
 		}
 		for i, v := range tc.DataFloat {
-			tc.Data[i] = int32(v + 0.5)
+			tc.Data[i] = int32(math.Floor(v + 0.5))
 		}
 	}
+}
+
+// dequantize expands the quantization indices in tc.Data into coefficients in
+// tc.DataFloat, using the step sizes from QCD.
+//
+// ISO/IEC 15444-1 E.1.1 reconstructs the centre of the quantization bin: a
+// nonzero index q becomes sign(q)·(|q| + 1/2)·Δ_b, and a zero index becomes
+// zero. OpenJPH does the same, by construction — its block decoder sets bit 0
+// of every decoded magnitude, which is the half, and scales by Δ_b/2^(31−K_max)
+// to cancel the shift the block coder applied.
+func (d *TileDecoder) dequantize(tc *TileComponent, width, height, numLevels int) {
+	h := d.header
+	prec := h.MaxPrecision()
+	steps := h.Quantization.StepSizes
+	codestream.ForEachSubband(width, height, numLevels+1, func(sb codestream.SubbandRect) {
+		delta := 1.0
+		if sb.Index < len(steps) {
+			delta = steps[sb.Index].Delta(prec + codestream.BandGainLog2(sb.Res, sb.Detail))
+		}
+		for y := 0; y < sb.H; y++ {
+			row := (sb.Y0 + y) * width
+			for x := 0; x < sb.W; x++ {
+				i := row + sb.X0 + x
+				if i < 0 || i >= len(tc.Data) {
+					continue
+				}
+				q := tc.Data[i]
+				switch {
+				case q > 0:
+					tc.DataFloat[i] = (float64(q) + 0.5) * delta
+				case q < 0:
+					tc.DataFloat[i] = -(float64(-q) + 0.5) * delta
+				default:
+					tc.DataFloat[i] = 0
+				}
+			}
+		}
+	})
 }
 
 // needs32BitDWT returns true if 32-bit-safe DWT arithmetic is required.
