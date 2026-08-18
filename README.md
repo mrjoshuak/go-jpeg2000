@@ -8,7 +8,7 @@ A pure Go implementation of the JPEG 2000 image codec (ISO/IEC 15444-1) with HTJ
 
 ## Overview
 
-This package provides a native Go implementation of JPEG 2000 encoding and decoding, aiming for 100% parity with the OpenJPEG reference implementation. It supports both lossless (5-3 reversible wavelet) and lossy (9-7 irreversible wavelet) compression.
+This package provides a native Go implementation of JPEG 2000 encoding and decoding. Decoding is verified against the OpenJPEG and OpenJPH reference implementations; encoding is verified conforming for HTJ2K, with one documented gap for Part 1 (see Interoperability). It supports both lossless (5-3 reversible wavelet) and lossy (9-7 irreversible wavelet) compression.
 
 ## Features
 
@@ -190,27 +190,27 @@ opts := &jpeg2000.Options{
 
 Full support for all colorspaces defined in ISO/IEC 15444-1 Annex M:
 
-| enumcs | Colorspace | API Constant | Description |
-|--------|------------|--------------|-------------|
-| 0 | Bi-level | `ColorSpaceBilevel` | Black and white |
-| 1 | YCbCr(1) | `ColorSpaceSYCC` | ITU-R BT.709-5 (sRGB primaries) |
-| 3 | YCbCr(2) | `ColorSpaceYCbCr2` | ITU-R BT.601-5 (625-line PAL/SECAM) |
-| 4 | YCbCr(3) | `ColorSpaceYCbCr3` | ITU-R BT.601-5 (525-line NTSC) |
-| 9 | PhotoYCC | `ColorSpacePhotoYCC` | Kodak Photo CD |
-| 11 | CMY | `ColorSpaceCMY` | Cyan, Magenta, Yellow |
-| 12 | CMYK | `ColorSpaceCMYK` | CMY + Key (Black) |
-| 13 | YCCK | `ColorSpaceYCCK` | PhotoYCC + Key |
-| 14 | CIELab | `ColorSpaceCIELab` | CIE L\*a\*b\* (D50) |
-| 15 | Bi-level(2) | `ColorSpaceBilevel` | Alternative bi-level |
-| 16 | sRGB | `ColorSpaceSRGB` | Standard RGB (IEC 61966-2-1) |
-| 17 | Grayscale | `ColorSpaceGray` | Single component gray |
-| 18 | sYCC | `ColorSpaceSYCC` | sRGB-based YCbCr |
-| 19 | CIEJab | `ColorSpaceCIEJab` | CIECAM02 J\*a\*b\* |
-| 20 | e-sRGB | `ColorSpaceESRGB` | Extended gamut sRGB |
-| 21 | ROMM-RGB | `ColorSpaceROMMRGB` | ProPhoto RGB (ISO 22028-2) |
-| 22 | YPbPr(60) | `ColorSpaceYPbPr60` | HD video 1125/60 (SMPTE 274M) |
-| 23 | YPbPr(50) | `ColorSpaceYPbPr50` | HD video 1250/50 (ITU-R BT.1361) |
-| 24 | e-sYCC | `ColorSpaceEYCC` | Extended gamut sYCC |
+| enumcs | Colorspace  | API Constant         | Description                         |
+| ------ | ----------- | -------------------- | ----------------------------------- |
+| 0      | Bi-level    | `ColorSpaceBilevel`  | Black and white                     |
+| 1      | YCbCr(1)    | `ColorSpaceSYCC`     | ITU-R BT.709-5 (sRGB primaries)     |
+| 3      | YCbCr(2)    | `ColorSpaceYCbCr2`   | ITU-R BT.601-5 (625-line PAL/SECAM) |
+| 4      | YCbCr(3)    | `ColorSpaceYCbCr3`   | ITU-R BT.601-5 (525-line NTSC)      |
+| 9      | PhotoYCC    | `ColorSpacePhotoYCC` | Kodak Photo CD                      |
+| 11     | CMY         | `ColorSpaceCMY`      | Cyan, Magenta, Yellow               |
+| 12     | CMYK        | `ColorSpaceCMYK`     | CMY + Key (Black)                   |
+| 13     | YCCK        | `ColorSpaceYCCK`     | PhotoYCC + Key                      |
+| 14     | CIELab      | `ColorSpaceCIELab`   | CIE L\*a\*b\* (D50)                 |
+| 15     | Bi-level(2) | `ColorSpaceBilevel`  | Alternative bi-level                |
+| 16     | sRGB        | `ColorSpaceSRGB`     | Standard RGB (IEC 61966-2-1)        |
+| 17     | Grayscale   | `ColorSpaceGray`     | Single component gray               |
+| 18     | sYCC        | `ColorSpaceSYCC`     | sRGB-based YCbCr                    |
+| 19     | CIEJab      | `ColorSpaceCIEJab`   | CIECAM02 J\*a\*b\*                  |
+| 20     | e-sRGB      | `ColorSpaceESRGB`    | Extended gamut sRGB                 |
+| 21     | ROMM-RGB    | `ColorSpaceROMMRGB`  | ProPhoto RGB (ISO 22028-2)          |
+| 22     | YPbPr(60)   | `ColorSpaceYPbPr60`  | HD video 1125/60 (SMPTE 274M)       |
+| 23     | YPbPr(50)   | `ColorSpaceYPbPr50`  | HD video 1250/50 (ITU-R BT.1361)    |
+| 24     | e-sYCC      | `ColorSpaceEYCC`     | Extended gamut sYCC                 |
 
 ### Colorspace Handling
 
@@ -224,40 +224,40 @@ Full support for all colorspaces defined in ISO/IEC 15444-1 Annex M:
 
 The decoder applies mathematically correct color transformations based on the specifications:
 
-| Colorspace | Conversion Method |
-|------------|-------------------|
-| YCbCr variants | ITU-R BT.601/709 matrix inversion |
-| CMY/CMYK | Subtractive color model |
-| CIELab | Lab→XYZ→sRGB with D50→D65 adaptation |
-| CIEJab | CIECAM02 inverse (simplified) |
-| ROMM-RGB | Wide gamut to sRGB with clipping |
-| PhotoYCC | Kodak-specific YCC matrix |
+| Colorspace     | Conversion Method                    |
+| -------------- | ------------------------------------ |
+| YCbCr variants | ITU-R BT.601/709 matrix inversion    |
+| CMY/CMYK       | Subtractive color model              |
+| CIELab         | Lab→XYZ→sRGB with D50→D65 adaptation |
+| CIEJab         | CIECAM02 inverse (simplified)        |
+| ROMM-RGB       | Wide gamut to sRGB with clipping     |
+| PhotoYCC       | Kodak-specific YCC matrix            |
 
 ## JPEG 2000 Profiles
 
 Supported profiles (RSIZ parameter):
 
-| Profile | Constant | Description |
-|---------|----------|-------------|
-| None | `ProfileNone` | No restrictions |
-| Cinema 2K | `ProfileCinema2K` | 2K Digital Cinema |
-| Cinema 4K | `ProfileCinema4K` | 4K Digital Cinema |
-| Cinema S2K | `ProfileCinemaS2K` | 2K Scalable Cinema |
-| Cinema S4K | `ProfileCinemaS4K` | 4K Scalable Cinema |
-| Cinema SLTE | `ProfileCinemaSLTE` | Long-term extension |
-| Broadcast Single | `ProfileBroadcastSingle` | Single-tile broadcast |
-| Broadcast Multi | `ProfileBroadcastMulti` | Multi-tile broadcast |
-| IMF 2K/4K/8K | `ProfileIMF2K/4K/8K` | Interoperable Master Format |
+| Profile          | Constant                 | Description                 |
+| ---------------- | ------------------------ | --------------------------- |
+| None             | `ProfileNone`            | No restrictions             |
+| Cinema 2K        | `ProfileCinema2K`        | 2K Digital Cinema           |
+| Cinema 4K        | `ProfileCinema4K`        | 4K Digital Cinema           |
+| Cinema S2K       | `ProfileCinemaS2K`       | 2K Scalable Cinema          |
+| Cinema S4K       | `ProfileCinemaS4K`       | 4K Scalable Cinema          |
+| Cinema SLTE      | `ProfileCinemaSLTE`      | Long-term extension         |
+| Broadcast Single | `ProfileBroadcastSingle` | Single-tile broadcast       |
+| Broadcast Multi  | `ProfileBroadcastMulti`  | Multi-tile broadcast        |
+| IMF 2K/4K/8K     | `ProfileIMF2K/4K/8K`     | Interoperable Master Format |
 
 ## Progression Orders
 
-| Order | Constant | Description |
-|-------|----------|-------------|
-| LRCP | `LRCP` | Layer-Resolution-Component-Position |
-| RLCP | `RLCP` | Resolution-Layer-Component-Position |
-| RPCL | `RPCL` | Resolution-Position-Component-Layer |
-| PCRL | `PCRL` | Position-Component-Resolution-Layer |
-| CPRL | `CPRL` | Component-Position-Resolution-Layer |
+| Order | Constant | Description                         |
+| ----- | -------- | ----------------------------------- |
+| LRCP  | `LRCP`   | Layer-Resolution-Component-Position |
+| RLCP  | `RLCP`   | Resolution-Layer-Component-Position |
+| RPCL  | `RPCL`   | Resolution-Position-Component-Layer |
+| PCRL  | `PCRL`   | Position-Component-Resolution-Layer |
+| CPRL  | `CPRL`   | Component-Position-Resolution-Layer |
 
 ## Architecture
 
@@ -281,22 +281,70 @@ jpeg2000/
     └── tcd/             # Tile Coder/Decoder, tier-2
 ```
 
+## Interoperability
+
+Interoperability is what this library is for, and it is the one property a
+round-trip test cannot establish. Until v1.4.0 every codec test here passed
+while nothing else could read the output and nothing else's output could be
+read: encoder and decoder shared conventions no other implementation uses, so
+each was the other's only witness. What follows is therefore stated in terms of
+what an *external* decoder was measured doing, not in terms of test coverage.
+
+`scripts/validate.sh` runs these checks against separately installed reference
+tools and fails the build if any regresses.
+
+| Direction                              | Status                                                                                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTJ2K write (`Options.HighThroughput`) | **Conforming.** OpenJPH decodes our codestreams to the exact source samples at 17, 25, 32, 64, 128 and 200 px, across 1-4 resolution levels |
+| HTJ2K read                             | **Conforming.** We decode OpenJPH's codestreams exactly, 0-3 decomposition levels                                                           |
+| Part 1 read (MQ / EBCOT)               | **Conforming.** We decode OpenJPEG's codestreams exactly, 1-3 resolution levels                                                             |
+| Part 1 write (MQ / EBCOT)              | **Not interoperable.** Still emits a private tile container, not T2 packets                                                                 |
+
+### The Part 1 write limitation
+
+With `HighThroughput` unset, the encoder writes a private tile body — a
+code-block count followed by a fixed-width metadata table — in place of the
+packets ISO/IEC 15444-1 Annex B defines. Only this library can read it. The
+gap is the packet header's length signalling: a conforming header carries one
+length per coding pass, and the MQ coder emits several passes per code-block,
+where the HT cleanup pass emits exactly one.
+
+If you need output other tools can read, set `HighThroughput: true`.
+
+### What these measurements cover, and what they do not
+
+Every row above was measured on 8-bit greyscale images: single tile, single
+quality layer, lossless 5/3, default progression. That is the extent of the
+external evidence. The following are exercised only by this library's own
+tests, which is precisely the position every codec here was in before v1.4.0:
+
+- multi-component and RGB images through an external decoder
+- the 9/7 irreversible path
+- `EncodeFloat` and `EncodeHalf` output
+- tiling, component subsampling, precinct partitions, multiple quality layers,
+  and progression orders other than the default
+- the HT SPP/MRP refinement passes: `HTEncoder.Encode` emits the cleanup pass
+  only, and nothing on the live encode path calls `EncodeWithRefinement`
+
+Treat those as unverified rather than as working. Extending
+`scripts/validate.sh` to cover them is the most useful next contribution here.
+
 ## Implementation Status
 
-| Component | Status | Coverage | Notes |
-|-----------|--------|----------|-------|
-| JP2 Box Parsing | ✅ Complete | 99.3% | All standard box types |
-| Codestream Parsing | ✅ Complete | 91.0% | All main/tile-part markers |
-| 5-3 DWT (Lossless) | ✅ Complete | 100% | Reversible wavelet |
-| 9-7 DWT (Lossy) | ✅ Complete | 100% | Irreversible wavelet |
-| MCT (Color Transform) | ✅ Complete | 100% | RCT and ICT |
-| MQ Coder | ✅ Complete | 95.7% | Arithmetic coding |
-| HTJ2K (Part 15) | ✅ Complete | 90%+ | Cleanup + SPP/MRP refinement passes |
-| EBCOT (Tier-1) | ✅ Complete | 91.9% | All coding passes |
-| Packet Assembly (Tier-2) | ✅ Complete | 91.9% | All progression orders |
-| Colorspace Conversion | ✅ Complete | 92.8% | All 19 colorspaces |
-| Encoder | ✅ Complete | 92.8% | All image types |
-| Decoder | ✅ Complete | 92.8% | Full colorspace support |
+| Component                | Status      | Coverage | Notes                                                                                |
+| ------------------------ | ----------- | -------- | ------------------------------------------------------------------------------------ |
+| JP2 Box Parsing          | ✅ Complete | 99.3%    | All standard box types                                                               |
+| Codestream Parsing       | ✅ Complete | 91.0%    | All main/tile-part markers                                                           |
+| 5-3 DWT (Lossless)       | ✅ Complete | 100%     | Reversible wavelet                                                                   |
+| 9-7 DWT (Lossy)          | ✅ Complete | 100%     | Irreversible wavelet                                                                 |
+| MCT (Color Transform)    | ✅ Complete | 100%     | RCT and ICT                                                                          |
+| MQ Coder                 | ✅ Complete | 95.7%    | Arithmetic coding                                                                    |
+| HTJ2K (Part 15)          | ⚠️ Partial  | 90%+     | Cleanup pass verified against OpenJPH both directions; encoder does not emit SPP/MRP |
+| EBCOT (Tier-1)           | ✅ Complete | 91.9%    | All coding passes                                                                    |
+| Packet Assembly (Tier-2) | ⚠️ Partial  | 91.9%    | Conforming for HTJ2K; Part 1 write uses a private container (see Interoperability)   |
+| Colorspace Conversion    | ✅ Complete | 92.8%    | All 19 colorspaces                                                                   |
+| Encoder                  | ✅ Complete | 92.8%    | All image types                                                                      |
+| Decoder                  | ✅ Complete | 92.8%    | Full colorspace support                                                              |
 
 **Overall Test Coverage: 91-100% across all packages**
 

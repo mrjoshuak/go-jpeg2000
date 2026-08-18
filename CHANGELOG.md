@@ -5,6 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-18
+
+This release makes the library interoperable. Before it, no other implementation
+could read what this encoder produced, and this decoder could not read anything
+another implementation produced — in either direction, for every codec.
+
+Every defect below shares one signature: the encoder and decoder deviated from
+the standard in exactly the same way, so each was the other's only witness and
+every round-trip test passed throughout. They were found by comparing against
+OpenJPH and OpenJPEG, never by round-tripping. `scripts/validate.sh` now runs
+those comparisons and fails the build on regression.
+
+### Changed
+- **`Encode` with `Options.HighThroughput` now emits conforming T2 packets**
+  instead of a private tile container. Output written by earlier versions is
+  unreadable by this one and vice versa. This is the reason for the minor
+  version bump: the exported API is unchanged, but an existing call now behaves
+  differently in a way callers must know about.
+- `NumResolutions` is clamped, on the HighThroughput path only, to the levels
+  the image can actually carry. A 16x16 image cannot supply six.
+- Two guard bits are signalled in QCD. With none, Mb fell short of the U_q the
+  HT coder produces and conforming decoders rejected the code-blocks outright.
+
+### Fixed
+- **The 2D wavelet ran its separable passes in the wrong order**, rows-then-
+  columns forward and columns-then-rows inverse. ISO/IEC 15444-1 F.3.8.1 fixes
+  the inverse as HOR_SR then VER_SR, so the forward must be VER_SD then HOR_SD.
+  Because the 5/3 lifting steps floor their intermediates the orders are not
+  interchangeable — but they are exact inverses of each other, which is why the
+  round trip never noticed.
+- **Subband dimensions used ceil for all three detail bands.** A split of an
+  odd-length signal yields ceil(n/2) lowpass and floor(n/2) highpass samples,
+  and HL, LH and HH do not all take the same one. Images with an odd dimension
+  were rejected outright by conforming decoders; even ones hid the defect.
+- **The multi-level DWT drivers passed the shrunken level width as the row
+  stride**, so from the second decomposition level they addressed the wrong
+  memory.
+- **The MQ decoder seeded only the uniform context.** ISO/IEC 15444-1 Table D.7
+  requires three non-zero initial states (UNIFORM 46, RUN-LENGTH 3, ZC-0 4).
+  The first decision of nearly every code-block is a run-length decision, so the
+  arithmetic decoder desynchronised immediately.
+- **The HT block coder was non-functional in both directions**, recovering
+  99.5-100% of coefficients wrongly. Ported from the OpenJPEG and OpenJPH
+  references: Scup packing, the VLC codeword-length mask, quad geometry, sample
+  placement, MEL run coding, the magnitude reconstruction, and the initial-only
+  u-coding rules that were being applied to every stripe.
+- **Neither `Encode` nor `Decode` invoked the HT block coder at all.**
+  `HighThroughput` set the COD style, wrote CAP and set Rsiz bit 14, then
+  emitted Part 1 MQ data under all of it.
+- `Rsiz` bit 14 was never set; `Pcap` used `0x00008000` where Part 15 is
+  `0x00020000`; the CAP marker omitted its mandatory `Ccap` field; and the NLT
+  segment was written short.
+- The multiple component transform was signalled for 1- and 2-component images,
+  which conforming decoders reject.
+- Pooled HT decoders leaked a previous subband's coefficients into positions the
+  cleanup pass leaves untouched.
+- The tag-tree encoder lacked a `known` flag and set leaf values during coding
+  rather than before it, corrupting every packet with more than one code-block.
+
+### Added
+- `scripts/validate.sh`: build, vet, `go test -race`, and interoperability
+  checks against OpenJPH and OpenJPEG. Each external check runs a control first,
+  so a broken oracle is distinguishable from a real failure.
+- `internal/dwt` conformance tests comparing the forward transform against a
+  literal transcription of Annex F and against coefficients extracted from
+  OpenJPH codestreams.
+- Golden fixtures decoding OpenJPH and OpenJPEG code-blocks to exact
+  coefficients.
+
+### Known limitations
+- Part 1 (non-HighThroughput) encoding still writes the private tile container
+  and is not interoperable. See the Interoperability section of the README.
+- The interoperability evidence is 8-bit greyscale, single tile, single layer,
+  lossless 5/3, default progression. Multi-component images, the 9/7 path,
+  `EncodeFloat`/`EncodeHalf` output, tiling, subsampling, precincts, multiple
+  layers and other progression orders are covered only by this library's own
+  tests — the same position everything was in before this release. They are
+  unverified, not known-good.
+- The HT encoder emits the cleanup pass only; `EncodeWithRefinement` is not
+  called by the live encode path, so SPP/MRP output is untested.
+
 ## [1.3.0] - 2026-08-17
 
 ### Added

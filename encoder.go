@@ -892,8 +892,6 @@ type codeBlockJob struct {
 	res      int
 	bandIdx  int
 	cbx, cby int
-	cbNX     int
-	cbNY     int
 }
 
 // codeBlockResult holds the encoded result.
