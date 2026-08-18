@@ -41,6 +41,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panic the decoder with `makeslice: len out of range`. A truncated or hostile
   codestream now returns an error from every public decode entry point.
 
+### Security
+- The decode allocation limit is an absolute cap (`maxDecodedSamples`, about
+  1 GiB of coefficients), not a ratio to the input length. A ratio cannot tell a
+  hostile claim from a legitimately tiny encoding of a large flat image: they
+  are the same shape. OpenJPEG compresses a 4096x4096 black image to 190 bytes
+  losslessly at default settings — 88,301 samples per input byte — so any ratio
+  low enough to constrain an attacker also rejects real files. Amplification
+  within the cap is therefore bounded by absolute size rather than by ratio.
+- **The decoder trusted header values it read from the file.** Values from SIZ,
+  COD, COC, QCD, QCC, POC and NLT flowed straight into `make`, into slice
+  indices and into divisions without a range check, so a corrupt or hostile
+  codestream could panic the process or hang it. This is remotely triggerable
+  through `go-openexr`, which routes any `.exr` using compression 10 or 11
+  (HTJ2K) into `Decode`/`DecodeFloat`/`DecodeHalf`. Measured on a valid
+  372-byte half codestream, flipping a single byte produced:
+  - `makeslice: len out of range` — `XOsiz >= Xsiz` and `YOsiz >= Ysiz` made
+    the width computation `Xsiz-XOsiz` wrap to about four billion, and
+    `XTOsiz > XOsiz` made the tile bounds run backwards into a negative length.
+  - `integer divide by zero` — a decomposition count of 250, or a code-block
+    exponent of 251, made a shift wider than the word size evaluate to zero,
+    and that zero was then a divisor.
+  - Unbounded allocation and non-termination — a wrapped tile count became a
+    multi-billion iteration loop bound, and a zero code-block dimension made
+    the code-block walk `for cbx := 0; cbx*cbWidth < bandW; cbx++` never
+    advance.
+
+  Every header value is now range-checked against ISO/IEC 15444-1 before use,
+  and every allocation is additionally bounded by what the input length can
+  justify: the image area, the per-tile coefficient area and the tile count are
+  all capped relative to the number of bytes actually supplied. Errors name the
+  field and the limit. `Decode`, `DecodeConfig`, `DecodeFloat`,
+  `DecodeFloatConfig`, `DecodeHalf`, `DecodeHalfConfig`, `DecodeMetadata`,
+  `ExtractPackets`, `BuildPacketIndex` and `NewProgressiveDecoderFromCodestream`
+  all return an error instead of panicking, hanging or over-allocating. The
+  encoder is unchanged and produces byte-identical output.
+- **JP2 box contents were allocated from the declared length.** A twelve-byte
+  file could name a one-gigabyte box and have it committed up front; the reader
+  now grows its buffer as bytes actually arrive.
+- **A tile-part declaring `Psot = 0` looped forever** in `BuildPacketIndex`,
+  and the SOD scan read past the end of the buffer when `Psot` exceeded the
+  bytes present.
+
+### Added
+- `FuzzDecodeHalf` and `FuzzDecodeCodestream` with checked-in seed corpora
+  under `testdata/fuzz`, covering the historical crashers, plus
+  `TestDecodeCorruptedHalfNeverPanics`,
+  `TestDecodeCorruptedRawCodestreamNeverPanics`,
+  `TestDecodeCorruptedHalfBoundedAllocation` and
+  `TestDecodeRejectsOutOfRangeHeaderFields`, which sweep every single-byte
+  corruption and truncation of a real codestream through every decode entry
+  point and assert no panic, no hang and a bounded allocation.
+
 ### Known limitations
 - OpenJPH-based decoders (including OpenEXR 3.4+) still reject this library's
   HighThroughput output: the encoder writes a CAP marker but does not set Rsiz

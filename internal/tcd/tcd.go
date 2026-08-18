@@ -9,6 +9,8 @@
 package tcd
 
 import (
+	"fmt"
+
 	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
 	"github.com/mrjoshuak/go-jpeg2000/internal/dwt"
 	"github.com/mrjoshuak/go-jpeg2000/internal/entropy"
@@ -211,6 +213,12 @@ func (t *TagTree) Reset() {
 	}
 }
 
+// DefaultSampleLimit is the ceiling on the number of coefficient samples a
+// single tile-component may occupy when the caller has not set an explicit
+// limit. Callers that know how many bytes the input actually contains should
+// call SetSampleLimit with a bound derived from that length.
+const DefaultSampleLimit = 1 << 28 // 256M samples = 1 GiB of int32
+
 // TileDecoder decodes a single tile.
 type TileDecoder struct {
 	header            *codestream.Header
@@ -218,14 +226,35 @@ type TileDecoder struct {
 	htj2k             bool // True if using High-Throughput mode
 	qualityLayerLimit int  // 0 means all layers
 	reduceResolution  int  // number of finest resolution levels to skip
+	sampleLimit       int  // ceiling on samples allocated for one tile
 }
 
 // NewTileDecoder creates a new tile decoder.
 func NewTileDecoder(header *codestream.Header) *TileDecoder {
 	return &TileDecoder{
-		header: header,
-		htj2k:  header.IsHTJ2K(),
+		header:      header,
+		htj2k:       header.IsHTJ2K(),
+		sampleLimit: DefaultSampleLimit,
 	}
+}
+
+// SetSampleLimit bounds the total number of coefficient samples InitTile will
+// allocate for one tile across all components. A non-positive limit restores
+// the default. This is the guard that keeps a corrupt SIZ marker in a small
+// file from driving a multi-gigabyte allocation.
+func (d *TileDecoder) SetSampleLimit(n int) {
+	if n <= 0 {
+		n = DefaultSampleLimit
+	}
+	d.sampleLimit = n
+}
+
+// SampleLimit returns the current per-tile sample allocation limit.
+func (d *TileDecoder) SampleLimit() int {
+	if d.sampleLimit <= 0 {
+		return DefaultSampleLimit
+	}
+	return d.sampleLimit
 }
 
 // SetQualityLayerLimit sets the maximum number of quality layers to decode.
@@ -261,26 +290,72 @@ func (d *TileDecoder) Tile() *Tile {
 }
 
 // InitTile initializes a tile for decoding.
-func (d *TileDecoder) InitTile(tileIndex int) {
+//
+// Every quantity used here comes from the file: the tile grid, the tile and
+// image origins, the per-component subsampling factors and the number of
+// wavelet decomposition levels. Each is checked before it is used to divide,
+// to shift, or to size the coefficient slice, and the total allocation is held
+// under the decoder's sample limit. A header that cannot describe a decodable
+// tile produces an error instead of a panic, a negative-length make, or an
+// allocation the input could not justify.
+func (d *TileDecoder) InitTile(tileIndex int) error {
 	h := d.header
 
+	numTilesX := int(h.NumTilesX)
+	numTilesY := int(h.NumTilesY)
+	if numTilesX <= 0 || numTilesY <= 0 {
+		return fmt.Errorf("tcd: tile grid is %dx%d, must be at least 1x1", h.NumTilesX, h.NumTilesY)
+	}
+	if numTilesX > codestream.MaxTiles || numTilesY > codestream.MaxTiles ||
+		numTilesX > codestream.MaxTiles/numTilesY {
+		return fmt.Errorf("tcd: tile grid %dx%d exceeds the %d tile limit",
+			numTilesX, numTilesY, codestream.MaxTiles)
+	}
+	if tileIndex < 0 || tileIndex >= numTilesX*numTilesY {
+		return fmt.Errorf("tcd: tile index %d is out of range (%d tiles)",
+			tileIndex, numTilesX*numTilesY)
+	}
+	if len(h.ComponentInfo) != int(h.NumComponents) {
+		return fmt.Errorf("tcd: SIZ declares %d components but carries %d component records",
+			h.NumComponents, len(h.ComponentInfo))
+	}
+	if h.NumComponents == 0 {
+		return fmt.Errorf("tcd: SIZ declares no components")
+	}
+
+	numDecomp := int(h.CodingStyle.NumDecompositions)
+	if numDecomp > codestream.MaxDecompositionLevels {
+		return fmt.Errorf("tcd: COD declares %d decomposition levels, above the %d limit",
+			numDecomp, codestream.MaxDecompositionLevels)
+	}
+
 	// Calculate tile bounds
-	tileX := tileIndex % int(h.NumTilesX)
-	tileY := tileIndex / int(h.NumTilesX)
+	tileX := tileIndex % numTilesX
+	tileY := tileIndex / numTilesX
 
 	x0 := max(int(h.TileXOffset)+tileX*int(h.TileWidth), int(h.ImageXOffset))
 	y0 := max(int(h.TileYOffset)+tileY*int(h.TileHeight), int(h.ImageYOffset))
 	x1 := min(int(h.TileXOffset)+(tileX+1)*int(h.TileWidth), int(h.ImageWidth))
 	y1 := min(int(h.TileYOffset)+(tileY+1)*int(h.TileHeight), int(h.ImageHeight))
+	if x1 <= x0 || y1 <= y0 {
+		return fmt.Errorf("tcd: tile %d has empty bounds [%d,%d)x[%d,%d)",
+			tileIndex, x0, x1, y0, y1)
+	}
 
 	// Clamp reduceResolution to valid range
-	numDecomp := int(h.CodingStyle.NumDecompositions)
 	reduce := d.reduceResolution
+	if reduce < 0 {
+		reduce = 0
+	}
 	if reduce > numDecomp {
 		reduce = numDecomp
 	}
 
-	d.tile = &Tile{
+	// The tile is built into a local and only published on success, so that a
+	// caller which ignores the error can never observe a half-initialised tile
+	// with nil components.
+	d.tile = nil
+	tile := &Tile{
 		Index:      tileIndex,
 		X0:         x0,
 		Y0:         y0,
@@ -289,9 +364,16 @@ func (d *TileDecoder) InitTile(tileIndex int) {
 		Components: make([]*TileComponent, h.NumComponents),
 	}
 
+	limit := d.SampleLimit()
+	total := 0
+
 	// Initialize components
 	for c := 0; c < int(h.NumComponents); c++ {
 		comp := h.ComponentInfo[c]
+		if comp.SubsamplingX == 0 || comp.SubsamplingY == 0 {
+			return fmt.Errorf("tcd: component %d has zero subsampling %dx%d",
+				c, comp.SubsamplingX, comp.SubsamplingY)
+		}
 
 		// Apply subsampling
 		cx0 := ceilDiv(x0, int(comp.SubsamplingX))
@@ -318,32 +400,59 @@ func (d *TileDecoder) InitTile(tileIndex int) {
 		// Allocate data
 		width := cx1 - cx0
 		height := cy1 - cy0
-		tc.Data = make([]int32, width*height)
+		if width <= 0 || height <= 0 {
+			return fmt.Errorf("tcd: tile %d component %d has empty bounds %dx%d",
+				tileIndex, c, width, height)
+		}
+		if height > limit/width {
+			return fmt.Errorf("tcd: tile %d component %d needs %dx%d samples, above the %d sample limit for this input",
+				tileIndex, c, width, height, limit)
+		}
+		samples := width * height
+		if total > limit-samples {
+			return fmt.Errorf("tcd: tile %d needs more than the %d sample limit for this input",
+				tileIndex, limit)
+		}
+		total += samples
+		tc.Data = make([]int32, samples)
 
 		// Initialize only the resolutions we need (skip finest N levels)
 		numRes := numDecomp + 1 - reduce
 		tc.Resolutions = make([]*Resolution, numRes)
 
 		for r := 0; r < numRes; r++ {
-			d.initResolutionReduced(tc, r, reduce)
+			if err := d.initResolutionReduced(tc, r, reduce); err != nil {
+				return fmt.Errorf("tcd: tile %d component %d resolution %d: %w", tileIndex, c, r, err)
+			}
 		}
 
-		d.tile.Components[c] = tc
+		tile.Components[c] = tc
 	}
+
+	d.tile = tile
+	return nil
 }
 
 // initResolutionReduced initializes a resolution level accounting for reduction.
 // resLevel is the index in the reduced resolution set, reduce is the number of
 // skipped finest levels. The effective decomposition level used for scale
 // computation is (numDecomp - reduce - resLevel).
-func (d *TileDecoder) initResolutionReduced(tc *TileComponent, resLevel int, reduce int) {
+func (d *TileDecoder) initResolutionReduced(tc *TileComponent, resLevel int, reduce int) error {
 	h := d.header.CodingStyle
 
 	// With reduction, numDecomp levels exist but we only use (numDecomp - reduce).
 	// resLevel 0 is the coarsest in the reduced set.
 	// The scale factor for this level relative to the reduced component bounds:
 	numDecompReduced := int(h.NumDecompositions) - reduce
-	scale := 1 << (numDecompReduced - resLevel)
+	shift := numDecompReduced - resLevel
+	// A shift of 64 or more evaluates to zero in Go, and every use of scale
+	// below is a division, so an out-of-range decomposition count would divide
+	// by zero rather than merely produce a wrong scale.
+	if shift < 0 || shift > codestream.MaxDecompositionLevels {
+		return fmt.Errorf("resolution scale shift %d is out of range (0..%d)",
+			shift, codestream.MaxDecompositionLevels)
+	}
+	scale := 1 << shift
 	rx0 := ceilDiv(tc.X0, scale)
 	ry0 := ceilDiv(tc.Y0, scale)
 	rx1 := ceilDiv(tc.X1, scale)
@@ -371,6 +480,7 @@ func (d *TileDecoder) initResolutionReduced(tc *TileComponent, resLevel int, red
 	}
 
 	tc.Resolutions[resLevel] = res
+	return nil
 }
 
 // initBand initializes a band.
@@ -405,15 +515,21 @@ func (d *TileDecoder) initBand(res *Resolution, bandType int) *Band {
 		band.Y1 = res.Y1
 	}
 
-	// Calculate code-block grid
-	cbWidth := 1 << (h.CodeBlockWidthExp + 2)
-	cbHeight := 1 << (h.CodeBlockHeightExp + 2)
+	// Calculate code-block grid. CodeBlockWidth/Height clamp the file-supplied
+	// exponent into the range the standard allows, so they are never zero and
+	// the divisions below cannot fault.
+	cbWidth := h.CodeBlockWidth()
+	cbHeight := h.CodeBlockHeight()
 
-	band.CodeBlocksX = ceilDiv(band.X1-band.X0, cbWidth)
-	band.CodeBlocksY = ceilDiv(band.Y1-band.Y0, cbHeight)
+	band.CodeBlocksX = ceilDiv(max(band.X1-band.X0, 0), cbWidth)
+	band.CodeBlocksY = ceilDiv(max(band.Y1-band.Y0, 0), cbHeight)
 
 	// Initialize code-blocks
 	numCB := band.CodeBlocksX * band.CodeBlocksY
+	if numCB <= 0 {
+		band.CodeBlocksX, band.CodeBlocksY = 0, 0
+		return band
+	}
 	band.CodeBlocks = make([]*CodeBlock, numCB)
 
 	for i := 0; i < numCB; i++ {
@@ -441,16 +557,33 @@ func (d *TileDecoder) DecodeCodeBlock(cb *CodeBlock, bandType int) error {
 
 	width := cb.X1 - cb.X0
 	height := cb.Y1 - cb.Y0
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("tcd: code-block %d has empty bounds %dx%d", cb.Index, width, height)
+	}
+	if width > codestream.MaxCodeBlockArea || height > codestream.MaxCodeBlockArea ||
+		width*height > codestream.MaxCodeBlockArea {
+		return fmt.Errorf("tcd: code-block %d is %dx%d, above the %d sample limit",
+			cb.Index, width, height, codestream.MaxCodeBlockArea)
+	}
+	// Coefficients are int32, so bit-plane 31 is the last one that can carry a
+	// magnitude bit. A larger count only multiplies decode time.
+	numBitPlanes := cb.TotalBitPlanes
+	if numBitPlanes < 0 {
+		numBitPlanes = 0
+	}
+	if numBitPlanes > codestream.MaxBitPlanes {
+		numBitPlanes = codestream.MaxBitPlanes
+	}
 
 	if d.htj2k {
 		// Use HTJ2K decoder
 		htDec := entropy.GetHTDecoder(width, height)
-		cb.Coefficients = htDec.Decode(cb.Data, cb.TotalBitPlanes, bandType)
+		cb.Coefficients = htDec.Decode(cb.Data, numBitPlanes, bandType)
 		entropy.PutHTDecoder(htDec)
 	} else {
 		// Use standard EBCOT decoder
 		t1 := entropy.NewT1(width, height)
-		cb.Coefficients = t1.Decode(cb.Data, cb.TotalBitPlanes, bandType)
+		cb.Coefficients = t1.Decode(cb.Data, numBitPlanes, bandType)
 	}
 
 	return nil
@@ -463,11 +596,16 @@ func (d *TileDecoder) ApplyInverseDWT(tc *TileComponent) {
 	if numLevels < 0 {
 		numLevels = 0
 	}
+	// The decomposition count comes from COD; a file may declare up to 255 of
+	// them, and each level allocates a dimension record.
+	if numLevels > codestream.MaxDecompositionLevels {
+		numLevels = codestream.MaxDecompositionLevels
+	}
 
 	width := tc.X1 - tc.X0
 	height := tc.Y1 - tc.Y0
 
-	if numLevels == 0 {
+	if numLevels == 0 || width <= 0 || height <= 0 || width*height > len(tc.Data) {
 		return
 	}
 
@@ -620,6 +758,12 @@ func (e *TileEncoder) EncodeCodeBlock(cb *CodeBlock, data []int32, bandType int)
 
 // Helper functions
 
+// ceilDiv returns ceil(a/b). A non-positive divisor can only come from a
+// header value that was not validated; returning 0 keeps the caller from
+// faulting, and the caller's own bounds checks reject the resulting geometry.
 func ceilDiv(a, b int) int {
+	if b <= 0 {
+		return 0
+	}
 	return (a + b - 1) / b
 }

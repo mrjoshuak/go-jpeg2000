@@ -99,28 +99,41 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 		tileIndex := binary.BigEndian.Uint16(cs[pos+4 : pos+6])
 		tilePartLength := binary.BigEndian.Uint32(cs[pos+6 : pos+10])
 
-		// Skip SOT header to find SOD
+		// Psot is the tile-part length including the SOT segment. Zero means
+		// "to the end of the codestream" (ISO/IEC 15444-1 A.4.2); taking it
+		// literally would leave pos unchanged and loop forever.
 		tpStart := pos
+		tpEnd := len(cs)
+		if tilePartLength > 0 {
+			if uint64(tpStart)+uint64(tilePartLength) < uint64(len(cs)) {
+				tpEnd = tpStart + int(tilePartLength)
+			}
+			if tpEnd <= tpStart {
+				return nil, fmt.Errorf("tile-part at offset %d declares length %d, which does not advance",
+					pos, tilePartLength)
+			}
+		}
+
+		// Skip SOT header to find SOD
 		tpHeaderPos := pos + 12 // after SOT marker segment
 
-		// Scan for SOD marker in tile-part header
+		// Scan for SOD marker in tile-part header. The scan bound is clamped
+		// to the real end of the buffer: Psot is file-supplied and routinely
+		// larger than the bytes actually present in a truncated file.
 		sodPos := -1
-		for p := tpHeaderPos; p+1 < tpStart+int(tilePartLength); p++ {
+		for p := tpHeaderPos; p+1 < tpEnd; p++ {
 			m := binary.BigEndian.Uint16(cs[p : p+2])
 			if m == uint16(codestream.SOD) {
 				sodPos = p + 2 // data starts after SOD marker
 				break
 			}
 		}
-		if sodPos < 0 {
+		if sodPos < 0 || sodPos > tpEnd {
 			return nil, fmt.Errorf("no SOD marker found in tile-part at offset %d", pos)
 		}
 
 		// Tile data extends from SOD to end of tile-part
-		tileDataEnd := tpStart + int(tilePartLength)
-		if tileDataEnd > len(cs) {
-			tileDataEnd = len(cs)
-		}
+		tileDataEnd := tpEnd
 
 		// Index packets in this tile
 		if err := idx.indexTilePackets(header, tileIndex, cs, sodPos, tileDataEnd); err != nil {
@@ -128,7 +141,7 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 		}
 
 		// Advance to next tile-part
-		pos = tpStart + int(tilePartLength)
+		pos = tpEnd
 	}
 
 	return idx, nil
@@ -202,13 +215,34 @@ func (idx *PacketIndex) indexTilePackets(
 	dataStart, dataEnd int,
 ) error {
 	numComp := int(header.NumComponents)
-	numRes := int(header.CodingStyle.NumDecompositions) + 1
-	numLayers := int(header.CodingStyle.NumLayers)
-	if numLayers <= 0 {
-		numLayers = 1
+	numRes := header.CodingStyle.NumResolutions()
+	numLayers := header.CodingStyle.Layers()
+
+	if numComp <= 0 || len(header.ComponentInfo) != numComp {
+		return fmt.Errorf("SIZ declares %d components but carries %d component records",
+			header.NumComponents, len(header.ComponentInfo))
+	}
+	if numRes > codestream.MaxDecompositionLevels+1 {
+		return fmt.Errorf("COD declares %d resolution levels, above the %d limit",
+			numRes, codestream.MaxDecompositionLevels+1)
+	}
+	if header.NumTilesX == 0 || header.NumTilesY == 0 {
+		return fmt.Errorf("tile grid is %dx%d, must be at least 1x1",
+			header.NumTilesX, header.NumTilesY)
+	}
+	// numComp, numRes and numLayers are three independent header fields whose
+	// product is the number of packet records appended below.
+	if n := uint64(numComp) * uint64(numRes) * uint64(numLayers); n > maxPackets {
+		return fmt.Errorf("tile describes %d packets, above the %d limit", n, uint64(maxPackets))
+	}
+	if dataStart < 0 || dataEnd > len(cs) || dataStart > dataEnd {
+		return fmt.Errorf("tile data range [%d,%d) is outside the %d-byte codestream",
+			dataStart, dataEnd, len(cs))
 	}
 
-	// Calculate code-block dimensions
+	// Calculate code-block dimensions. These are clamped by CodeBlockWidth /
+	// CodeBlockHeight to the 4..1024 range the standard allows, so the
+	// divisions below cannot fault.
 	cbWidth := header.CodingStyle.CodeBlockWidth()
 	cbHeight := header.CodingStyle.CodeBlockHeight()
 
@@ -302,6 +336,13 @@ func (idx *PacketIndex) indexTilePackets(
 	for _, key := range crOrder {
 		info := crInfos[key]
 		groupNum := info.numCodeBlocks
+		// groupNum is derived from tile geometry; only its sum is known to
+		// equal numCB, so an individual group is bounded explicitly before it
+		// sizes the two slices below.
+		if groupNum < 0 || groupNum > numCB {
+			return fmt.Errorf("tile %d: code-block group of %d is outside the %d code-blocks the tile declares",
+				tileIndex, groupNum, numCB)
+		}
 
 		// Collect metadata and encoded bytes for this group
 		groupMetaSize := 2 + groupNum*5

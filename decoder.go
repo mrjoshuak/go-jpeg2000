@@ -244,6 +244,142 @@ func (d *decoder) parseCodestream() error {
 	return nil
 }
 
+// Allocation budget for a decode.
+//
+// A codestream header can claim any image size it likes, and the claim is only
+// eight bytes long. The header alone is therefore never enough to justify an
+// allocation: the bound has to come from how many bytes the input actually
+// contains.
+//
+// maxDecodedSamples caps the total coefficient samples, summed over every
+// component, that one decode may allocate. At four bytes per sample this is
+// about 1 GiB of coefficient memory.
+//
+// This is deliberately an ABSOLUTE cap rather than a ratio to the input length.
+// A ratio cannot separate the attack from the legitimate case, because they are
+// the same shape: a tiny codestream that expands enormously. JPEG 2000 puts no
+// floor on bitrate, and a well-tuned encoder reaches ratios that look absurd —
+// OpenJPEG compresses a 4096x4096 black image to 190 bytes losslessly at its
+// default settings, which is 88,301 samples per input byte. An earlier version
+// of this bound allowed 1024 and rejected that file.
+//
+// What actually distinguishes the attack is the absolute size of the claim, not
+// its ratio to the input: refusing more than a gigabyte of coefficients stops a
+// header that asks for 60000x60000 while admitting every real image that fits
+// in memory. A caller who needs more should decode on a machine that has it;
+// the limit is about bounding a single hostile file, not about policing
+// compression efficiency.
+const maxDecodedSamples = 1 << 28
+
+// maxPackets bounds the number of packet records any codestream may describe.
+// The packet count is the product of four independent header fields, so an
+// otherwise unremarkable header can claim trillions of them.
+const maxPackets = 1 << 22
+
+// sampleLimitForInput returns the largest number of coefficient samples,
+// summed over every component, that a decode of an n-byte input may allocate.
+//
+// The input length is accepted for call-site symmetry with the tile-grid bound,
+// which genuinely is derived from it (a tile costs at least 14 bytes on the
+// wire, so the number of tiles a codestream can describe really is bounded by
+// its length). The sample count is not bounded that way; see maxDecodedSamples.
+func sampleLimitForInput(n int) int {
+	return maxDecodedSamples
+}
+
+// sampleLimit returns this decode's sample budget.
+func (d *decoder) sampleLimit() int {
+	return sampleLimitForInput(len(d.codestream))
+}
+
+// planeDimensions returns the output width and height at the requested
+// resolution reduction, after checking that the header's declared image area
+// is something this input could plausibly describe. It is the single place
+// every decode path sizes its output planes from.
+func (d *decoder) planeDimensions(reduce int) (width, height, numComp int, err error) {
+	h := d.header
+	if h.ImageXOffset >= h.ImageWidth || h.ImageYOffset >= h.ImageHeight {
+		return 0, 0, 0, fmt.Errorf("jpeg2000: SIZ image offset %dx%d is outside image %dx%d",
+			h.ImageXOffset, h.ImageYOffset, h.ImageWidth, h.ImageHeight)
+	}
+
+	numComp = int(h.NumComponents)
+	if numComp <= 0 || len(h.ComponentInfo) != numComp {
+		return 0, 0, 0, fmt.Errorf("jpeg2000: SIZ declares %d components but carries %d component records",
+			h.NumComponents, len(h.ComponentInfo))
+	}
+
+	if reduce < 0 {
+		reduce = 0
+	}
+	width = reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
+	height = reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
+	if width <= 0 || height <= 0 {
+		return 0, 0, 0, fmt.Errorf("jpeg2000: image reduces to %dx%d at reduction level %d",
+			width, height, reduce)
+	}
+
+	limit := d.sampleLimit()
+	if height > limit/width || numComp > limit/(width*height) {
+		return 0, 0, 0, fmt.Errorf("jpeg2000: %d component planes of %dx%d need more than "+
+			"the %d samples a %d-byte codestream can justify",
+			numComp, width, height, limit, len(d.codestream))
+	}
+
+	return width, height, numComp, nil
+}
+
+// minBytesPerTile is the smallest number of codestream bytes a tile can
+// occupy: a tile is carried by at least one tile-part, and a tile-part is an
+// SOT marker segment (12 bytes) followed by an SOD marker (2 bytes).
+const minBytesPerTile = 14
+
+// numTiles returns the size of the tile grid.
+//
+// Two things are checked. The grid must be addressable at all -- Isot in the
+// SOT marker is 16 bits, so the product of two file-supplied tile counts must
+// not become a loop bound of several billion. And the grid must be one this
+// input could actually carry: each tile costs a fixed amount of decoder state
+// regardless of how few samples it holds, so a header declaring five thousand
+// tiles inside a three hundred byte file is a memory amplifier even when every
+// tile is tiny.
+func (d *decoder) numTiles() (int, error) {
+	h := d.header
+	nx, ny := uint64(h.NumTilesX), uint64(h.NumTilesY)
+	if nx == 0 || ny == 0 {
+		return 0, fmt.Errorf("jpeg2000: tile grid is %dx%d, must be at least 1x1", nx, ny)
+	}
+	if nx > codestream.MaxTiles || ny > codestream.MaxTiles || nx*ny > codestream.MaxTiles {
+		return 0, fmt.Errorf("jpeg2000: tile grid %dx%d exceeds the %d tile limit",
+			nx, ny, codestream.MaxTiles)
+	}
+	n := nx * ny
+	affordable := uint64(len(d.codestream) / minBytesPerTile)
+	if affordable < 1 {
+		affordable = 1
+	}
+	if n > affordable {
+		return 0, fmt.Errorf("jpeg2000: tile grid %dx%d needs %d tiles, but a %d-byte "+
+			"codestream can carry at most %d tile-parts",
+			nx, ny, n, len(d.codestream), affordable)
+	}
+	return int(n), nil
+}
+
+// newTileDecoder builds a tile decoder configured with this input's allocation
+// budget and the caller's decode options.
+func (d *decoder) newTileDecoder(cfg *Config, reduce int) *tcd.TileDecoder {
+	td := tcd.NewTileDecoder(d.header)
+	td.SetSampleLimit(d.sampleLimit())
+	if cfg != nil && cfg.QualityLayers > 0 {
+		td.SetQualityLayerLimit(cfg.QualityLayers)
+	}
+	if reduce > 0 {
+		td.SetReduceResolution(reduce)
+	}
+	return td
+}
+
 // reducedDimension computes the output dimension after reducing N resolution levels.
 func reducedDimension(size, reduce int) int {
 	for i := 0; i < reduce; i++ {
@@ -261,14 +397,11 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 		reduce = cfg.ReduceResolution
 	}
 
-	// Calculate output dimensions at reduced resolution
-	width := reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
-	height := reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
-
-	// Create output image based on number of components
-	numComp := int(h.NumComponents)
-	if numComp == 0 || len(h.ComponentInfo) == 0 {
-		return nil, fmt.Errorf("invalid image: no components")
+	// Calculate output dimensions at reduced resolution, refusing anything the
+	// input length cannot justify.
+	width, height, numComp, err := d.planeDimensions(reduce)
+	if err != nil {
+		return nil, err
 	}
 	precision := h.ComponentInfo[0].Precision()
 	signed := h.ComponentInfo[0].IsSigned()
@@ -280,14 +413,11 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	}
 
 	// Decode each tile
-	tileDecoder := tcd.NewTileDecoder(h)
-	if cfg != nil && cfg.QualityLayers > 0 {
-		tileDecoder.SetQualityLayerLimit(cfg.QualityLayers)
+	tileDecoder := d.newTileDecoder(cfg, reduce)
+	numTiles, err := d.numTiles()
+	if err != nil {
+		return nil, err
 	}
-	if reduce > 0 {
-		tileDecoder.SetReduceResolution(reduce)
-	}
-	numTiles := int(h.NumTilesX * h.NumTilesY)
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
 		if err := d.decodeTile(tileDecoder, tileIdx, componentData, width, height, cfg); err != nil {
@@ -367,7 +497,9 @@ func (d *decoder) decodeTile(
 	h := d.header
 
 	// Initialize tile (TileDecoder handles resolution reduction internally)
-	tileDecoder.InitTile(tileIdx)
+	if err := tileDecoder.InitTile(tileIdx); err != nil {
+		return err
+	}
 
 	tile := tileDecoder.Tile()
 	if tile == nil {
@@ -481,9 +613,18 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 
 	h := d.header
 	numRes := int(h.CodingStyle.NumDecompositions) + 1
-	// Use same code-block size as encoder writes to COD
+	if numRes < 1 || numRes > codestream.MaxDecompositionLevels+1 {
+		return fmt.Errorf("jpeg2000: COD declares %d resolution levels, above the %d limit",
+			numRes, codestream.MaxDecompositionLevels+1)
+	}
+	// Use same code-block size as encoder writes to COD. CodeBlockWidth and
+	// CodeBlockHeight clamp the file-supplied exponent, so these are always in
+	// [4,1024]; a zero would make the code-block walk below never terminate.
 	cbWidth := h.CodingStyle.CodeBlockWidth()
 	cbHeight := h.CodingStyle.CodeBlockHeight()
+	if cbWidth <= 0 || cbHeight <= 0 {
+		return fmt.Errorf("jpeg2000: COD declares a %dx%d code-block", cbWidth, cbHeight)
+	}
 
 	// Compute expected number of code blocks to validate format
 	expectedCB := 0
@@ -524,7 +665,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 
 	// Check if this is V2 format (multi-layer): the header's NumLayers > 1
 	// and a numLayers byte follows numCB.
-	headerNumLayers := int(h.CodingStyle.NumLayers)
+	headerNumLayers := h.CodingStyle.Layers()
 	isV2 := headerNumLayers > 1
 
 	type decodeMeta struct {
@@ -540,6 +681,11 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 			return nil
 		}
 		numLayers := int(tileData[2])
+		if numLayers < 1 {
+			// A zero layer count would index the layer table at a negative
+			// offset from each entry.
+			return nil
+		}
 		metaSize = 3 + numCB*(1+numLayers*4)
 		if len(tileData) < metaSize {
 			return nil
@@ -551,7 +697,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		}
 		for i := 0; i < numCB; i++ {
 			off := 3 + i*(1+numLayers*4)
-			metas[i].numBPS = int(tileData[off])
+			metas[i].numBPS = clampBitPlanes(int(tileData[off]))
 			// Effective layer cumulative length (what we decode)
 			loff := off + 1 + (effLayer-1)*4
 			metas[i].dataLen = int(binary.BigEndian.Uint32(tileData[loff : loff+4]))
@@ -566,7 +712,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 		}
 		for i := 0; i < numCB; i++ {
 			off := 2 + i*5
-			metas[i].numBPS = int(tileData[off])
+			metas[i].numBPS = clampBitPlanes(int(tileData[off]))
 			dl := int(binary.BigEndian.Uint32(tileData[off+1 : off+5]))
 			metas[i].dataLen = dl
 			metas[i].fullLen = dl
@@ -634,7 +780,8 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 							actualH = bandH - startY
 						}
 
-						if meta.numBPS > 0 && meta.dataLen > 0 && dataPos+meta.dataLen <= len(tileData) {
+						if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
+							dataPos >= 0 && meta.dataLen <= len(tileData)-dataPos {
 							cbData := tileData[dataPos : dataPos+meta.dataLen]
 							t1 := entropy.NewT1(actualW, actualH)
 							decoded := t1.Decode(cbData, meta.numBPS, bandType)
@@ -643,7 +790,10 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 								for x := 0; x < actualW; x++ {
 									dstX := xOff + startX + x
 									dstY := yOff + startY + y
-									if dstX < tcWidth && dstY < tcHeight {
+									// The subband offset is derived from
+									// file-supplied geometry, so the low end
+									// is checked as well as the high end.
+									if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
 										tc.Data[dstY*tcWidth+dstX] = decoded[y*actualW+x]
 									}
 								}
@@ -661,6 +811,21 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 	return nil
 }
 
+// clampBitPlanes bounds a file-supplied magnitude bit-plane count. Decoded
+// coefficients are int32, so a plane index of 31 or more contributes nothing;
+// the encoder never writes more than 31. Without this cap a single byte in the
+// code-block table buys 255 full decoding passes over every code-block, which
+// is a denial of service rather than a decode.
+func clampBitPlanes(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > codestream.MaxBitPlanes {
+		return codestream.MaxBitPlanes
+	}
+	return n
+}
+
 // createImage creates the output image from component data.
 func (d *decoder) createImage(
 	componentData [][]int32,
@@ -669,8 +834,20 @@ func (d *decoder) createImage(
 	precision int,
 	signed bool,
 ) (image.Image, error) {
-	// Determine scaling factor
+	// Determine scaling factor. Precision comes from Ssiz and the standard
+	// allows up to 38 bits, but the samples are int32: computing (1<<38)-1 in
+	// int32 wraps to a negative maximum that then scales every output sample
+	// through a division by a nonsense value.
+	if precision < 1 {
+		return nil, fmt.Errorf("jpeg2000: component precision %d is out of range", precision)
+	}
+	if precision > 31 {
+		precision = 31
+	}
 	maxVal := int32((1 << precision) - 1)
+	if maxVal <= 0 {
+		return nil, fmt.Errorf("jpeg2000: component precision %d yields no usable sample range", precision)
+	}
 
 	switch numComp {
 	case 1:
@@ -877,12 +1054,10 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 		reduce = cfg.ReduceResolution
 	}
 
-	width = reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
-	height = reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
-
-	numComp := int(h.NumComponents)
-	if numComp == 0 || len(h.ComponentInfo) == 0 {
-		return nil, 0, 0, fmt.Errorf("invalid image: no components")
+	var numComp int
+	width, height, numComp, err = d.planeDimensions(reduce)
+	if err != nil {
+		return nil, 0, 0, err
 	}
 	precision := h.ComponentInfo[0].Precision()
 
@@ -901,14 +1076,11 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 		componentData[c] = make([]int32, width*height)
 	}
 
-	tileDecoder := tcd.NewTileDecoder(h)
-	if cfg != nil && cfg.QualityLayers > 0 {
-		tileDecoder.SetQualityLayerLimit(cfg.QualityLayers)
+	tileDecoder := d.newTileDecoder(cfg, reduce)
+	numTiles, err := d.numTiles()
+	if err != nil {
+		return nil, 0, 0, err
 	}
-	if reduce > 0 {
-		tileDecoder.SetReduceResolution(reduce)
-	}
-	numTiles := int(h.NumTilesX * h.NumTilesY)
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
 		if err := d.decodeTile(tileDecoder, tileIdx, componentData, width, height, cfg); err != nil {

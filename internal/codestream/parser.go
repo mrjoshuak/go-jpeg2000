@@ -171,13 +171,29 @@ func (p *Parser) readByte() (byte, error) {
 	return p.buf[0], nil
 }
 
-// readBytes reads n bytes.
+// readBytes reads n bytes. A negative count is a caller that subtracted a
+// fixed header size from a file-supplied segment length without checking it
+// first; make would panic on it, so it is reported as a malformed segment.
 func (p *Parser) readBytes(n int) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("marker segment length underflow: %d bytes", n)
+	}
 	data := make([]byte, n)
 	if _, err := io.ReadFull(p.r, data); err != nil {
 		return nil, err
 	}
 	return data, nil
+}
+
+// checkSegmentLen verifies that a marker segment is long enough to hold the
+// fixed fields the reader is about to consume. length includes its own two
+// bytes, as the codestream encodes it.
+func checkSegmentLen(what string, length uint16, min int) error {
+	if int(length) < min {
+		return fmt.Errorf("%s marker segment length %d is too short (minimum %d)",
+			what, length, min)
+	}
+	return nil
 }
 
 // skipMarkerSegment skips the current marker segment.
@@ -294,6 +310,9 @@ func (p *Parser) readCOD() error {
 	if err != nil {
 		return err
 	}
+	if err := checkSegmentLen("COD", length, 12); err != nil {
+		return err
+	}
 
 	// Read Scod
 	scod, err := p.readByte()
@@ -377,6 +396,13 @@ func (p *Parser) readCOD() error {
 func (p *Parser) readCOC() error {
 	length, err := p.readUint16()
 	if err != nil {
+		return err
+	}
+	minLen := 9
+	if p.header.NumComponents >= 257 {
+		minLen = 10
+	}
+	if err := checkSegmentLen("COC", length, minLen); err != nil {
 		return err
 	}
 
@@ -470,6 +496,9 @@ func (p *Parser) readQCD() error {
 	if err != nil {
 		return err
 	}
+	if st := sqcd & 0x1F; st > MaxQuantizationStyle {
+		return fmt.Errorf("QCD: quantization style %d is not defined (max %d)", st, MaxQuantizationStyle)
+	}
 	p.header.Quantization.QuantizationStyle = sqcd & 0x1F
 	p.header.Quantization.NumGuardBits = sqcd >> 5
 
@@ -554,6 +583,10 @@ func (p *Parser) readQCC() error {
 		return err
 	}
 
+	if st := sqcc & 0x1F; st > MaxQuantizationStyle {
+		return fmt.Errorf("QCC component %d: quantization style %d is not defined (max %d)",
+			compIndex, st, MaxQuantizationStyle)
+	}
 	qcc := QuantizationComponent{
 		ComponentIndex:    compIndex,
 		QuantizationStyle: sqcc & 0x1F,
@@ -561,6 +594,9 @@ func (p *Parser) readQCC() error {
 	}
 
 	remaining := int(length) - headerBytes - 1
+	if remaining < 0 {
+		return fmt.Errorf("QCC marker segment length %d is too short", length)
+	}
 	style := sqcc & 0x1F
 
 	switch style {
@@ -840,6 +876,10 @@ func (p *Parser) readCOM() error {
 		return err
 	}
 
+	if err := checkSegmentLen("COM", length, 4); err != nil {
+		return err
+	}
+
 	rcom, err := p.readUint16()
 	if err != nil {
 		return err
@@ -1037,6 +1077,9 @@ func (p *Parser) readCODInto(cod *CodingStyleDefault) error {
 	if err != nil {
 		return err
 	}
+	if err := checkSegmentLen("COD", length, 12); err != nil {
+		return err
+	}
 
 	scod, err := p.readByte()
 	if err != nil {
@@ -1108,6 +1151,13 @@ func (p *Parser) readCODInto(cod *CodingStyleDefault) error {
 func (p *Parser) readCOCInto(m map[uint16]CodingStyleComponent) error {
 	length, err := p.readUint16()
 	if err != nil {
+		return err
+	}
+	minLen := 9
+	if p.header.NumComponents >= 257 {
+		minLen = 10
+	}
+	if err := checkSegmentLen("COC", length, minLen); err != nil {
 		return err
 	}
 
@@ -1194,6 +1244,9 @@ func (p *Parser) readQCDInto(qcd *QuantizationDefault) error {
 	if err != nil {
 		return err
 	}
+	if st := sqcd & 0x1F; st > MaxQuantizationStyle {
+		return fmt.Errorf("QCD: quantization style %d is not defined (max %d)", st, MaxQuantizationStyle)
+	}
 	qcd.QuantizationStyle = sqcd & 0x1F
 	qcd.NumGuardBits = sqcd >> 5
 
@@ -1272,6 +1325,10 @@ func (p *Parser) readQCCInto(m map[uint16]QuantizationComponent) error {
 		return err
 	}
 
+	if st := sqcc & 0x1F; st > MaxQuantizationStyle {
+		return fmt.Errorf("QCC component %d: quantization style %d is not defined (max %d)",
+			compIndex, st, MaxQuantizationStyle)
+	}
 	qcc := QuantizationComponent{
 		ComponentIndex:    compIndex,
 		QuantizationStyle: sqcc & 0x1F,
@@ -1279,6 +1336,9 @@ func (p *Parser) readQCCInto(m map[uint16]QuantizationComponent) error {
 	}
 
 	remaining := int(length) - headerBytes - 1
+	if remaining < 0 {
+		return fmt.Errorf("QCC marker segment length %d is too short", length)
+	}
 	style := sqcc & 0x1F
 
 	switch style {

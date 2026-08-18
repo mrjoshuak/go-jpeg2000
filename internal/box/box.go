@@ -8,6 +8,7 @@
 package box
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -153,9 +154,22 @@ func (r *Reader) ReadBox() (*Box, error) {
 		return nil, fmt.Errorf("box too large: %d bytes", contentLen)
 	}
 
-	contents := make([]byte, contentLen)
-	if _, err := io.ReadFull(r.r, contents); err != nil {
+	// The declared length is four (or eight) bytes of attacker-controlled
+	// input. Growing a buffer as the bytes actually arrive means a box header
+	// claiming a gigabyte costs only as much memory as the file really holds,
+	// instead of committing the full amount up front.
+	var buf bytes.Buffer
+	n64, err := io.CopyN(&buf, r.r, int64(contentLen))
+	if err != nil {
+		if err == io.EOF {
+			return nil, fmt.Errorf("reading box contents: box declares %d bytes but only %d are present: %w",
+				contentLen, n64, io.ErrUnexpectedEOF)
+		}
 		return nil, fmt.Errorf("reading box contents: %w", err)
+	}
+	contents := buf.Bytes()
+	if contents == nil {
+		contents = []byte{}
 	}
 	r.offset += int64(contentLen)
 

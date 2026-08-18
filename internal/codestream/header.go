@@ -94,14 +94,46 @@ type CodingStyleDefault struct {
 	PrecinctSizes []PrecinctSize
 }
 
+// codeBlockDim converts a code-block exponent (xcb-2 / ycb-2) to a dimension.
+// The exponent is clamped to the range the standard allows so that the result
+// is always in [4, 1024]. An unclamped shift would silently produce 0 for a
+// file-supplied exponent of 62 or more (Go defines an over-wide shift as 0),
+// and every caller divides by this value.
+func codeBlockDim(exp uint8) int {
+	if exp > MaxCodeBlockExp {
+		exp = MaxCodeBlockExp
+	}
+	return 1 << (exp + 2)
+}
+
 // CodeBlockWidth returns the code block width.
 func (c CodingStyleDefault) CodeBlockWidth() int {
-	return 1 << (c.CodeBlockWidthExp + 2)
+	return codeBlockDim(c.CodeBlockWidthExp)
 }
 
 // CodeBlockHeight returns the code block height.
 func (c CodingStyleDefault) CodeBlockHeight() int {
-	return 1 << (c.CodeBlockHeightExp + 2)
+	return codeBlockDim(c.CodeBlockHeightExp)
+}
+
+// Layers returns the number of quality layers, treating an unset (zero) SGcod
+// layer count as a single layer. Callers must never use the raw NumLayers as a
+// loop bound or an array size without this normalisation.
+func (c CodingStyleDefault) Layers() int {
+	if c.NumLayers == 0 {
+		return 1
+	}
+	return int(c.NumLayers)
+}
+
+// CodeBlockWidth returns the code block width for a per-component style.
+func (c CodingStyleComponent) CodeBlockWidth() int {
+	return codeBlockDim(c.CodeBlockWidthExp)
+}
+
+// CodeBlockHeight returns the code block height for a per-component style.
+func (c CodingStyleComponent) CodeBlockHeight() int {
+	return codeBlockDim(c.CodeBlockHeightExp)
 }
 
 // NumResolutions returns the number of resolution levels.
@@ -170,9 +202,15 @@ type StepSize struct {
 	Exponent uint8  // 5-bit exponent
 }
 
-// Value returns the step size as a float64.
+// Value returns the step size as a float64. The exponent is a five-bit field
+// in the codestream, so it can never exceed 31; the guard keeps a directly
+// constructed StepSize from turning the shift into an undefined-width one.
 func (s StepSize) Value() float64 {
-	return float64(1+float64(s.Mantissa)/2048.0) * float64(uint64(1)<<(31-s.Exponent))
+	exp := s.Exponent
+	if exp > 31 {
+		exp = 31
+	}
+	return float64(1+float64(s.Mantissa)/2048.0) * float64(uint64(1)<<(31-exp))
 }
 
 // QuantizationComponent holds data from a QCC marker.
@@ -292,19 +330,92 @@ func (h *Header) IsHTJ2K() bool {
 }
 
 // Validate checks the header for consistency.
+//
+// Every field checked here is read verbatim from the file and later used to
+// size an allocation, index a slice, or divide, so a header that does not pass
+// this function must never reach the tile decoder. The checks are structural
+// only: limits that depend on how many bytes the input actually contains are
+// applied separately by the decoder, so that metadata-only reads of a
+// truncated file still work.
 func (h *Header) Validate() error {
+	if err := h.validateSIZ(); err != nil {
+		return err
+	}
+	if err := h.validateCodingStyles(); err != nil {
+		return err
+	}
+	if err := h.validateQuantization(); err != nil {
+		return err
+	}
+	return h.validateAuxMarkers()
+}
+
+// validateSIZ checks the image grid: dimensions, origins, the tile grid and
+// the per-component sample grid.
+func (h *Header) validateSIZ() error {
 	if h.ImageWidth == 0 || h.ImageHeight == 0 {
 		return fmt.Errorf("invalid image dimensions: %dx%d", h.ImageWidth, h.ImageHeight)
+	}
+	if h.ImageWidth > MaxDimension || h.ImageHeight > MaxDimension {
+		return fmt.Errorf("SIZ: image dimensions %dx%d exceed the %d limit",
+			h.ImageWidth, h.ImageHeight, uint32(MaxDimension))
+	}
+
+	// Xsiz > XOsiz and Ysiz > YOsiz (ISO/IEC 15444-1 A.5.1). Without this the
+	// width computation Xsiz-XOsiz wraps around and yields a multi-gigabyte
+	// allocation for a tiny file.
+	if h.ImageXOffset >= h.ImageWidth {
+		return fmt.Errorf("SIZ: image X offset %d must be less than image width %d",
+			h.ImageXOffset, h.ImageWidth)
+	}
+	if h.ImageYOffset >= h.ImageHeight {
+		return fmt.Errorf("SIZ: image Y offset %d must be less than image height %d",
+			h.ImageYOffset, h.ImageHeight)
 	}
 
 	if h.TileWidth == 0 || h.TileHeight == 0 {
 		return fmt.Errorf("invalid tile dimensions: %dx%d", h.TileWidth, h.TileHeight)
 	}
-
-	if h.NumComponents == 0 || h.NumComponents > 16384 {
-		return fmt.Errorf("invalid number of components: %d", h.NumComponents)
+	if h.TileWidth > MaxDimension || h.TileHeight > MaxDimension {
+		return fmt.Errorf("SIZ: tile dimensions %dx%d exceed the %d limit",
+			h.TileWidth, h.TileHeight, uint32(MaxDimension))
 	}
 
+	// XTOsiz <= XOsiz and XTOsiz + XTsiz > XOsiz (A.5.1). A tile origin past
+	// the image origin makes tile bounds run backwards, which then sizes a
+	// negative-length coefficient slice.
+	if h.TileXOffset > h.ImageXOffset {
+		return fmt.Errorf("SIZ: tile X offset %d must not exceed image X offset %d",
+			h.TileXOffset, h.ImageXOffset)
+	}
+	if h.TileYOffset > h.ImageYOffset {
+		return fmt.Errorf("SIZ: tile Y offset %d must not exceed image Y offset %d",
+			h.TileYOffset, h.ImageYOffset)
+	}
+	if uint64(h.TileXOffset)+uint64(h.TileWidth) <= uint64(h.ImageXOffset) {
+		return fmt.Errorf("SIZ: tile X offset %d plus tile width %d must exceed image X offset %d",
+			h.TileXOffset, h.TileWidth, h.ImageXOffset)
+	}
+	if uint64(h.TileYOffset)+uint64(h.TileHeight) <= uint64(h.ImageYOffset) {
+		return fmt.Errorf("SIZ: tile Y offset %d plus tile height %d must exceed image Y offset %d",
+			h.TileYOffset, h.TileHeight, h.ImageYOffset)
+	}
+
+	// The tile grid must be describable: Isot is a 16-bit field, so an image
+	// can hold at most 65535 tiles.
+	tilesX := ceilDivU32(h.ImageWidth-h.TileXOffset, h.TileWidth)
+	tilesY := ceilDivU32(h.ImageHeight-h.TileYOffset, h.TileHeight)
+	if tilesX == 0 || tilesY == 0 {
+		return fmt.Errorf("SIZ: degenerate tile grid %dx%d", tilesX, tilesY)
+	}
+	if tilesX > MaxTiles || tilesY > MaxTiles || tilesX*tilesY > MaxTiles {
+		return fmt.Errorf("SIZ: tile grid %dx%d exceeds the %d tile limit",
+			tilesX, tilesY, MaxTiles)
+	}
+
+	if h.NumComponents == 0 || h.NumComponents > MaxComponents {
+		return fmt.Errorf("invalid number of components: %d", h.NumComponents)
+	}
 	if len(h.ComponentInfo) != int(h.NumComponents) {
 		return fmt.Errorf("component info mismatch: expected %d, got %d",
 			h.NumComponents, len(h.ComponentInfo))
@@ -316,21 +427,162 @@ func (h *Header) Validate() error {
 				i, comp.SubsamplingX, comp.SubsamplingY)
 		}
 		prec := comp.Precision()
-		if prec < 1 || prec > 38 {
+		if prec < 1 || prec > MaxPrecision {
 			return fmt.Errorf("component %d: invalid precision: %d", i, prec)
+		}
+		// The component sample grid must be non-empty, otherwise the tile
+		// component bounds collapse or invert.
+		if ceilDivU32(h.ImageWidth, uint32(comp.SubsamplingX)) <= ceilDivU32(h.ImageXOffset, uint32(comp.SubsamplingX)) {
+			return fmt.Errorf("component %d: subsampling %d leaves an empty sample grid in X",
+				i, comp.SubsamplingX)
+		}
+		if ceilDivU32(h.ImageHeight, uint32(comp.SubsamplingY)) <= ceilDivU32(h.ImageYOffset, uint32(comp.SubsamplingY)) {
+			return fmt.Errorf("component %d: subsampling %d leaves an empty sample grid in Y",
+				i, comp.SubsamplingY)
 		}
 	}
 
 	return nil
 }
 
+// validateCodingStyles checks the COD marker and every COC override.
+func (h *Header) validateCodingStyles() error {
+	c := h.CodingStyle
+	if err := validateCodingParams("COD", c.CodingStyle, c.NumDecompositions,
+		c.CodeBlockWidthExp, c.CodeBlockHeightExp, c.PrecinctSizes); err != nil {
+		return err
+	}
+	if c.ProgressionOrder > MaxProgressionOrder {
+		return fmt.Errorf("COD: progression order %d is not defined (max %d)",
+			c.ProgressionOrder, MaxProgressionOrder)
+	}
+
+	for idx, coc := range h.ComponentCodingStyles {
+		if int(idx) >= int(h.NumComponents) {
+			return fmt.Errorf("COC: component index %d is out of range (%d components)",
+				idx, h.NumComponents)
+		}
+		if err := validateCodingParams(fmt.Sprintf("COC component %d", idx),
+			coc.CodingStyle, coc.NumDecompositions,
+			coc.CodeBlockWidthExp, coc.CodeBlockHeightExp, coc.PrecinctSizes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateCodingParams checks the SPcod/SPcoc parameters shared by COD and COC.
+func validateCodingParams(what string, style, numDecomp, cbwExp, cbhExp uint8, precincts []PrecinctSize) error {
+	if numDecomp > MaxDecompositionLevels {
+		return fmt.Errorf("%s: %d decomposition levels exceeds the %d limit",
+			what, numDecomp, MaxDecompositionLevels)
+	}
+	if cbwExp > MaxCodeBlockExp {
+		return fmt.Errorf("%s: code-block width exponent %d exceeds the %d limit",
+			what, cbwExp, MaxCodeBlockExp)
+	}
+	if cbhExp > MaxCodeBlockExp {
+		return fmt.Errorf("%s: code-block height exponent %d exceeds the %d limit",
+			what, cbhExp, MaxCodeBlockExp)
+	}
+	if int(cbwExp)+int(cbhExp) > MaxCodeBlockExpSum {
+		return fmt.Errorf("%s: code-block %dx%d exceeds the %d sample area limit",
+			what, codeBlockDim(cbwExp), codeBlockDim(cbhExp), MaxCodeBlockArea)
+	}
+	if style&CodingStylePrecincts != 0 {
+		if len(precincts) > MaxDecompositionLevels+1 {
+			return fmt.Errorf("%s: %d precinct sizes for at most %d resolutions",
+				what, len(precincts), MaxDecompositionLevels+1)
+		}
+		for i, p := range precincts {
+			if p.WidthExp > MaxPrecinctExp || p.HeightExp > MaxPrecinctExp {
+				return fmt.Errorf("%s: precinct %d exponent %d/%d exceeds the %d limit",
+					what, i, p.WidthExp, p.HeightExp, MaxPrecinctExp)
+			}
+			// PPx=0 / PPy=0 is only legal for resolution level 0.
+			if i > 0 && (p.WidthExp == 0 || p.HeightExp == 0) {
+				return fmt.Errorf("%s: precinct %d has a zero exponent, which is only legal at resolution 0",
+					what, i)
+			}
+		}
+	}
+	return nil
+}
+
+// validateQuantization checks the QCD marker and every QCC override.
+func (h *Header) validateQuantization() error {
+	if s := h.Quantization.Style(); s > MaxQuantizationStyle {
+		return fmt.Errorf("QCD: quantization style %d is not defined (max %d)",
+			s, MaxQuantizationStyle)
+	}
+	for idx, qcc := range h.ComponentQuantization {
+		if int(idx) >= int(h.NumComponents) {
+			return fmt.Errorf("QCC: component index %d is out of range (%d components)",
+				idx, h.NumComponents)
+		}
+		if s := qcc.QuantizationStyle & 0x1F; s > MaxQuantizationStyle {
+			return fmt.Errorf("QCC component %d: quantization style %d is not defined (max %d)",
+				idx, s, MaxQuantizationStyle)
+		}
+	}
+	return nil
+}
+
+// validateAuxMarkers checks markers that carry component indices or
+// resolution indices which are later used to select a component.
+func (h *Header) validateAuxMarkers() error {
+	for i, nlt := range h.NLTMarkers {
+		if int(nlt.ComponentIndex) >= int(h.NumComponents) {
+			return fmt.Errorf("NLT %d: component index %d is out of range (%d components)",
+				i, nlt.ComponentIndex, h.NumComponents)
+		}
+		if p := int(nlt.BitDepth&0x7F) + 1; p > MaxPrecision {
+			return fmt.Errorf("NLT %d: sample precision %d exceeds the %d limit",
+				i, p, MaxPrecision)
+		}
+	}
+	numRes := h.CodingStyle.NumResolutions()
+	for i, poc := range h.ProgressionOrderChanges {
+		if poc.ProgressionOrder > MaxProgressionOrder {
+			return fmt.Errorf("POC %d: progression order %d is not defined (max %d)",
+				i, poc.ProgressionOrder, MaxProgressionOrder)
+		}
+		if int(poc.ComponentStart) > int(h.NumComponents) || int(poc.ComponentEnd) > int(h.NumComponents) {
+			return fmt.Errorf("POC %d: component range %d..%d is out of range (%d components)",
+				i, poc.ComponentStart, poc.ComponentEnd, h.NumComponents)
+		}
+		if int(poc.ResolutionStart) > numRes || int(poc.ResolutionEnd) > numRes {
+			return fmt.Errorf("POC %d: resolution range %d..%d is out of range (%d resolutions)",
+				i, poc.ResolutionStart, poc.ResolutionEnd, numRes)
+		}
+	}
+	return nil
+}
+
 // CalculateDerivedValues computes values derived from the main header.
+//
+// The tile counts are computed in 64-bit arithmetic and saturate rather than
+// wrap: Xsiz-XTOsiz underflows to roughly four billion when a corrupt file
+// puts the tile origin outside the image, and the result is used directly as a
+// loop bound. Validate rejects such a header, but the derived values are
+// computed first and must be harmless on their own.
 func (h *Header) CalculateDerivedValues() {
-	// Calculate number of tiles
-	if h.TileWidth > 0 {
-		h.NumTilesX = (h.ImageWidth - h.TileXOffset + h.TileWidth - 1) / h.TileWidth
+	h.NumTilesX = saturateTileCount(ceilDivU32(subFloor(h.ImageWidth, h.TileXOffset), h.TileWidth))
+	h.NumTilesY = saturateTileCount(ceilDivU32(subFloor(h.ImageHeight, h.TileYOffset), h.TileHeight))
+}
+
+// subFloor returns a-b, or 0 if b > a.
+func subFloor(a, b uint32) uint32 {
+	if b > a {
+		return 0
 	}
-	if h.TileHeight > 0 {
-		h.NumTilesY = (h.ImageHeight - h.TileYOffset + h.TileHeight - 1) / h.TileHeight
+	return a - b
+}
+
+// saturateTileCount narrows a 64-bit tile count to uint32 without wrapping.
+func saturateTileCount(n uint64) uint32 {
+	if n > 1<<32-1 {
+		return 1<<32 - 1
 	}
+	return uint32(n)
 }

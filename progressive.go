@@ -27,6 +27,11 @@ type ProgressiveDecoder struct {
 	header        *codestream.Header
 	receivedPkts  map[PacketAddress][]byte
 	totalExpected int
+
+	// sampleLimit bounds the samples Reconstruct will allocate. When the
+	// decoder was built from a codestream it is derived from that
+	// codestream's length, so a corrupt SIZ cannot outgrow its input.
+	sampleLimit int
 }
 
 // NewProgressiveDecoderFromCodestream creates a progressive decoder from a raw
@@ -36,7 +41,12 @@ func NewProgressiveDecoderFromCodestream(cs []byte) (*ProgressiveDecoder, error)
 	if err != nil {
 		return nil, fmt.Errorf("parsing codestream header: %w", err)
 	}
-	return NewProgressiveDecoder(header)
+	pd, err := NewProgressiveDecoder(header)
+	if err != nil {
+		return nil, err
+	}
+	pd.sampleLimit = sampleLimitForInput(len(cs))
+	return pd, nil
 }
 
 // NewProgressiveDecoder creates a progressive decoder from a parsed
@@ -50,19 +60,23 @@ func NewProgressiveDecoder(header *codestream.Header, opts ...DecoderOption) (*P
 	}
 
 	numComp := int(header.NumComponents)
-	numRes := int(header.CodingStyle.NumDecompositions) + 1
-	numLayers := int(header.CodingStyle.NumLayers)
-	if numLayers <= 0 {
-		numLayers = 1
-	}
-	numTiles := int(header.NumTilesX * header.NumTilesY)
+	numRes := header.CodingStyle.NumResolutions()
+	numLayers := header.CodingStyle.Layers()
+	numTiles := int(uint64(header.NumTilesX) * uint64(header.NumTilesY))
 
-	total := numTiles * numRes * numComp * numLayers
+	// Computed in 64-bit: all four factors come from the file and their
+	// product overflows a 32-bit int for perfectly legal-looking values.
+	total64 := uint64(numTiles) * uint64(numRes) * uint64(numComp) * uint64(numLayers)
+	if total64 > maxPackets {
+		return nil, fmt.Errorf("codestream describes %d packets, above the %d limit",
+			total64, uint64(maxPackets))
+	}
 
 	pd := &ProgressiveDecoder{
 		header:        header,
 		receivedPkts:  make(map[PacketAddress][]byte),
-		totalExpected: total,
+		totalExpected: int(total64),
+		sampleLimit:   tcd.DefaultSampleLimit,
 	}
 
 	for _, opt := range opts {
@@ -124,10 +138,27 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 		return nil, fmt.Errorf("invalid image: no components")
 	}
 
+	if h.ImageXOffset >= h.ImageWidth || h.ImageYOffset >= h.ImageHeight {
+		return nil, fmt.Errorf("jpeg2000: SIZ image offset %dx%d is outside image %dx%d",
+			h.ImageXOffset, h.ImageYOffset, h.ImageWidth, h.ImageHeight)
+	}
+
 	reduce := d.bestReduction()
 
 	width := reducedDimension(int(h.ImageWidth-h.ImageXOffset), reduce)
 	height := reducedDimension(int(h.ImageHeight-h.ImageYOffset), reduce)
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("jpeg2000: image reduces to %dx%d at reduction level %d",
+			width, height, reduce)
+	}
+	limit := d.sampleLimit
+	if limit <= 0 {
+		limit = tcd.DefaultSampleLimit
+	}
+	if height > limit/width || numComp > limit/(width*height) {
+		return nil, fmt.Errorf("jpeg2000: %d component planes of %dx%d exceed the %d sample limit",
+			numComp, width, height, limit)
+	}
 
 	precision := h.ComponentInfo[0].Precision()
 	signed := h.ComponentInfo[0].IsSigned()
@@ -141,16 +172,23 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 		return d.buildFloatImage(componentData, width, height, numComp, precision, signed)
 	}
 
-	numTiles := int(h.NumTilesX * h.NumTilesY)
+	numTiles := int(uint64(h.NumTilesX) * uint64(h.NumTilesY))
+	if h.NumTilesX == 0 || h.NumTilesY == 0 || uint64(h.NumTilesX)*uint64(h.NumTilesY) > codestream.MaxTiles {
+		return nil, fmt.Errorf("jpeg2000: tile grid %dx%d is outside the 1..%d tile range",
+			h.NumTilesX, h.NumTilesY, codestream.MaxTiles)
+	}
 	tileDec := tcd.NewTileDecoder(h)
 	tileDec.SetReduceResolution(reduce)
+	tileDec.SetSampleLimit(limit)
 
 	for tileIdx := 0; tileIdx < numTiles; tileIdx++ {
 		if !d.hasTileData(uint16(tileIdx)) {
 			continue
 		}
 
-		tileDec.InitTile(tileIdx)
+		if err := tileDec.InitTile(tileIdx); err != nil {
+			return nil, fmt.Errorf("jpeg2000: tile %d: %w", tileIdx, err)
+		}
 		tile := tileDec.Tile()
 		if tile == nil {
 			continue
@@ -303,6 +341,14 @@ func decodePacketIntoTile(
 	if len(pktData) < 2 {
 		return
 	}
+	// Every dimension below divides or bounds a loop; a zero would spin
+	// forever and a negative would index out of range.
+	if tcWidth <= 0 || tcHeight <= 0 || cbWidth <= 0 || cbHeight <= 0 {
+		return
+	}
+	if numRes < 1 || res < 0 || res >= numRes || tcWidth*tcHeight > len(tileData) {
+		return
+	}
 
 	numCB := int(binary.BigEndian.Uint16(pktData[0:2]))
 	metaSize := 2 + numCB*5
@@ -317,7 +363,7 @@ func decodePacketIntoTile(
 	metas := make([]decodeMeta, numCB)
 	for i := 0; i < numCB; i++ {
 		off := 2 + i*5
-		metas[i].numBPS = int(pktData[off])
+		metas[i].numBPS = clampBitPlanes(int(pktData[off]))
 		metas[i].dataLen = int(binary.BigEndian.Uint32(pktData[off+1 : off+5]))
 	}
 
@@ -372,7 +418,8 @@ func decodePacketIntoTile(
 					actualH = bandH - startY
 				}
 
-				if meta.numBPS > 0 && meta.dataLen > 0 && dataPos+meta.dataLen <= len(pktData) {
+				if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
+					dataPos >= 0 && meta.dataLen <= len(pktData)-dataPos {
 					cbData := pktData[dataPos : dataPos+meta.dataLen]
 					t1 := entropy.NewT1(actualW, actualH)
 					decoded := t1.Decode(cbData, meta.numBPS, bandType)
@@ -381,7 +428,7 @@ func decodePacketIntoTile(
 						for x := 0; x < actualW; x++ {
 							dstX := xOff + startX + x
 							dstY := yOff + startY + y
-							if dstX < tcWidth && dstY < tcHeight {
+							if dstX >= 0 && dstY >= 0 && dstX < tcWidth && dstY < tcHeight {
 								tileData[dstY*tcWidth+dstX] = decoded[y*actualW+x]
 							}
 						}
