@@ -1128,9 +1128,7 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 			// and reaches block decoding — but this library's own T2 decoder is
 			// still single-resolution only, so enabling it here breaks our
 			// round-trip for any image with a wavelet.
-			_ = encodedList
-			_ = numBPSList
-			tileData = buildTileData(metas, allEncoded)
+			tileData = e.buildStandardTileData(jobs, encodedList, numBPSList)
 		}
 		return e.createTileHeader(tileIdx, tileData), nil
 	}
@@ -1197,7 +1195,11 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	if numLayers > 1 {
 		tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
 	} else {
-		tileData = buildTileData(metas, allEncoded)
+		numBPSList := make([]int, len(metas))
+		for i, m := range metas {
+			numBPSList[i] = int(m.numBPS)
+		}
+		tileData = e.buildStandardTileData(jobs, encodedBlocks, numBPSList)
 	}
 	return e.createTileHeader(tileIdx, tileData), nil
 }

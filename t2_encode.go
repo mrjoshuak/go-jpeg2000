@@ -359,7 +359,21 @@ func (e *encoder) buildStandardTileData(jobs []codeBlockJob, encoded [][]byte, n
 		if len(encoded[i]) == 0 {
 			continue
 		}
-		zp := e.bandMb(j.res, j.bandIdx) + 1 - numBPS[i]
+		// The signalled bit-plane count positions the magnitudes a conforming
+		// decoder reconstructs: it computes (v_n + 2) << (numbps - 1).
+		//
+		// encodeCleanupHT emits v_n = 2*mu - 2 + s with no bit-plane shift of
+		// its own, so (v_n + 2) is 2*mu and numbps = 2 is what places the
+		// result in the domain the reference expects. Verified end to end:
+		// OpenJPH decodes such a file to the exact source samples, and gets
+		// half of them at numbps = 1. OpenJPH signals the same 2 for 8-bit
+		// input, with 6 zero bit-planes against Mb = 7.
+		//
+		// numBPS is the magnitude bit count, which HT carries per quad in U_q
+		// rather than here, so it does not enter this calculation.
+		const htNumBps = 2
+		zp := e.bandMb(j.res, j.bandIdx) + 1 - htNumBps
+		_ = numBPS[i]
 		if zp < 0 {
 			zp = 0
 		}

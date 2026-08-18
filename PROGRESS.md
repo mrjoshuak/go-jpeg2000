@@ -82,12 +82,25 @@ after confirming the oracle round-trips its own output bit-exactly.
       two resolutions is 63/64 wrong. So T2 and the HT block coder are correct,
       and there are two further defects — in the MQ block decoder and in the
       wavelet path — that are unrelated to the HT work.
-- [ ] **The T2 encoder is written but not wired in.** Enabling it broke four
-      passing tests, because our own T2 decoder is single-resolution only, so
-      the library could no longer read its own output for any image with a
-      wavelet. See the TODO in `encoder.go`. Order: fix multi-resolution decode,
-      then enable the encoder.
-- [ ] **The `p = 0` convention is self-inverse.** `encodeCleanupHT` encodes with
+- [ ] **Our own decoder cannot read our (now conforming) multi-resolution
+      output.** Enabling the T2 encoder turned five previously passing tests
+      red, all of them multi-resolution round-trips. The files themselves are
+      correct — OpenJPH reads them exactly — so this is a decoder defect that
+      writing a private format had been hiding.
+
+      Localised: for an 8x8 image at two resolutions the LL band is recovered
+      exactly and the HL band comes back holding a copy of LL's values, so
+      packet bodies are mis-assigned across bands at res > 0. The wavelet is
+      not at fault: `TestInverse53IsInverseOfForward` passes, and the forward
+      transform is confirmed correct from outside by OpenJPH.
+- [x] **OpenJPH decodes our HTJ2K output to the exact source samples**, at one
+      and at two resolution levels (0/64 samples different in both). The T2
+      packet encoder is wired into both the sequential and parallel paths. The
+      remaining piece was the signalled bit-plane count: a conforming decoder
+      reconstructs (v_n + 2) << (numbps - 1), and since `encodeCleanupHT` emits
+      v_n = 2*mu - 2 + s with no shift of its own, numbps must be 2. At 1 the
+      decoded samples come back exactly halved, which is how it was found.
+- [ ] SUPERSEDED, kept for the record: **the `p = 0` convention is self-inverse.** `encodeCleanupHT` encodes with
       no bitplane shift and the decoder inverts with `(v_n + 2) >> 1`, ignoring
       p entirely. The two agree, which is why the round-trip is exact, but the
       reference positions magnitudes by `p = numbps` and signals that count in

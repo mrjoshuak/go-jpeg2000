@@ -272,7 +272,7 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 		for res := 0; res < numRes; res++ {
 			bands := grid[resKey{c, res}]
 			for b, bg := range bands {
-				xOff, yOff := subbandOffset(res, b, numRes, tcW, tcH)
+				xOff, yOff := computeSubbandOffset(tcW, tcH, numRes, res, bg.bandType)
 				for cby := 0; cby < bg.cbY; cby++ {
 					for cbx := 0; cbx < bg.cbX; cbx++ {
 						cb := bg.blocks[cby*bg.cbX+cbx]
@@ -430,24 +430,4 @@ func log2Floor(n int) int {
 		l++
 	}
 	return l
-}
-
-// subbandOffset gives the position of a subband within the tile component.
-func subbandOffset(res, band, numRes, tcW, tcH int) (int, int) {
-	if res == 0 {
-		return 0, 0
-	}
-	scale := 1 << uint(numRes-1-res)
-	w := (tcW + scale - 1) / scale
-	hh := (tcH + scale - 1) / scale
-	lw := (w + 1) / 2
-	lh := (hh + 1) / 2
-	switch band {
-	case 0: // HL
-		return lw, 0
-	case 1: // LH
-		return 0, lh
-	default: // HH
-		return lw, lh
-	}
 }
