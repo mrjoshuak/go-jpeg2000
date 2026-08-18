@@ -47,10 +47,30 @@ type encoder struct {
 // agree on this value: the COD marker records it, and the DWT, the subband
 // layout and the code-block partition are all derived from it.
 func (e *encoder) numResolutions() int {
-	if e.options.NumResolutions <= 0 {
-		return 6
+	n := e.options.NumResolutions
+	if n <= 0 {
+		n = 6
 	}
-	return e.options.NumResolutions
+	// Clamp to what the image can actually carry: each extra resolution halves
+	// the LL band, so a level whose band would be empty cannot be coded. A
+	// 16x16 image supports at most 5. This applies only on the conforming
+	// path — the private tile container never described the subband grid, so
+	// it tolerated degenerate levels, and clamping there would change the
+	// packet count that existing callers and tests observe.
+	if !e.options.HighThroughput {
+		return n
+	}
+	maxRes := 1
+	for d, hh := e.width, e.height; d > 1 && hh > 1; d, hh = (d+1)/2, (hh+1)/2 {
+		maxRes++
+	}
+	if n > maxRes {
+		n = maxRes
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // codeBlockExponents returns the log2 code-block width and height. The COD
@@ -1141,12 +1161,20 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 			// mis-assigns packet bodies across subbands at res > 0, so turning
 			// it on leaves the library unable to read what it writes (18 tests
 			// red). Enable it here once that decoder defect is fixed.
-			// Conforming T2 output is implemented and verified: OpenJPH decodes
-			// it to the exact source samples at one decomposition level. It is
-			// not yet the default because the HT block encoder still produces
-			// blocks OpenJPH rejects once the detail bands grow (32x32 image,
-			// two resolutions), which would leave the library writing files
-			// neither it nor anything else can read.
+			// Conforming T2 packets for HTJ2K, which is verified end to end:
+			// OpenJPH decodes this output to the exact source samples at 32,
+			// 64, 128 and 200 pixels square. The Part 1 MQ path still uses the
+			// private container because its packet headers need a length per
+			// coding pass, which is not implemented yet; signalling one pass
+			// for a multi-pass MQ block mis-sizes the length field.
+			if e.options.HighThroughput {
+				passList := make([]int, len(allTruncPoints))
+				for i, tp := range allTruncPoints {
+					passList[i] = len(tp)
+				}
+				tileData = e.buildStandardTileData(jobs, encodedList, numBPSList, passList)
+				break
+			}
 			_ = encodedList
 			_ = numBPSList
 			tileData = buildTileData(metas, allEncoded)
@@ -1216,9 +1244,21 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	if numLayers > 1 {
 		tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
 	} else {
+		numBPSList := make([]int, len(metas))
+		for i, m := range metas {
+			numBPSList[i] = int(m.numBPS)
+		}
 		// See the note in the sequential path.
-		_ = encodedBlocks
-		tileData = buildTileData(metas, allEncoded)
+		if e.options.HighThroughput {
+			passList := make([]int, len(allTruncPoints))
+			for i, tp := range allTruncPoints {
+				passList[i] = len(tp)
+			}
+			tileData = e.buildStandardTileData(jobs, encodedBlocks, numBPSList, passList)
+		} else {
+			_ = encodedBlocks
+			tileData = buildTileData(metas, allEncoded)
+		}
 	}
 	return e.createTileHeader(tileIdx, tileData), nil
 }

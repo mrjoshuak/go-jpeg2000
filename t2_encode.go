@@ -68,7 +68,8 @@ type tagTreeEnc struct {
 	dimW   []int
 	dimH   []int
 	value  [][]int
-	state  [][]int // per-node lower bound already emitted
+	state  [][]int  // per-node lower bound already emitted
+	known  [][]bool // per-node: the value has been established in the stream
 }
 
 func newTagTreeEnc(w, h int) *tagTreeEnc {
@@ -85,6 +86,7 @@ func newTagTreeEnc(w, h int) *tagTreeEnc {
 		t.dimH = append(t.dimH, lh)
 		t.value = append(t.value, make([]int, lw*lh))
 		t.state = append(t.state, make([]int, lw*lh))
+		t.known = append(t.known, make([]bool, lw*lh))
 		if lw == 1 && lh == 1 {
 			break
 		}
@@ -125,6 +127,12 @@ func (t *tagTreeEnc) setLeaf(x, y, v int) {
 }
 
 // encode emits the bits establishing whether the leaf value is below threshold.
+//
+// This mirrors tagTree.decode bit for bit: walk root to leaf, and at each node
+// emit a zero for every step the lower bound has to climb and a one when it
+// reaches the node's value. The `known` flag is what makes the two agree — a
+// node whose value is already established emits nothing on a later visit, and
+// without it the encoder re-emitted bits the decoder never reads.
 func (t *tagTreeEnc) encode(w *pktWriter, x, y, threshold int) {
 	low := 0
 	for lvl := t.levels - 1; lvl >= 0; lvl-- {
@@ -134,20 +142,20 @@ func (t *tagTreeEnc) encode(w *pktWriter, x, y, threshold int) {
 			t.state[lvl][idx] = low
 		}
 		v := t.value[lvl][idx]
-		for t.state[lvl][idx] < threshold {
-			if t.state[lvl][idx] < v {
+		for !t.known[lvl][idx] && t.state[lvl][idx] < threshold {
+			if t.state[lvl][idx] == v {
+				w.writeBit(1)
+				t.known[lvl][idx] = true
+			} else {
 				w.writeBit(0)
 				t.state[lvl][idx]++
-				continue
 			}
-			w.writeBit(1)
-			break
 		}
-		if t.state[lvl][idx] < v || t.state[lvl][idx] >= threshold && t.state[lvl][idx] != v {
-			// Value not yet established at this node; nothing below is coded.
+		low = t.state[lvl][idx]
+		if !t.known[lvl][idx] {
+			// Value is at or above the threshold; nothing below is coded.
 			return
 		}
-		low = v
 	}
 }
 
@@ -185,6 +193,26 @@ func encodePacket(bands []*t2Band, layer int) []byte {
 	}
 	w.writeBit(1)
 
+	// Every leaf value must be in place before any of them is coded: setLeaf
+	// recomputes each parent as the minimum of its children, so setting leaves
+	// as we go would change a parent after earlier blocks had already been
+	// written against the old minimum. That is invisible with one code-block
+	// per band and corrupts every packet with more than one.
+	for _, bg := range bands {
+		for cby := 0; cby < bg.cbY; cby++ {
+			for cbx := 0; cbx < bg.cbX; cbx++ {
+				cb := bg.blocks[cby*bg.cbX+cbx]
+				if cb != nil && len(cb.data) > 0 {
+					bg.incl.setLeaf(cbx, cby, layer)
+					bg.imsb.setLeaf(cbx, cby, cb.zeroPlanes)
+				} else {
+					// Not included in this layer: a value above it.
+					bg.incl.setLeaf(cbx, cby, layer+1)
+				}
+			}
+		}
+	}
+
 	var bodies [][]byte
 	for _, bg := range bands {
 		for cby := 0; cby < bg.cbY; cby++ {
@@ -192,19 +220,12 @@ func encodePacket(bands []*t2Band, layer int) []byte {
 				cb := bg.blocks[cby*bg.cbX+cbx]
 				included := cb != nil && len(cb.data) > 0
 
-				if included {
-					bg.incl.setLeaf(cbx, cby, layer)
-				} else {
-					// Not included in this layer: code a value above it.
-					bg.incl.setLeaf(cbx, cby, layer+1)
-				}
 				bg.incl.encode(w, cbx, cby, layer+1)
 				if !included {
 					continue
 				}
 
 				// Zero bit-planes, coded until fully determined.
-				bg.imsb.setLeaf(cbx, cby, cb.zeroPlanes)
 				for th := 1; th <= cb.zeroPlanes+1; th++ {
 					bg.imsb.encode(w, cbx, cby, th)
 				}
@@ -292,7 +313,7 @@ func (e *encoder) bandMb(res, bandIdx int) int {
 // Packets are emitted resolution-major, one per (resolution, component), which
 // is the order every progression produces when there is a single precinct and
 // a single layer.
-func (e *encoder) buildStandardTileData(jobs []codeBlockJob, encoded [][]byte, numBPS []int) []byte {
+func (e *encoder) buildStandardTileData(jobs []codeBlockJob, encoded [][]byte, numBPS []int, passes []int) []byte {
 	type key struct{ c, r int }
 	bandsFor := map[key][]*t2Band{}
 	maxRes, maxComp := 0, 0
@@ -378,10 +399,17 @@ func (e *encoder) buildStandardTileData(jobs []codeBlockJob, encoded [][]byte, n
 		if zp < 0 {
 			zp = 0
 		}
+		// The HT cleanup pass is a single coding pass; the MQ coder emits one
+		// per bit-plane pass and the packet header must say how many, or a
+		// decoder mis-sizes the length field that follows.
+		np := 1
+		if i < len(passes) && passes[i] > 0 {
+			np = passes[i]
+		}
 		bg.blocks[j.cby*bg.cbX+j.cbx] = &t2Block{
 			data:       encoded[i],
 			zeroPlanes: zp,
-			numPasses:  1, // HT cleanup, and one MQ pass segment
+			numPasses:  np,
 		}
 	}
 
