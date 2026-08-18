@@ -598,8 +598,15 @@ func (e *encoder) generateSIZ() []byte {
 	binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.SIZ))
 	binary.BigEndian.PutUint16(buf[2:4], uint16(length))
 
-	// Rsiz (profile)
-	binary.BigEndian.PutUint16(buf[4:6], uint16(e.options.Profile))
+	// Rsiz (profile). In HTJ2K mode bit 14 must also be set, to declare that
+	// extended capabilities are signalled in the CAP marker. Without it a
+	// conforming decoder reads the stream as baseline Part 1 and rejects the
+	// HT-coded block data; OpenJPH reports the file as "not a JPH file".
+	rsiz := uint16(e.options.Profile)
+	if e.options.HighThroughput {
+		rsiz |= 0x4000
+	}
+	binary.BigEndian.PutUint16(buf[4:6], rsiz)
 
 	// Image dimensions
 	binary.BigEndian.PutUint32(buf[6:10], uint32(e.width))
@@ -673,7 +680,15 @@ func (e *encoder) generateCOD() []byte {
 		numLayers = 1
 	}
 	binary.BigEndian.PutUint16(buf[6:8], uint16(numLayers))
-	buf[8] = 1 // MCT (enabled for 3 components)
+
+	// MCT applies to the first three components and requires that they exist
+	// and share one geometry. Signalling it on a 1- or 2-component image
+	// produces a stream a conforming decoder rejects: OpenJPH reports the
+	// second and third components as (0,0)-(0,0) and refuses the tile. This
+	// was previously set unconditionally, contradicting its own comment.
+	if e.numComponents >= 3 {
+		buf[8] = 1
+	}
 
 	// SPcod
 	buf[9] = uint8(numRes - 1) // Number of decomposition levels
@@ -775,19 +790,20 @@ func (e *encoder) generateCOM() []byte {
 func (e *encoder) generateCAP() []byte {
 	// CAP marker format:
 	// - Marker (2 bytes): 0xFF50
-	// - Length (2 bytes): 6 (length field + Pcap)
+	// - Length (2 bytes): 8 (length field + Pcap + one Ccap)
 	// - Pcap (4 bytes): capabilities flags
-	// Total: 8 bytes
+	// - Ccap (2 bytes): parameters for the capability Pcap signalled
+	// Total: 10 bytes
+	//
+	// Part 15 requires one 16-bit Ccap field per bit set in Pcap. Emitting
+	// Pcap alone produces a marker a conforming decoder rejects.
+	length := 8 // Length includes itself, Pcap and Ccap
 
-	length := 6 // Length includes itself and Pcap
-
-	buf := make([]byte, 8)
+	buf := make([]byte, 10)
 	binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.CAP))
 	binary.BigEndian.PutUint16(buf[2:4], uint16(length))
-
-	// Set Pcap with HTJ2K capability flag (bit 15)
-	pcap := codestream.CapPcapHTJ2K
-	binary.BigEndian.PutUint32(buf[4:8], pcap)
+	binary.BigEndian.PutUint32(buf[4:8], codestream.CapPcapHTJ2K)
+	binary.BigEndian.PutUint16(buf[8:10], codestream.CapCcapHTDefault)
 
 	return buf
 }
@@ -1076,20 +1092,13 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 		var metas []cbMeta
 		var allTruncPoints [][]int
 		var allEncoded []byte
-		t1 := entropy.GetT1(64, 64)
 		for _, job := range jobs {
 			numBPS := computeNumBPS(job.data)
-			t1.Resize(job.width, job.height)
-			t1.SetData(job.data)
-			encoded := t1.Encode(job.bandType)
+			encoded, tpCopy := e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
 			metas = append(metas, cbMeta{numBPS: uint8(numBPS), dataLen: uint32(len(encoded))})
-			tp := t1.TruncationPoints()
-			tpCopy := make([]int, len(tp))
-			copy(tpCopy, tp)
 			allTruncPoints = append(allTruncPoints, tpCopy)
 			allEncoded = append(allEncoded, encoded...)
 		}
-		entropy.PutT1(t1)
 		var tileData []byte
 		if numLayers > 1 {
 			tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
@@ -1122,21 +1131,10 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 			defer wg.Done()
 			for job := range jobChan {
 				numBPS := computeNumBPS(job.data)
-				t1 := entropy.GetT1(job.width, job.height)
-				t1.SetData(job.data)
-				encoded := t1.Encode(job.bandType)
-				// Copy encoded bytes before returning T1 to pool.
-				// Encode returns a slice of the T1's internal mqBuf,
-				// which would be overwritten when the T1 is reused.
-				encodedCopy := make([]byte, len(encoded))
-				copy(encodedCopy, encoded)
-				// Copy the truncation points too, and do it *before*
-				// returning the T1 to the pool: once it is back in the pool
-				// another worker may take it and overwrite this state.
-				tp := t1.TruncationPoints()
-				tpCopy := make([]int, len(tp))
-				copy(tpCopy, tp)
-				entropy.PutT1(t1)
+				// encodeCodeBlock selects the HT or MQ coder to match what the
+				// COD/CAP markers declare, and returns copies that stay valid
+				// after the coder goes back to its pool.
+				encodedCopy, tpCopy := e.encodeCodeBlock(job.data, job.width, job.height, job.bandType)
 				resultChan <- codeBlockResult{
 					index:       job.index,
 					encoded:     encodedCopy,
@@ -1310,4 +1308,44 @@ func (e *encoder) writeJP2(codestream []byte) error {
 	}
 
 	return nil
+}
+
+// encodeCodeBlock encodes one code-block with the block coder that this
+// codestream actually declares.
+//
+// This branch is the whole point: when HighThroughput is set the COD marker
+// advertises the HT code-block style, the CAP marker declares Part 15 and Rsiz
+// sets bit 14. Emitting Part 1 MQ-coded data under that signalling produces a
+// file that only this library can read — every conforming decoder trusts the
+// declaration, runs the HT block decoder over MQ bytes, recovers no
+// coefficients and yields a flat mid-grey image. Round-trip tests cannot see
+// it, because the same wrong choice is made on the way back in.
+//
+// The returned slice is always a fresh copy, so it stays valid after the coder
+// is returned to its pool.
+func (e *encoder) encodeCodeBlock(data []int32, width, height, bandType int) ([]byte, []int) {
+	if e.options.HighThroughput {
+		ht := entropy.GetHTEncoder(width, height)
+		ht.SetData(data)
+		encoded := ht.Encode(bandType)
+		out := make([]byte, len(encoded))
+		copy(out, encoded)
+		entropy.PutHTEncoder(ht)
+		// The HT cleanup pass is a single coding pass, so there is one
+		// truncation point and it sits at the end of the segment.
+		return out, []int{len(out)}
+	}
+
+	t1 := entropy.GetT1(width, height)
+	t1.SetData(data)
+	encoded := t1.Encode(bandType)
+	// Copy before pooling: Encode returns a view of the T1's internal mqBuf,
+	// and the truncation points live on the T1 itself.
+	out := make([]byte, len(encoded))
+	copy(out, encoded)
+	tp := t1.TruncationPoints()
+	tpCopy := make([]int, len(tp))
+	copy(tpCopy, tp)
+	entropy.PutT1(t1)
+	return out, tpCopy
 }

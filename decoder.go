@@ -805,8 +805,20 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 						if actualW > 0 && actualH > 0 && meta.numBPS > 0 && meta.dataLen > 0 &&
 							dataPos >= 0 && meta.dataLen <= len(tileData)-dataPos {
 							cbData := tileData[dataPos : dataPos+meta.dataLen]
-							t1 := entropy.NewT1(actualW, actualH)
-							decoded := t1.Decode(cbData, meta.numBPS, bandType)
+							// Decode with the block coder the codestream
+							// declares. A stream whose CAP marker announces
+							// Part 15 carries HT-coded blocks, and running the
+							// Part 1 MQ decoder over them silently yields
+							// nothing rather than failing.
+							var decoded []int32
+							if h.IsHTJ2K() {
+								htDec := entropy.GetHTDecoder(actualW, actualH)
+								decoded = htDec.Decode(cbData, meta.numBPS, bandType)
+								entropy.PutHTDecoder(htDec)
+							} else {
+								t1 := entropy.NewT1(actualW, actualH)
+								decoded = t1.Decode(cbData, meta.numBPS, bandType)
+							}
 
 							for y := 0; y < actualH; y++ {
 								for x := 0; x < actualW; x++ {

@@ -241,7 +241,7 @@ type TileLength struct {
 // This marker is used to signal HTJ2K (Part 15) and other extended features.
 type CapabilitiesMarker struct {
 	// Pcap is a 32-bit field indicating which extended capabilities are used.
-	// Bit 15 (0x00008000) indicates HTJ2K is used when set.
+	// Bit 15 (0x00020000) indicates HTJ2K (Part 15) is used when set.
 	Pcap uint32
 
 	// CCAPi contains extended component capabilities.
@@ -251,7 +251,21 @@ type CapabilitiesMarker struct {
 
 // CapPcapHTJ2K is the bit in Pcap indicating HTJ2K (Part 15) is used.
 // When this bit is set, the codestream uses the High-Throughput block coder.
-const CapPcapHTJ2K uint32 = 0x00008000 // Bit 15
+//
+// Pcap bits are numbered from the most significant bit: bit i corresponds to
+// Part i+1 of the standard, so bit i has value 1<<(32-i). Part 15 is therefore
+// bit 15 with value 1<<17 = 0x00020000. This constant previously held
+// 0x00008000, which is 1<<15 and denotes bit 17 — two positions off. Streams
+// written with the old value are not recognised as HTJ2K by any conforming
+// decoder, and this library did not recognise conforming streams as HTJ2K.
+// Verified against a codestream produced by OpenJPH, which emits 0x00020000.
+const CapPcapHTJ2K uint32 = 0x00020000 // Bit 15, i.e. 1<<(32-15)
+
+// CapCcapHTDefault is the Ccap^15 value for a codestream in which every
+// code-block uses the HT block coder with default parameters. Part 15 requires
+// one 16-bit Ccap field to follow Pcap for each capability bit set in Pcap; a
+// CAP marker carrying Pcap alone is malformed. Matches OpenJPH's output.
+const CapCcapHTDefault uint16 = 0x0022
 
 // IsHTJ2K returns true if the CAP marker indicates HTJ2K mode.
 func (c *CapabilitiesMarker) IsHTJ2K() bool {

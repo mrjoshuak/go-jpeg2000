@@ -1017,8 +1017,12 @@ func (e *HTEncoder) Encode(bandType int) []byte {
 	// Initialize output buffers
 	e.output = make([]byte, maxSize)
 
-	// Initialize MEL encoder
-	e.mel.data = make([]byte, maxSize/4)
+	// Initialize MEL encoder. Both MEL writers append, so this must have zero
+	// length and reserved capacity. Allocating a non-zero length prefixed the
+	// MEL stream with that many zero bytes and inflated melLen below by the
+	// same amount, so a conforming decoder read the MEL segment from the wrong
+	// offset and recovered no significant quads at all.
+	e.mel.data = make([]byte, 0, maxSize/4)
 	e.mel.tmp = 0
 	e.mel.bits = 0
 	e.mel.k = 0
