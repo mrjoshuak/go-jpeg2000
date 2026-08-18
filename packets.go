@@ -285,15 +285,18 @@ func (idx *PacketIndex) indexTilePackets(
 			bandW := ceilDivInt(compTileWidth, scale)
 			bandH := ceilDivInt(compTileHeight, scale)
 
-			numBands := 1
+			// The three detail bands do not share a size when the resolution's
+			// dimensions are odd, so their code-block counts must be summed
+			// rather than one count multiplied by three. See subband.go.
+			cb := 0
 			if r > 0 {
-				numBands = 3
-				bandW = (bandW + 1) / 2
-				bandH = (bandH + 1) / 2
+				for b := 0; b < 3; b++ {
+					bw, bh := subbandDims(bandW, bandH, b)
+					cb += ceilDivInt(bw, cbWidth) * ceilDivInt(bh, cbHeight)
+				}
+			} else {
+				cb = ceilDivInt(bandW, cbWidth) * ceilDivInt(bandH, cbHeight)
 			}
-
-			numCBPerBand := ceilDivInt(bandW, cbWidth) * ceilDivInt(bandH, cbHeight)
-			cb := numCBPerBand * numBands
 			key := crKey{c, r}
 			crOrder = append(crOrder, key)
 			crInfos[key] = crCodeBlockInfo{numCodeBlocks: cb}

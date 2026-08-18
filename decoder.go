@@ -663,13 +663,7 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 				numBands = 3
 			}
 			for b := 0; b < numBands; b++ {
-				scale := 1 << (numRes - 1 - r)
-				bandW := (tcWidth + scale - 1) / scale
-				bandH := (tcHeight + scale - 1) / scale
-				if r > 0 {
-					bandW = (bandW + 1) / 2
-					bandH = (bandH + 1) / 2
-				}
+				bandW, bandH := bandDims(tcWidth, tcHeight, numRes, r, b)
 				for cby := 0; cby*cbHeight < bandH; cby++ {
 					for cbx := 0; cbx*cbWidth < bandW; cbx++ {
 						expectedCB++
@@ -777,14 +771,8 @@ func (d *decoder) decodeTileData(tile *tcd.Tile, tileIdx int, qualityLimit int) 
 					}
 				}
 
-				// Compute band dimensions (same formula as encoder)
-				scale := 1 << (numRes - 1 - r)
-				bandW := (tcWidth + scale - 1) / scale
-				bandH := (tcHeight + scale - 1) / scale
-				if r > 0 {
-					bandW = (bandW + 1) / 2
-					bandH = (bandH + 1) / 2
-				}
+				// Must match the encoder exactly; see subband.go.
+				bandW, bandH := bandDims(tcWidth, tcHeight, numRes, r, b)
 
 				xOff, yOff := computeSubbandOffset(tcWidth, tcHeight, numRes, r, bandType)
 

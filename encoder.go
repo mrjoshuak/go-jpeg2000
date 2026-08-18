@@ -839,21 +839,26 @@ func (e *encoder) generateCAP() []byte {
 func (e *encoder) generateNLT() []byte {
 	var buf []byte
 	for c := 0; c < e.numComponents; c++ {
-		// NLT marker: 0xFF73
-		// Length: 5 (includes length field itself)
-		// Cnlt: component index (1 byte)
-		// BDnlt: bit depth (1 byte) - 0x9F = signed (bit 7) + 31 (32-1)
-		// Tnlt: transform type (1 byte) - 3 = type 3
-		marker := make([]byte, 7)
+		// ISO/IEC 15444-2 A.3.10 / 15444-15 Annex A:
+		//   NLT   marker 0xFF76
+		//   Lnlt  2 bytes, counting itself: 2 + 2 + 1 + 1 = 6
+		//   Cnlt  2 bytes, the component index (0xFFFF means all components)
+		//   BDnlt 1 byte, bit 7 = signed, bits 0-6 = depth-1
+		//   Tnlt  1 byte, 3 = binary complement (the float/half transform)
+		// Cnlt is sixteen bits wide unconditionally; writing it as one byte
+		// makes Lnlt 5 and OpenJPH rejects the segment outright
+		// ("Unsupported NLT type", ojph_params.cpp:2256, which requires
+		// length == 6). This repository's own parser requires 6 as well.
+		marker := make([]byte, 8)
 		binary.BigEndian.PutUint16(marker[0:2], uint16(codestream.NLT))
-		binary.BigEndian.PutUint16(marker[2:4], 5) // length
-		marker[4] = uint8(c)                       // component index
+		binary.BigEndian.PutUint16(marker[2:4], 6)         // Lnlt
+		binary.BigEndian.PutUint16(marker[4:6], uint16(c)) // Cnlt
 		bdnlt := uint8(e.componentPrecision[c] - 1)
 		if e.componentSigned[c] {
 			bdnlt |= 0x80
 		}
-		marker[5] = bdnlt
-		marker[6] = 3 // NLT type 3
+		marker[6] = bdnlt
+		marker[7] = 3 // Tnlt: type 3, binary complement
 		buf = append(buf, marker...)
 	}
 	return buf
@@ -1079,14 +1084,10 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 					}
 				}
 
-				scale := 1 << (numRes - 1 - r)
-				bandWidth := (e.width + scale - 1) / scale
-				bandHeight := (e.height + scale - 1) / scale
-
-				if r > 0 {
-					bandWidth = (bandWidth + 1) / 2
-					bandHeight = (bandHeight + 1) / 2
-				}
+				// Orientation-aware: an odd-length signal splits into
+				// ceil/floor halves and HL, LH and HH do not all take the same
+				// one. See subband.go.
+				bandWidth, bandHeight := bandDims(e.width, e.height, numRes, r, b)
 
 				for cby := 0; cby*cbHeight < bandHeight; cby++ {
 					for cbx := 0; cbx*cbWidth < bandWidth; cbx++ {

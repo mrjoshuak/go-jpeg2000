@@ -80,6 +80,15 @@ trap 'rm -rf "$WORK"' EXIT
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Source rasters both oracles read back. Written once so the Part 1 checks still
+# run when OpenJPH is absent.
+python3 - "$WORK/src.pgm" "$WORK/src32.pgm" <<'PYEOF'
+import sys
+for path, n in ((sys.argv[1], 8), (sys.argv[2], 32)):
+    px = bytes([20 + ((x*13 + y*3) % 200) for y in range(n) for x in range(n)])
+    open(path, 'wb').write(b'P5\n%d %d\n255\n' % (n, n) + px)
+PYEOF
+
 if ! have ojph_compress || ! have ojph_expand; then
 	gap "OpenJPH not installed; HTJ2K interoperability unchecked"
 else
@@ -152,84 +161,92 @@ PYEOF
 	}
 
 	# WRITE side: does the HTJ2K reference read what we produce, exactly?
+	# Every resolution count from 1 (no wavelet levels) to 4 (three levels of
+	# decomposition) is asserted: the forward 5/3 pass order only shows up
+	# above zero levels, and it grows worse with each further level.
 	for size in 32 64 128 200; do
-		f="$WORK/w_$size.j2c"
-		if ! go run "$WORK/enc.go" "$f" "$size" 1 >/dev/null 2>&1; then
-			fail "write ${size}px: our encoder failed"
+		for nres in 1 2 3 4; do
+			f="$WORK/w_${size}_$nres.j2c"
+			if ! go run "$WORK/enc.go" "$f" "$size" "$nres" >/dev/null 2>&1; then
+				fail "write ${size}px ${nres} resolutions: our encoder failed"
+				continue
+			fi
+			if ! ojph_expand -i "$f" -o "$WORK/w_${size}_$nres.out.pgm" >/dev/null 2>&1; then
+				fail "write ${size}px ${nres} resolutions: OpenJPH refused our codestream"
+				continue
+			fi
+			if d=$(cmp_pgm "$WORK/w_${size}_$nres.out.pgm" "$f.pgm"); then
+				pass "write ${size}px ${nres} resolutions HTJ2K: OpenJPH decodes it exactly ($d differ)"
+			else
+				fail "write ${size}px ${nres} resolutions HTJ2K: OpenJPH decoded $d samples differently"
+			fi
+		done
+	done
+
+	# Sizes whose subbands come out with an odd width still fail, for a reason
+	# that is not the wavelet: the forward transform matches Annex F and the
+	# OpenJPH coefficient fixtures at these geometries (see
+	# internal/dwt/conformance_test.go), so the divergence is downstream.
+	for size in 17 25; do
+		f="$WORK/odd_$size.j2c"
+		if ! go run "$WORK/enc.go" "$f" "$size" 2 >/dev/null 2>&1; then
+			gap "write ${size}px 2 resolutions: our encoder failed"
 			continue
 		fi
-		if ! ojph_expand -i "$f" -o "$WORK/w_$size.out.pgm" >/dev/null 2>&1; then
-			fail "write ${size}px: OpenJPH refused our codestream"
+		if ! ojph_expand -i "$f" -o "$WORK/odd_$size.out.pgm" >/dev/null 2>&1; then
+			gap "write ${size}px 2 resolutions: OpenJPH refused our codestream (odd subband width)"
 			continue
 		fi
-		if d=$(cmp_pgm "$WORK/w_$size.out.pgm" "$f.pgm"); then
-			pass "write ${size}px HTJ2K: OpenJPH decodes it exactly ($d differ)"
+		d=$(cmp_pgm "$WORK/odd_$size.out.pgm" "$f.pgm" || true)
+		if [ "${d%%/*}" = "0" ]; then
+			pass "write ${size}px 2 resolutions: OpenJPH decodes it exactly"
 		else
-			fail "write ${size}px HTJ2K: OpenJPH decoded $d samples differently"
+			gap "write ${size}px 2 resolutions: OpenJPH differs on $d samples (odd subband width, not the DWT)"
 		fi
 	done
 
-	# Multi-resolution write is known not to round-trip through the reference.
-	if go run "$WORK/enc.go" "$WORK/wr2.j2c" 32 2 >/dev/null 2>&1 &&
-		ojph_expand -i "$WORK/wr2.j2c" -o "$WORK/wr2.out.pgm" >/dev/null 2>&1; then
-		d=$(cmp_pgm "$WORK/wr2.out.pgm" "$WORK/wr2.j2c.pgm" || true)
-		if [ "${d%%/*}" = "0" ]; then
-			pass "write 32px 2 resolutions: OpenJPH decodes it exactly"
-		else
-			gap "write 32px 2 resolutions: OpenJPH differs on $d samples (forward DWT is not yet bit-conformant above one level)"
-		fi
-	fi
-
 	# READ side: do we read what the reference produces, exactly?
-	python3 - "$WORK/src.pgm" <<'PYEOF'
-import sys
-w=h=8
-px=bytes([20+((x*13+y*3)%200) for y in range(h) for x in range(w)])
-open(sys.argv[1],'wb').write(b'P5\n8 8\n255\n'+px)
-PYEOF
-	for nd in 0 1; do
-		if ! ojph_compress -i "$WORK/src.pgm" -o "$WORK/r_$nd.j2c" \
-			-num_decomps "$nd" -reversible true >/dev/null 2>&1; then
-			gap "read: OpenJPH could not produce a -num_decomps $nd fixture"
-			continue
-		fi
-		# Control: the oracle must round-trip its own output, or it proves nothing.
-		ojph_expand -i "$WORK/r_$nd.j2c" -o "$WORK/r_$nd.ctl.pgm" >/dev/null 2>&1
-		if ! cmp -s "$WORK/r_$nd.ctl.pgm" "$WORK/src.pgm"; then
-			gap "read -num_decomps $nd: oracle control failed, measurement would be meaningless"
-			continue
-		fi
-		out=$(go run ./scripts/decodecmp "$WORK/r_$nd.j2c" "$WORK/src.pgm" 2>&1)
-		if [ "$out" = "0" ]; then
-			pass "read HTJ2K -num_decomps $nd: we decode OpenJPH's codestream exactly"
-		else
-			if [ "$nd" = "0" ]; then
-				fail "read HTJ2K -num_decomps $nd: $out samples differ"
-			else
-				gap "read HTJ2K -num_decomps $nd: $out samples differ"
+	for src in src src32; do
+		for nd in 0 1 2 3; do
+			f="$WORK/r_${src}_$nd.j2c"
+			if ! ojph_compress -i "$WORK/$src.pgm" -o "$f" \
+				-num_decomps "$nd" -reversible true >/dev/null 2>&1; then
+				gap "read $src: OpenJPH could not produce a -num_decomps $nd fixture"
+				continue
 			fi
-		fi
+			# Control: the oracle must round-trip its own output, or it proves nothing.
+			ojph_expand -i "$f" -o "$WORK/r_${src}_$nd.ctl.pgm" >/dev/null 2>&1
+			if ! cmp -s "$WORK/r_${src}_$nd.ctl.pgm" "$WORK/$src.pgm"; then
+				gap "read $src -num_decomps $nd: oracle control failed, measurement would be meaningless"
+				continue
+			fi
+			out=$(go run ./scripts/decodecmp "$f" "$WORK/$src.pgm" 2>&1)
+			if [ "$out" = "0" ]; then
+				pass "read HTJ2K $src -num_decomps $nd: we decode OpenJPH's codestream exactly"
+			else
+				fail "read HTJ2K $src -num_decomps $nd: $out samples differ"
+			fi
+		done
 	done
 fi
 
 if ! have opj_compress; then
 	gap "OpenJPEG not installed; Part 1 interoperability unchecked"
 else
-	for n in 1 2; do
-		if ! opj_compress -i "$WORK/src.pgm" -o "$WORK/p_$n.j2k" -n "$n" -r 1 >/dev/null 2>&1; then
-			gap "read Part 1 -n $n: OpenJPEG could not produce a fixture"
-			continue
-		fi
-		out=$(go run ./scripts/decodecmp "$WORK/p_$n.j2k" "$WORK/src.pgm" 2>&1)
-		if [ "$out" = "0" ]; then
-			pass "read Part 1 MQ -n $n: we decode OpenJPEG's codestream exactly"
-		else
-			if [ "$n" = "1" ]; then
-				fail "read Part 1 MQ -n $n: $out samples differ"
-			else
-				gap "read Part 1 MQ -n $n: $out samples differ"
+	for src in src src32; do
+		for n in 1 2 3; do
+			f="$WORK/p_${src}_$n.j2k"
+			if ! opj_compress -i "$WORK/$src.pgm" -o "$f" -n "$n" -r 1 >/dev/null 2>&1; then
+				gap "read Part 1 $src -n $n: OpenJPEG could not produce a fixture"
+				continue
 			fi
-		fi
+			out=$(go run ./scripts/decodecmp "$f" "$WORK/$src.pgm" 2>&1)
+			if [ "$out" = "0" ]; then
+				pass "read Part 1 MQ $src -n $n: we decode OpenJPEG's codestream exactly"
+			else
+				fail "read Part 1 MQ $src -n $n: $out samples differ"
+			fi
+		done
 	done
 fi
 

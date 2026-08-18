@@ -284,7 +284,7 @@ func (c *CapabilitiesMarker) IsHTJ2K() bool {
 // NLT Type 3 is used for IEEE 754 float data encoded as int32 bit patterns,
 // applying a sign-magnitude to two's complement transform.
 type NLTMarker struct {
-	ComponentIndex uint8
+	ComponentIndex uint16
 	BitDepth       uint8 // BDnlt: bit 7 = signed, bits 0-6 = depth-1
 	TransformType  uint8 // Tnlt: 3 = DC level shift (type used for float)
 }

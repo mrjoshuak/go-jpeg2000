@@ -397,14 +397,9 @@ func decodePacketIntoTile(
 			}
 		}
 
-		// Compute band dimensions
-		scale := 1 << (numRes - 1 - res)
-		bandW := (tcWidth + scale - 1) / scale
-		bandH := (tcHeight + scale - 1) / scale
-		if res > 0 {
-			bandW = (bandW + 1) / 2
-			bandH = (bandH + 1) / 2
-		}
+		// Orientation-aware band dimensions; see subband.go. The three detail
+		// bands differ in size whenever the resolution's dimensions are odd.
+		bandW, bandH := bandDims(tcWidth, tcHeight, numRes, res, b)
 
 		xOff, yOff := computeSubbandOffset(tcWidth, tcHeight, numRes, res, bandType)
 

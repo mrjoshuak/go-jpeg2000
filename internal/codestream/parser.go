@@ -944,14 +944,16 @@ func (p *Parser) readNLT() error {
 	if err != nil {
 		return err
 	}
-	if length < 5 {
+	// ISO/IEC 15444-2 A.3.10: Lnlt(2) + Cnlt(2) + BDnlt(1) + Tnlt(1) = 6,
+	// with Lnlt counting itself. Cnlt is a 16-bit component index.
+	if length < 6 {
 		return fmt.Errorf("NLT marker too short: %d bytes", length)
 	}
 
 	nlt := NLTMarker{}
 
-	// Read Cnlt (component index)
-	cnlt, err := p.readByte()
+	// Read Cnlt (component index, 16 bits)
+	cnlt, err := p.readUint16()
 	if err != nil {
 		return err
 	}

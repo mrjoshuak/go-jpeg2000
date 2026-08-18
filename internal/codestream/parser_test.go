@@ -3520,10 +3520,12 @@ func TestParser_ReadNLT(t *testing.T) {
 	addCOD(buf, false)
 	addQCD(buf, QuantizationScalarDerived)
 
-	// Add NLT marker: component 0, 32-bit signed (0x9F), transform type 3
+	// Add NLT marker: component 0, 32-bit signed (0x9F), transform type 3.
+	// ISO/IEC 15444-2 A.3.10 fixes the segment at Lnlt(2) + Cnlt(2) + BDnlt(1)
+	// + Tnlt(1), so Lnlt is 6 and Cnlt is sixteen bits wide.
 	binary.Write(buf, binary.BigEndian, uint16(NLT))
-	binary.Write(buf, binary.BigEndian, uint16(5)) // Length: 2 + 3
-	buf.WriteByte(0)                               // Cnlt: component 0
+	binary.Write(buf, binary.BigEndian, uint16(6)) // Lnlt: 2 + 2 + 1 + 1
+	binary.Write(buf, binary.BigEndian, uint16(0)) // Cnlt: component 0
 	buf.WriteByte(0x9F)                            // BDnlt: signed 32-bit (bit7=1, bits0-6=31 -> precision 32)
 	buf.WriteByte(3)                               // Tnlt: type 3 (sign-magnitude transform)
 
@@ -3556,12 +3558,12 @@ func TestParser_ReadNLT_Multiple(t *testing.T) {
 	addQCD(buf, QuantizationScalarDerived)
 
 	// Add NLT for components 0, 1, 2
-	for i := byte(0); i < 3; i++ {
+	for i := 0; i < 3; i++ {
 		binary.Write(buf, binary.BigEndian, uint16(NLT))
-		binary.Write(buf, binary.BigEndian, uint16(5))
-		buf.WriteByte(i)    // Component index
-		buf.WriteByte(0x9F) // 32-bit signed
-		buf.WriteByte(3)    // Type 3
+		binary.Write(buf, binary.BigEndian, uint16(6)) // Lnlt
+		binary.Write(buf, binary.BigEndian, uint16(i)) // Cnlt: 16-bit component index
+		buf.WriteByte(0x9F)                            // 32-bit signed
+		buf.WriteByte(3)                               // Type 3
 	}
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))
@@ -3576,7 +3578,7 @@ func TestParser_ReadNLT_Multiple(t *testing.T) {
 		t.Fatalf("NLTMarkers length = %d, want 3", len(header.NLTMarkers))
 	}
 	for i := 0; i < 3; i++ {
-		if header.NLTMarkers[i].ComponentIndex != byte(i) {
+		if header.NLTMarkers[i].ComponentIndex != uint16(i) {
 			t.Errorf("NLTMarkers[%d].ComponentIndex = %d, want %d", i, header.NLTMarkers[i].ComponentIndex, i)
 		}
 	}
@@ -3588,7 +3590,7 @@ func TestParser_ReadNLT_TooShort(t *testing.T) {
 	addQCD(buf, QuantizationScalarDerived)
 
 	binary.Write(buf, binary.BigEndian, uint16(NLT))
-	binary.Write(buf, binary.BigEndian, uint16(3)) // Length too short (< 5)
+	binary.Write(buf, binary.BigEndian, uint16(3)) // Lnlt too short (< 6)
 	buf.WriteByte(0)                               // Partial data
 
 	binary.Write(buf, binary.BigEndian, uint16(SOT))

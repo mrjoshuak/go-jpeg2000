@@ -53,11 +53,11 @@ after confirming the oracle round-trips its own output bit-exactly.
 ### Interoperability achieved (verified against OpenJPH and OpenJPEG)
 
 - [x] **OpenJPH decodes our HTJ2K output exactly** at 32, 64, 128 and 200 px
-      square, single resolution — 0 samples different. Conforming T2 packets are
-      emitted for the HighThroughput path.
-- [x] **We decode OpenJPH's HTJ2K output exactly**, at zero and one
-      decomposition level.
-- [x] **We decode OpenJPEG's Part 1 MQ output exactly**, at one and two
+      square, at 1, 2, 3 and 4 resolutions — 0 samples different. Conforming T2
+      packets are emitted for the HighThroughput path.
+- [x] **We decode OpenJPH's HTJ2K output exactly**, at zero through three
+      decomposition levels.
+- [x] **We decode OpenJPEG's Part 1 MQ output exactly**, at one, two and three
       resolutions. The MQ block decoder had four independent defects, the first
       being that only the uniform context was seeded (Table D.7 requires
       UNIFORM=46, RUN-LENGTH=3, ZC context 0=4), so the arithmetic decoder
@@ -66,6 +66,32 @@ after confirming the oracle round-trips its own output bit-exactly.
       stride, so from the second decomposition level they walked the wrong
       memory. A round trip could not see it because both directions made the
       same mistake.
+- [x] **The 2D DWT ran its two passes in the wrong order.** The forward filtered
+      rows then columns and the inverse undid columns then rows. ISO/IEC 15444-1
+      F.3.8.1 defines the inverse 2D_SR as HOR_SR then VER_SR, so the forward
+      2D_SD must be VER_SD then HOR_SD. The 5/3 lifting steps floor their
+      intermediates, so the orders are not interchangeable — but they are exact
+      inverses of each other, which is why every round-trip test passed while no
+      conforming decoder could read the output. OpenJPH now decodes our output
+      exactly at 1, 2, 3 and 4 resolutions at 32, 64, 128 and 200 px, we decode
+      OpenJPH's streams exactly at 0-3 decompositions, and we decode OpenJPEG's
+      Part 1 MQ streams exactly at 1-3 resolutions.
+- [x] `internal/dwt/conformance_test.go` is the test that could catch it:
+      `TestForward53MatchesSpec` compares against a literal transcription of
+      Annex F written from the equations, and `TestForward53MatchesOpenJPHCoefs`
+      compares against the coefficient arrays carried in codestreams OpenJPH
+      produced (`internal/dwt/testdata/ojph_*.coef`). Both fail on the old code.
+- [x] **The NLT marker segment was written one byte short.** `generateNLT`
+      emitted Lnlt = 5 with a one-byte Cnlt. ISO/IEC 15444-2 A.3.10 (and
+      15444-15 Annex A) fix the segment at Lnlt(2) + Cnlt(2) + BDnlt(1) +
+      Tnlt(1), so Lnlt is 6 and Cnlt is sixteen bits wide. OpenJPH rejects
+      anything else outright — `param_nlt::read` requires `length == 6` and
+      reports "Unsupported NLT type" (ojph_params.cpp:2256). This repository's
+      own parser already required 6, so `EncodeFloat`/`EncodeHalf` output could
+      not be read back by anything, including this decoder. Measured: with the
+      fix, OpenEXR/OpenJPH reads go-openexr's HALF, FLOAT and UINT HTJ2K
+      scanline chunks bit-identically to their uncompressed twins; without it,
+      every one fails with "Unsupported NLT type 255".
 - [x] The HT encoder applied initial-stripe u-coding rules to every stripe,
       emitting a MEL event and the "u > 2" UVLC modes where a conforming
       decoder expects neither. `TestHTEncodeMatchesOpenJPH` is now byte-exact.
@@ -103,12 +129,15 @@ after confirming the oracle round-trips its own output bit-exactly.
 - [ ] `PacketDecoder.decodeTagTreeValue` is a unary decode labelled "Simplified".
       It is correct only for a 1x1 tree (a single code-block per precinct).
       (`t2_packets.go` has a correct tag tree; `internal/tcd/t2.go` remains dead.)
-- [ ] **The forward DWT is not bit-conformant above one decomposition level.**
-      Our own round trip is exact at every level, and OpenJPH decodes our
-      single-resolution output exactly, but at two levels it differs on 25 of
-      1024 samples — one LSB low, in vertical runs matching the 5-tap synthesis
-      footprint of a single wrong detail coefficient. Self-inverse again: our
-      forward and inverse agree with each other and not with the standard.
+- [ ] **Subbands with an odd width are not conformant.** Not the wavelet: the
+      forward transform now matches Annex F and the OpenJPH coefficient
+      fixtures at 17x17, 23x17, 33x33 and 45x31 up to five levels. But a
+      17 px or 25 px image at two resolutions, whose LL band comes out 9 or 13
+      wide, differs on 76/289 and 135/625 samples through OpenJPH, and reading
+      OpenJPH's own 45x31 stream at one decomposition is 719/1395 wrong with a
+      max delta of 234 — a gross mis-assignment, not a rounding error. Present
+      before the DWT pass-order fix and unchanged by it. Recorded as the two
+      remaining known gaps in `scripts/validate.sh`.
 - [ ] **Conforming T2 output is enabled only for HighThroughput.** The Part 1
       MQ path still writes the private container, because its packet headers
       need a length per coding pass and only a single length is emitted.

@@ -200,13 +200,10 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte) error 
 			}
 			var bands []*bandGeometry
 			for b := 0; b < numBands; b++ {
-				scale := 1 << uint(numRes-1-r)
-				bw := (tcW + scale - 1) / scale
-				bh := (tcH + scale - 1) / scale
-				if r > 0 {
-					bw = (bw + 1) / 2
-					bh = (bh + 1) / 2
-				}
+				// Orientation-aware; see subband.go. Using ceil for all three
+				// detail bands overstates HL and HH by a column, and LH and HH
+				// by a row, whenever the resolution's dimensions are odd.
+				bw, bh := bandDims(tcW, tcH, numRes, r, b)
 				bt := entropy.BandLL
 				if r > 0 {
 					switch b {
