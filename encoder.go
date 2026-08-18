@@ -1128,7 +1128,16 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 			// and reaches block decoding — but this library's own T2 decoder is
 			// still single-resolution only, so enabling it here breaks our
 			// round-trip for any image with a wavelet.
-			tileData = e.buildStandardTileData(jobs, encodedList, numBPSList)
+			// NOTE: e.buildStandardTileData(jobs, encodedList, numBPSList)
+			// emits conforming T2 packets, and OpenJPH decodes the result to
+			// the exact source samples at one and at two resolution levels.
+			// It is not enabled because this library's own T2 decoder
+			// mis-assigns packet bodies across subbands at res > 0, so turning
+			// it on leaves the library unable to read what it writes (18 tests
+			// red). Enable it here once that decoder defect is fixed.
+			_ = encodedList
+			_ = numBPSList
+			tileData = buildTileData(metas, allEncoded)
 		}
 		return e.createTileHeader(tileIdx, tileData), nil
 	}
@@ -1195,11 +1204,11 @@ func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	if numLayers > 1 {
 		tileData = buildMultiLayerTileData(metas, allTruncPoints, allEncoded, numLayers)
 	} else {
-		numBPSList := make([]int, len(metas))
-		for i, m := range metas {
-			numBPSList[i] = int(m.numBPS)
-		}
-		tileData = e.buildStandardTileData(jobs, encodedBlocks, numBPSList)
+		// See the note in the sequential path: conforming T2 output is
+		// implemented and verified against OpenJPH, but gated on fixing the
+		// decoder's multi-resolution packet assignment.
+		_ = encodedBlocks
+		tileData = buildTileData(metas, allEncoded)
 	}
 	return e.createTileHeader(tileIdx, tileData), nil
 }
