@@ -232,8 +232,11 @@ func (idx *PacketIndex) indexTilePackets(
 	}
 	// numComp, numRes and numLayers are three independent header fields whose
 	// product is the number of packet records appended below.
-	if n := uint64(numComp) * uint64(numRes) * uint64(numLayers); n > maxPackets {
-		return fmt.Errorf("tile describes %d packets, above the %d limit", n, uint64(maxPackets))
+	// Bound by the codestream's own length: a packet costs at least one byte on
+	// the wire, so a file cannot describe more packets than it has bytes.
+	if n := uint64(numComp) * uint64(numRes) * uint64(numLayers); n > maxPacketsForInput(len(cs)) {
+		return fmt.Errorf("tile describes %d packets, more than the %d a %d-byte codestream can carry",
+			n, maxPacketsForInput(len(cs)), len(cs))
 	}
 	if dataStart < 0 || dataEnd > len(cs) || dataStart > dataEnd {
 		return fmt.Errorf("tile data range [%d,%d) is outside the %d-byte codestream",

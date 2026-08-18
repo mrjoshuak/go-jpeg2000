@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   codestream now returns an error from every public decode entry point.
 
 ### Security
+- **`ExtractPackets` and `BuildPacketIndex` allocated without bound.** The
+  packet count is a product of header fields, capped only by a flat constant, so
+  a 165-byte codestream could claim four million packet records and allocate
+  125 MB building them -- about 800,000x amplification, reachable from
+  go-openexr's progressive HTJ2K API. The count is now bounded by the
+  codestream's own length: a packet occupies at least one byte on the wire, so a
+  file cannot describe more packets than it has bytes. Measured on the same
+  input: 125 MB -> 0.3 MB.
 - The decode allocation limit is an absolute cap (`maxDecodedSamples`, about
   1 GiB of coefficients), not a ratio to the input length. A ratio cannot tell a
   hostile claim from a legitimately tiny encoding of a large flat image: they

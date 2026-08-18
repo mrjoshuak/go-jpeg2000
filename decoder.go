@@ -271,10 +271,32 @@ func (d *decoder) parseCodestream() error {
 // compression efficiency.
 const maxDecodedSamples = 1 << 28
 
-// maxPackets bounds the number of packet records any codestream may describe.
+// maxPackets is the absolute ceiling on packet records, before the
+// input-length bound below is applied.
+//
 // The packet count is the product of four independent header fields, so an
 // otherwise unremarkable header can claim trillions of them.
 const maxPackets = 1 << 22
+
+// maxPacketsForInput bounds the packet records an n-byte codestream may
+// describe. Unlike the sample count, this one genuinely is derivable from the
+// input length: every packet occupies at least one byte on the wire, even an
+// empty one, which spends a byte on the zero-length bit. A codestream
+// therefore cannot describe more packets than it has bytes.
+//
+// Without this the flat maxPackets ceiling let a 165-byte file claim four
+// million packet records and allocate 125 MB building them -- roughly 800,000x
+// amplification, from a public entry point that go-openexr exposes through its
+// progressive HTJ2K API.
+func maxPacketsForInput(n int) uint64 {
+	if n < 0 {
+		n = 0
+	}
+	if uint64(n) > maxPackets {
+		return maxPackets
+	}
+	return uint64(n)
+}
 
 // sampleLimitForInput returns the largest number of coefficient samples,
 // summed over every component, that a decode of an n-byte input may allocate.

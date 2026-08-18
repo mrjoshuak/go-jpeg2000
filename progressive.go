@@ -46,6 +46,14 @@ func NewProgressiveDecoderFromCodestream(cs []byte) (*ProgressiveDecoder, error)
 		return nil, err
 	}
 	pd.sampleLimit = sampleLimitForInput(len(cs))
+
+	// The header alone cannot say how many packets are plausible; the byte
+	// count can. Applied here rather than in NewProgressiveDecoder, which is
+	// handed a header with no input to measure against.
+	if limit := maxPacketsForInput(len(cs)); uint64(pd.totalExpected) > limit {
+		return nil, fmt.Errorf("codestream describes %d packets, more than the %d a %d-byte codestream can carry",
+			pd.totalExpected, limit, len(cs))
+	}
 	return pd, nil
 }
 
