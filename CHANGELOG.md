@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-08-19
+
+Everything a codestream needs to be addressable — precincts, packet length
+markers, the five progression orders — plus component subsampling and the read
+direction of quality layers. The gate grew from 169 checks to 235 and now
+reports no known gaps.
+
+### Fixed
+- **Explicit precinct partitions were ignored entirely.** `Scod` bit 0 declares
+  a partition, which makes a resolution hold one packet per precinct instead of
+  one packet in total. This library read every such codestream against a single
+  maximal precinct, so from the second packet onward it parsed packet headers at
+  the wrong offsets: 65114 of 65536 samples wrong against an OpenJPEG fixture.
+  `ROADMAP.md` claimed `validate.sh` measured this every run; `validate.sh`
+  contained no reference to precincts at all. Three things had to be right and
+  each failed on its own — the partition anchored at zero in the resolution's
+  coordinates with the band-space origin taken from the resolution origin, the
+  code-block partition clipped to the precinct (B.7), and the coordinate walk of
+  B.12.1.4 for PCRL and CPRL.
+- **The five progression orders were one walk.** LRCP, RLCP, RPCL, PCRL and
+  CPRL agree only when there is a single precinct, layer and component, which
+  is all this library ever wrote, so nothing ever disagreed. PCRL and CPRL put
+  position outside resolution, where precinct index *p* names a different region
+  at every resolution; walking them by index decodes each against the wrong
+  precinct.
+- **Subsampled components landed in a corner of the image.** `XRsiz`/`YRsiz`
+  above 1 put a component on a coarser grid, where one sample covers `XRsiz` by
+  `YRsiz` of the reference grid (A.5.1). Every component was written to the
+  output plane at its own index, so a half-resolution component filled a quarter
+  of the plane and the rest stayed zero — 4091 of 4096 chroma samples wrong on a
+  4:2:0 fixture, beside a full-resolution component that was exact.
+- **The multiple component transform was applied to components that did not
+  share a grid**, which the format forbids and which read past the end of the
+  shorter plane.
+
+### Added
+- `Options.PrecinctSizes` writes an explicit precinct partition, and
+  `PacketAddress.Precinct` now means something. `PacketIndex.Range` gives a
+  packet's byte range in the codestream and `PacketIndex.PacketsForRegion`
+  resolves an image rectangle to the packets covering it: a 64x64 viewport of a
+  256x256 image is 7 of 85 packets and 2519 of 21127 bytes.
+- `Options.WritePacketLengths` writes `PLT` in every tile-part header and `TLM`
+  in the main header, and `BuildPacketIndex` uses them instead of walking the
+  packets. `PacketIndex.IndexCost` reports what that saved: indexing a 128x128
+  image reads 152 of 5486 bytes, a 512x512 image 788 of 85048 — the fraction
+  falls as the image grows, because the cost follows the packet count rather
+  than the data.
+- `Options.ComponentSubsampling` writes subsampled components, by decimation
+  rather than averaging, since the format specifies no filter and decimation is
+  the one choice a decoder inverts exactly. 4:2:0, 4:2:2 and 4:1:1 are gated,
+  tiled and lossy included.
+- The read direction of quality layers is gated: each prefix of OpenJPEG's
+  five-layer codestream improves this library's reconstruction — 1240, 883, 344,
+  0, 0 — and every prefix yields the whole image rather than part of one.
+
+### Removed
+- The HT SPP/MRP encoder. It was never reachable from the live encoder and
+  round-tripped only through this package's own decoder; handed to OpenJPH its
+  output produced `ojph error 0x000300A1 ... Error decoding a codeblock`. Both
+  halves shared one deviation from the standard, so it was deleted rather than
+  left looking usable. A single cleanup pass is a conforming HT code-block, and
+  quality layers already truncate at packet granularity.
+
 ## [1.5.0] - 2026-08-18
 
 Part 1 output is now interoperable, which was the last path this library wrote
