@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-08-19
+
+### Fixed
+- **`Config.DecodeArea` was ignored.** It was declared, documented as
+  "specifies a region to decode", and referenced nowhere in the decoder, so a
+  caller asking for a 32x16 region received the whole 64x32 image with no
+  indication the request had been dropped — and would then read the wrong
+  pixels out of a buffer sized for the answer it asked for. It returns an error
+  until region decode is implemented.
+- **`Config.ReduceResolution` returned wavelet-domain values as floats.** A
+  reduced-resolution decode stops the inverse wavelet at an LL subband. For
+  ordinary integer samples those are still samples, and the result is correct
+  to within a count or two on a ramp. For a codestream carrying an NLT point
+  transform they are what NLT maps back from rather than samples, and
+  reinterpreting them gave values off by 175 on a ramp spanning 0 to 2 — with
+  the dimensions correct, which is what made it look like it worked. The half
+  path had refused this since it was measured there; the float path now refuses
+  it too, and only where it applies.
+
+Both refusals are gated, together with the integer case that must keep working,
+so a guard that rejected everything would fail.
+
 ## [1.5.1] - 2026-08-19
 
 Everything a codestream needs to be addressable — precincts, packet length
