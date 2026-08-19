@@ -218,11 +218,13 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 				tc := tile.Components[comp]
 				tcWidth := tc.X1 - tc.X0
 				tcHeight := tc.Y1 - tc.Y0
+				ppx, ppy := precinctExps(h.CodingStyle, res)
 				decodePacketIntoTile(tc.Data, tcWidth, tcHeight,
 					tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
 					numRes, res, pktData,
 					psop, peph,
 					h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight(),
+					ppx, ppy, int(addr.Precinct),
 					func(band int) int { return h.BandMb(res, band) }, h.IsHTJ2K())
 			}
 		}
@@ -362,6 +364,7 @@ func decodePacketIntoTile(
 	pktData []byte,
 	useSOP, useEPH bool,
 	cbWidth, cbHeight int,
+	ppx, ppy, prec int,
 	mb func(band int) int,
 	ht bool,
 ) {
@@ -377,10 +380,11 @@ func decodePacketIntoTile(
 		return
 	}
 
-	bands := bandGridFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight)
-	if bands == nil {
+	precincts := precinctsFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight, ppx, ppy)
+	if prec < 0 || prec >= len(precincts) {
 		return
 	}
+	bands := precincts[prec]
 	r := newPktReader(pktData, useSOP, useEPH)
 	if err := readPacket(r, bands, 0, true); err != nil {
 		return
@@ -389,8 +393,8 @@ func decodePacketIntoTile(
 	for b, bg := range bands {
 		sb := bg.sb
 		for cby := 0; cby < bg.cbY; cby++ {
-			by0 := max(sb.y0, (bg.firstY+cby)*cbHeight)
-			by1 := min(sb.y1, (bg.firstY+cby+1)*cbHeight)
+			by0 := max(sb.y0, (bg.firstY+cby)*bg.cbH)
+			by1 := min(sb.y1, (bg.firstY+cby+1)*bg.cbH)
 			for cbx := 0; cbx < bg.cbX; cbx++ {
 				cb := bg.blocks[cby*bg.cbX+cbx]
 				if !cb.included || len(cb.data) == 0 {

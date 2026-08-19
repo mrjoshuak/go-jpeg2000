@@ -216,3 +216,13 @@ func codeBlockRange(b0, b1, cb int) (first, count int) {
 	first = b0 / cb
 	return first, (b1+cb-1)/cb - first
 }
+
+// precinctGridDims returns how many precincts wide and high one resolution of a
+// tile-component is, for the partition exponents in force there (B-16).
+func precinctGridDims(x0, y0, x1, y1, numRes, res, ppx, ppy int) (pw, ph int) {
+	rx0, ry0, rx1, ry1 := tileResCoords(x0, y0, x1, y1, numRes, res)
+	if rx1 <= rx0 || ry1 <= ry0 {
+		return 0, 0
+	}
+	return ceilShift(rx1, ppx) - rx0>>uint(ppx), ceilShift(ry1, ppy) - ry0>>uint(ppy)
+}

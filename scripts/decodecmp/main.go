@@ -14,6 +14,23 @@ import (
 	jp2 "github.com/mrjoshuak/go-jpeg2000"
 )
 
+// readPNM returns the raster of a binary PGM or PPM and how many samples each
+// pixel carries, skipping the four header tokens. A PPM holds three interleaved
+// samples per pixel, so comparing only the first channel of one would pass a
+// decoder that got the other two entirely wrong.
+func readPNM(path string) ([]byte, int, error) {
+	d, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	n := 1
+	if len(d) >= 2 && d[1] == '6' {
+		n = 3
+	}
+	raster, err := readPGM(path)
+	return raster, n, err
+}
+
 // readPGM returns the raster of a binary PGM, skipping the four header tokens.
 func readPGM(path string) ([]byte, error) {
 	d, err := os.ReadFile(path)
@@ -61,25 +78,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	want, err := readPGM(os.Args[2])
+	want, chans, err := readPNM(os.Args[2])
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
 	b := img.Bounds()
-	if b.Dx()*b.Dy() != len(want) {
-		fmt.Printf("size mismatch: decoded %dx%d, reference %d samples\n",
-			b.Dx(), b.Dy(), len(want))
+	if b.Dx()*b.Dy()*chans != len(want) {
+		fmt.Printf("size mismatch: decoded %dx%d, reference %d samples over %d channels\n",
+			b.Dx(), b.Dy(), len(want), chans)
 		os.Exit(1)
 	}
 
 	diff := 0
 	for y := 0; y < b.Dy(); y++ {
 		for x := 0; x < b.Dx(); x++ {
-			r, _, _, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			if byte(r>>8) != want[y*b.Dx()+x] {
-				diff++
+			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			i := (y*b.Dx() + x) * chans
+			if chans == 1 {
+				if byte(r>>8) != want[i] {
+					diff++
+				}
+				continue
+			}
+			for k, v := range [3]uint32{r, g, bl} {
+				if byte(v>>8) != want[i+k] {
+					diff++
+				}
 			}
 		}
 	}

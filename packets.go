@@ -273,7 +273,7 @@ func (idx *PacketIndex) indexTilePackets(
 		comp int
 		res  int
 	}
-	grids := make(map[crKey][]*bandGeometry, numComp*numRes)
+	grids := make(map[crKey][][]*bandGeometry, numComp*numRes)
 	for c := 0; c < numComp; c++ {
 		comp := header.ComponentInfo[c]
 		// The subband partition is derived from the tile component's absolute
@@ -285,7 +285,9 @@ func (idx *PacketIndex) indexTilePackets(
 		cx1 := ceilDivInt(tx1, int(comp.SubsamplingX))
 		cy1 := ceilDivInt(ty1, int(comp.SubsamplingY))
 		for r := 0; r < numRes; r++ {
-			grids[crKey{c, r}] = bandGridFor(cx0, cy0, cx1, cy1, numRes, r, cbWidth, cbHeight)
+			ppx, ppy := precinctExps(header.CodingStyle, r)
+			grids[crKey{c, r}] = precinctsFor(cx0, cy0, cx1, cy1, numRes, r,
+				cbWidth, cbHeight, ppx, ppy)
 		}
 	}
 
@@ -305,7 +307,11 @@ func (idx *PacketIndex) indexTilePackets(
 			Precinct:   uint16(p),
 		}
 		var data []byte
-		bands := grids[crKey{c, r}]
+		precincts := grids[crKey{c, r}]
+		var bands []*bandGeometry
+		if p < len(precincts) {
+			bands = precincts[p]
+		}
 		if bands != nil && !reader.overrun && reader.pos < len(tileData) {
 			from := reader.pos
 			if err := readPacket(reader, bands, l, true); err == nil && !reader.overrun {
@@ -321,8 +327,34 @@ func (idx *PacketIndex) indexTilePackets(
 		idx.addrMap[addr] = entryIdx
 	}
 
-	forEachPacket(order, numLayers, numRes, numComp, func(l, r, c int) bool {
-		addPacket(l, r, c, 0)
+	// Precinct is a real coordinate now: with an explicit partition a
+	// resolution holds many packets, each covering one region of the image,
+	// which is what makes a byte range spatially addressable.
+	numPrec := func(r, c int) int { return len(grids[crKey{c, r}]) }
+
+	pos := &posInfo{tx0: tx0, ty0: ty0, tx1: tx1, ty1: ty1}
+	for c := 0; c < numComp; c++ {
+		sx, sy := 1, 1
+		if c < len(header.ComponentInfo) {
+			sx, sy = int(header.ComponentInfo[c].SubsamplingX), int(header.ComponentInfo[c].SubsamplingY)
+		}
+		pos.dx, pos.dy = append(pos.dx, max(sx, 1)), append(pos.dy, max(sy, 1))
+	}
+	for r := 0; r < numRes; r++ {
+		px, py := precinctExps(header.CodingStyle, r)
+		pos.ppx, pos.ppy = append(pos.ppx, px), append(pos.ppy, py)
+	}
+	pos.pw = func(r, c int) int {
+		comp := header.ComponentInfo[c]
+		w, _ := precinctGridDims(
+			ceilDivInt(tx0, int(comp.SubsamplingX)), ceilDivInt(ty0, int(comp.SubsamplingY)),
+			ceilDivInt(tx1, int(comp.SubsamplingX)), ceilDivInt(ty1, int(comp.SubsamplingY)),
+			numRes, r, pos.ppx[r], pos.ppy[r])
+		return w
+	}
+
+	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(l, r, c, p int) bool {
+		addPacket(l, r, c, p)
 		return true
 	})
 

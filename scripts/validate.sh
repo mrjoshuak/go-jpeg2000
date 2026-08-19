@@ -1025,6 +1025,88 @@ GOEOF
 		fi
 	done
 
+
+	# Explicit precinct partitions.
+	#
+	# Scod bit 0 declares a precinct partition, which makes a resolution hold
+	# many packets instead of one and makes each of them cover a region of the
+	# image rather than all of it. This library used to ignore the declaration
+	# entirely and read every such codestream against a single maximal
+	# precinct, so from the second packet on it was parsing packet headers at
+	# the wrong offsets: 65114 of 65536 samples wrong on the first fixture
+	# below. Nothing in this gate measured it, while ROADMAP.md claimed it did.
+	#
+	# Three things are varied because each broke separately while the others
+	# worked: the precinct size (a precinct smaller than the declared
+	# code-block clips the code-block partition, B.7), the progression order
+	# (PCRL and CPRL put position outside resolution, so precinct index means a
+	# different region at each resolution and B.12.1.4's coordinate walk is the
+	# only correct one), and tiling (the precinct grid is anchored in the
+	# resolution's absolute coordinates, not the tile's).
+	prec_read() {
+		name=$1
+		shift
+		f="$WORK/prc_$name.j2k"
+		if ! opj_compress -i "$WORK/src32.pgm" -o "$f" -r 1 "$@" >/dev/null 2>&1; then
+			gap "read precincts $name: OpenJPEG could not produce a fixture"
+			return
+		fi
+		out=$(go run ./scripts/decodecmp "$f" "$WORK/src32.pgm" 2>&1)
+		if [ "$out" = "0" ]; then
+			pass "read precincts $name: we decode OpenJPEG's codestream exactly"
+		else
+			fail "read precincts $name: $out samples differ"
+		fi
+	}
+
+	# Control first: the oracle must round-trip a precinct codestream of its
+	# own, or none of the rows below mean anything.
+	if opj_compress -i "$WORK/src32.pgm" -o "$WORK/prcctl.j2k" -n 3 -r 1 \
+		-c "[64,64],[64,64],[64,64]" >/dev/null 2>&1 &&
+		opj_decompress -i "$WORK/prcctl.j2k" -o "$WORK/prcctl.pgm" >/dev/null 2>&1 &&
+		cmp_raster "$WORK/prcctl.pgm" "$WORK/src32.pgm" >/dev/null; then
+		pass "precinct oracle control: OpenJPEG round-trips its own precinct codestream exactly"
+
+		# Sizes, including 8x8 and 16x16, which are smaller than the default
+		# 64x64 code-block and so exercise the clipping.
+		for sz in 128 64 32 16 8; do
+			prec_read "${sz}x${sz}" -n 3 -c "[$sz,$sz],[$sz,$sz],[$sz,$sz]"
+		done
+		# Sizes that differ per resolution, which is what the marker allows and
+		# a single-size implementation gets right by accident.
+		prec_read "mixed" -n 3 -c "[128,128],[64,64],[32,32]"
+
+		# Every progression order over a multi-precinct image. With one
+		# precinct all five agree, which is exactly why this was never caught.
+		for po in LRCP RLCP RPCL PCRL CPRL; do
+			prec_read "order_$po" -n 3 -c "[32,32],[32,32],[32,32]" -p "$po"
+		done
+
+		# Precincts inside tiles, and precincts with several quality layers.
+		prec_read "tiled" -n 3 -c "[32,32],[32,32],[32,32]" -t 64,64
+		prec_read "tiled_odd" -n 3 -c "[32,32],[32,32],[32,32]" -t 13,13
+		prec_read "layers4" -n 3 -c "[32,32],[32,32],[32,32]" -l 4
+
+		# Signal: the comparison must be able to report a difference. The
+		# reference here is the same size as the real one and differs in a
+		# single sample, so what is proved is that values are compared rather
+		# than dimensions.
+		python3 - "$WORK/src32.pgm" "$WORK/src32alt.pgm" <<'PRCEOF'
+import sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+d[-1] ^= 0xFF
+open(sys.argv[2], 'wb').write(bytes(d))
+PRCEOF
+		sig=$(go run ./scripts/decodecmp "$WORK/prcctl.j2k" "$WORK/src32alt.pgm" 2>&1)
+		if [ "$sig" = "0" ]; then
+			fail "precinct signal check: comparing a precinct codestream against a different image reported no difference"
+		else
+			pass "precinct signal check: the comparison reports a difference when the images differ"
+		fi
+	else
+		gap "precinct oracle control failed; the precinct rows would be meaningless"
+	fi
+
 	# SOP and EPH packet markers. A decoder that reads through an SOP segment
 	# takes six bytes of marker as packet header and recovers nothing after it,
 	# so these are worth asserting rather than assuming: with the coding-style

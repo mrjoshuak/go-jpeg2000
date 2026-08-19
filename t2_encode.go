@@ -543,7 +543,11 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 
 	var out []byte
 	order := codestream.ProgressionOrder(e.options.ProgressionOrder)
-	forEachPacket(order, numLayers, numRes, numComp, func(layer, res, c int) bool {
+	// The encoder writes the maximal precinct, so every resolution holds
+	// exactly one packet. Reading an explicit partition is handled; writing one
+	// is not, and this is the line that says so.
+	onePrecinct := func(res, comp int) int { return 1 }
+	forEachPacket(order, numLayers, numRes, numComp, onePrecinct, nil, func(layer, res, c, prec int) bool {
 		bands := bandsFor[key{c, res}]
 		if bands == nil {
 			return true

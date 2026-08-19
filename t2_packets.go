@@ -208,9 +208,13 @@ type bandGeometry struct {
 	// indexed from zero relative to them.
 	firstX, firstY int
 	cbX, cbY       int
-	blocks         []*cbState
-	incl           *tagTree
-	imsb           *tagTree
+	// cbW and cbH are the code-block dimensions actually in force here: B.7
+	// clips the partition to the precinct, so a precinct smaller than the
+	// declared code-block silently makes the blocks smaller.
+	cbW, cbH int
+	blocks   []*cbState
+	incl     *tagTree
+	imsb     *tagTree
 }
 
 // bandGridFor builds the code-block grid of one resolution of one
@@ -225,45 +229,117 @@ type bandGeometry struct {
 //
 // A resolution with no samples has no precinct, so the codestream holds no
 // packet for it at all (B.6); that case returns nil.
-func bandGridFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight int) []*bandGeometry {
-	rw, rh := tileResDims(x0, y0, x1, y1, numRes, res)
-	if rw <= 0 || rh <= 0 {
+// precinctExps returns the precinct exponents (PPx, PPy) in force at one
+// resolution. Scod bit 0 signals an explicit partition; without it the maximal
+// precinct applies (B.6), which is the single-precinct geometry this library
+// used to assume everywhere.
+func precinctExps(cs codestream.CodingStyleDefault, res int) (int, int) {
+	if cs.CodingStyle&codestream.CodingStylePrecincts == 0 || res >= len(cs.PrecinctSizes) {
+		return 15, 15
+	}
+	p := cs.PrecinctSizes[res]
+	return int(p.WidthExp), int(p.HeightExp)
+}
+
+// precinctsFor builds the precinct partition of one resolution of one
+// tile-component, and within each precinct the code-block grid of every band.
+// One packet describes one precinct, so this is the unit the packet headers
+// are read against.
+//
+// Every coordinate is absolute: ISO/IEC 15444-1 B.5 derives the subband
+// coordinates from the tile-component's position in the image, B.6 anchors the
+// precinct partition at zero in the resolution's own coordinates, and B.7
+// anchors the code-block partition at zero as well. A tile away from the image
+// origin differs on all three.
+//
+// Two things about a precinct are easy to get wrong and are both load-bearing
+// here. Its band-space origin comes from the resolution origin halved, not from
+// the band's own origin; and the code-block partition inside it is clipped to
+// the precinct, so a precinct smaller than the declared code-block makes the
+// blocks smaller rather than overflowing the precinct.
+//
+// A resolution with no samples has no precinct, so the codestream holds no
+// packet for it at all (B.6); that case returns nil.
+func precinctsFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight, ppx, ppy int) [][]*bandGeometry {
+	rx0, ry0, rx1, ry1 := tileResCoords(x0, y0, x1, y1, numRes, res)
+	if rx1 <= rx0 || ry1 <= ry0 {
 		return nil
 	}
+
+	// The precinct grid of the resolution, anchored at zero (B-16).
+	prcX0, prcY0 := rx0>>uint(ppx), ry0>>uint(ppy)
+	npx := ceilShift(rx1, ppx) - prcX0
+	npy := ceilShift(ry1, ppy) - prcY0
+	if npx <= 0 || npy <= 0 {
+		return nil
+	}
+
+	// In a band of resolution 0 the precinct keeps its size; above it the band
+	// is half the resolution in each direction, so the precinct is too.
+	bppx, bppy := ppx, ppy
+	if res > 0 {
+		bppx, bppy = ppx-1, ppy-1
+	}
+
+	// B.7 clips the code-block partition to the precinct.
+	ecbW := min(cbWidth, 1<<uint(bppx))
+	ecbH := min(cbHeight, 1<<uint(bppy))
+
 	numBands := 1
 	if res > 0 {
 		numBands = 3
 	}
-	bands := make([]*bandGeometry, 0, numBands)
-	for b := 0; b < numBands; b++ {
-		bt := entropy.BandLL
-		if res > 0 {
-			switch b {
-			case bandHL:
-				bt = entropy.BandHL
-			case bandLH:
-				bt = entropy.BandLH
-			default:
-				bt = entropy.BandHH
+
+	precincts := make([][]*bandGeometry, 0, npx*npy)
+	for py := 0; py < npy; py++ {
+		for px := 0; px < npx; px++ {
+			bands := make([]*bandGeometry, 0, numBands)
+			for b := 0; b < numBands; b++ {
+				bt := entropy.BandLL
+				if res > 0 {
+					switch b {
+					case bandHL:
+						bt = entropy.BandHL
+					case bandLH:
+						bt = entropy.BandLH
+					default:
+						bt = entropy.BandHH
+					}
+				}
+				sb := tileBandGeom(x0, y0, x1, y1, numRes, res, b)
+
+				// The precinct's rectangle in this band's coordinates, clipped
+				// to the band.
+				bx0 := (prcX0 + px) << uint(bppx)
+				by0 := (prcY0 + py) << uint(bppy)
+				px0, px1 := max(sb.x0, bx0), min(sb.x1, bx0+(1<<uint(bppx)))
+				py0, py1 := max(sb.y0, by0), min(sb.y1, by0+(1<<uint(bppy)))
+
+				firstX, nx := codeBlockRange(px0, px1, ecbW)
+				firstY, ny := codeBlockRange(py0, py1, ecbH)
+
+				bg := &bandGeometry{
+					bandType: bt, sb: sb,
+					firstX: firstX, firstY: firstY,
+					cbX: nx, cbY: ny,
+					cbW: ecbW, cbH: ecbH,
+				}
+				bg.blocks = make([]*cbState, nx*ny)
+				for i := range bg.blocks {
+					bg.blocks[i] = &cbState{lblock: 3}
+				}
+				// An empty precinct in this band still takes part in the
+				// packet: it contributes no code-blocks, and its tag trees are
+				// never read, but the band must be present so the bands stay
+				// in order.
+				bg.incl = newTagTree(nx, ny)
+				bg.imsb = newTagTree(nx, ny)
+				bands = append(bands, bg)
 			}
+			precincts = append(precincts, bands)
 		}
-		sb := tileBandGeom(x0, y0, x1, y1, numRes, res, b)
-		firstX, nx := codeBlockRange(sb.x0, sb.x1, cbWidth)
-		firstY, ny := codeBlockRange(sb.y0, sb.y1, cbHeight)
-		bg := &bandGeometry{
-			bandType: bt, sb: sb,
-			firstX: firstX, firstY: firstY,
-			cbX: nx, cbY: ny,
-		}
-		bg.blocks = make([]*cbState, nx*ny)
-		for i := range bg.blocks {
-			bg.blocks[i] = &cbState{lblock: 3}
-		}
-		bg.incl = newTagTree(nx, ny)
-		bg.imsb = newTagTree(nx, ny)
-		bands = append(bands, bg)
 	}
-	return bands
+	return precincts
 }
 
 // forEachPacket visits the (layer, resolution, component) triple of every
@@ -281,34 +357,207 @@ func bandGridFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight int) []*bandGeom
 // The triples are visited rather than returned as a slice because the layer
 // count comes from the file: a corrupt COD declaring 65535 layers would
 // otherwise buy tens of megabytes from a few hundred bytes of input.
-func forEachPacket(order codestream.ProgressionOrder, numLayers, numRes, numComp int, visit func(layer, res, comp int) bool) {
+// posInfo carries what the positional progression orders need and the others
+// ignore: the tile's own coordinates, each component's subsampling, and the
+// precinct exponents of each resolution.
+//
+// PCRL and CPRL place position outside resolution, and precinct index p means a
+// different region of the image at each resolution, so those two cannot be
+// walked by raster index — B.12.1.4 walks image coordinates and asks, at each
+// one, which resolutions have a precinct starting there. Walking them by index
+// decodes every packet against the wrong precinct from the second resolution on.
+type posInfo struct {
+	tx0, ty0, tx1, ty1 int
+	dx, dy             []int // per component subsampling
+	ppx, ppy           []int // per resolution precinct exponents
+	pw                 func(res, comp int) int
+}
+
+// precAt returns the precinct index that covers image coordinate (x, y) at one
+// resolution of one component, and whether a precinct actually starts there.
+func (pi *posInfo) precAt(x, y, res, comp int) (int, bool) {
+	if pi == nil || comp >= len(pi.dx) || res >= len(pi.ppx) {
+		return 0, false
+	}
+	n := len(pi.ppx) - 1 - res
+	dx, dy := pi.dx[comp]<<uint(n), pi.dy[comp]<<uint(n)
+	if dx <= 0 || dy <= 0 {
+		return 0, false
+	}
+	trx0 := ceilDiv(pi.tx0, dx)
+	try0 := ceilDiv(pi.ty0, dy)
+	ppx, ppy := pi.ppx[res], pi.ppy[res]
+
+	// A precinct starts here when the coordinate is on the precinct grid, or
+	// when it is the tile's own first coordinate and the grid does not start
+	// on it.
+	okX := x%(dx<<uint(ppx)) == 0 || (x == pi.tx0 && (trx0<<uint(n))%(dx<<uint(ppx)) != 0)
+	okY := y%(dy<<uint(ppy)) == 0 || (y == pi.ty0 && (try0<<uint(n))%(dy<<uint(ppy)) != 0)
+	if !okX || !okY {
+		return 0, false
+	}
+	w := pi.pw(res, comp)
+	if w <= 0 {
+		return 0, false
+	}
+	i := ceilDiv(x, dx)>>uint(ppx) - trx0>>uint(ppx)
+	j := ceilDiv(y, dy)>>uint(ppy) - try0>>uint(ppy)
+	if i < 0 || j < 0 {
+		return 0, false
+	}
+	return j*w + i, true
+}
+
+// step returns the coordinate increment for the positional walk: the largest
+// stride that cannot skip over any precinct boundary.
+func (pi *posInfo) step(numRes, numComp int) (int, int) {
+	sx, sy := 0, 0
+	for c := 0; c < numComp && c < len(pi.dx); c++ {
+		for r := 0; r < numRes && r < len(pi.ppx); r++ {
+			n := len(pi.ppx) - 1 - r
+			sx = gcdInt(sx, pi.dx[c]<<uint(n+pi.ppx[r]))
+			sy = gcdInt(sy, pi.dy[c]<<uint(n+pi.ppy[r]))
+		}
+	}
+	if sx <= 0 {
+		sx = 1
+	}
+	if sy <= 0 {
+		sy = 1
+	}
+	return sx, sy
+}
+
+func gcdInt(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
+func ceilDiv(a, b int) int {
+	if b <= 0 {
+		return a
+	}
+	return (a + b - 1) / b
+}
+
+func forEachPacket(order codestream.ProgressionOrder, numLayers, numRes, numComp int,
+	numPrec func(res, comp int) int, pos *posInfo, visit func(layer, res, comp, prec int) bool) {
+
+	// visitAll runs the precinct dimension for one (layer, res, comp) triple.
+	// A packet exists per precinct, so this is where a multi-precinct
+	// codestream stops being one packet per resolution.
+	visitAll := func(l, r, c int) bool {
+		for p := 0; p < numPrec(r, c); p++ {
+			if !visit(l, r, c, p) {
+				return false
+			}
+		}
+		return true
+	}
+
 	switch order {
 	case codestream.RLCP:
 		for r := 0; r < numRes; r++ {
 			for l := 0; l < numLayers; l++ {
 				for c := 0; c < numComp; c++ {
-					if !visit(l, r, c) {
+					if !visitAll(l, r, c) {
 						return
 					}
 				}
 			}
 		}
 	case codestream.RPCL:
+		// Position is outside component here, so the precinct index is walked
+		// by this level rather than by visitAll.
 		for r := 0; r < numRes; r++ {
+			maxP := 0
 			for c := 0; c < numComp; c++ {
-				for l := 0; l < numLayers; l++ {
-					if !visit(l, r, c) {
-						return
+				maxP = max(maxP, numPrec(r, c))
+			}
+			for p := 0; p < maxP; p++ {
+				for c := 0; c < numComp; c++ {
+					if p >= numPrec(r, c) {
+						continue
+					}
+					for l := 0; l < numLayers; l++ {
+						if !visit(l, r, c, p) {
+							return
+						}
 					}
 				}
 			}
 		}
-	case codestream.PCRL, codestream.CPRL:
+	case codestream.CPRL:
+		if pos == nil {
+			// No positional information: the caller has one precinct per
+			// resolution, where every order collapses to the same sequence.
+			for c := 0; c < numComp; c++ {
+				for r := 0; r < numRes; r++ {
+					for l := 0; l < numLayers; l++ {
+						for p := 0; p < numPrec(r, c); p++ {
+							if !visit(l, r, c, p) {
+								return
+							}
+						}
+					}
+				}
+			}
+			return
+		}
+		sx, sy := pos.step(numRes, numComp)
 		for c := 0; c < numComp; c++ {
-			for r := 0; r < numRes; r++ {
-				for l := 0; l < numLayers; l++ {
-					if !visit(l, r, c) {
-						return
+			for y := pos.ty0; y < pos.ty1; y += sy - y%sy {
+				for x := pos.tx0; x < pos.tx1; x += sx - x%sx {
+					for r := 0; r < numRes; r++ {
+						pn, ok := pos.precAt(x, y, r, c)
+						if !ok || pn >= numPrec(r, c) {
+							continue
+						}
+						for l := 0; l < numLayers; l++ {
+							if !visit(l, r, c, pn) {
+								return
+							}
+						}
+					}
+				}
+			}
+		}
+	case codestream.PCRL:
+		if pos == nil {
+			// No positional information: the caller has one precinct per
+			// resolution, where every order collapses to the same sequence.
+			for c := 0; c < numComp; c++ {
+				for r := 0; r < numRes; r++ {
+					for l := 0; l < numLayers; l++ {
+						for p := 0; p < numPrec(r, c); p++ {
+							if !visit(l, r, c, p) {
+								return
+							}
+						}
+					}
+				}
+			}
+			return
+		}
+		sx, sy := pos.step(numRes, numComp)
+		for y := pos.ty0; y < pos.ty1; y += sy - y%sy {
+			for x := pos.tx0; x < pos.tx1; x += sx - x%sx {
+				for c := 0; c < numComp; c++ {
+					for r := 0; r < numRes; r++ {
+						pn, ok := pos.precAt(x, y, r, c)
+						if !ok || pn >= numPrec(r, c) {
+							continue
+						}
+						for l := 0; l < numLayers; l++ {
+							if !visit(l, r, c, pn) {
+								return
+							}
+						}
 					}
 				}
 			}
@@ -317,7 +566,7 @@ func forEachPacket(order codestream.ProgressionOrder, numLayers, numRes, numComp
 		for l := 0; l < numLayers; l++ {
 			for r := 0; r < numRes; r++ {
 				for c := 0; c < numComp; c++ {
-					if !visit(l, r, c) {
+					if !visitAll(l, r, c) {
 						return
 					}
 				}
@@ -354,36 +603,62 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 	// them from the tile's size alone reads the packet headers of every tile
 	// but the first against the wrong grid.
 	type resKey struct{ c, r int }
-	grid := map[resKey][]*bandGeometry{}
+	grid := map[resKey][][]*bandGeometry{}
 	for c := 0; c < len(tile.Components); c++ {
 		tc := tile.Components[c]
 		if tc == nil {
 			continue
 		}
 		for r := 0; r < numRes; r++ {
-			bands := bandGridFor(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
-				numRes, r, cbWidth, cbHeight)
-			if bands == nil {
+			ppx, ppy := precinctExps(h.CodingStyle, r)
+			precincts := precinctsFor(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
+				numRes, r, cbWidth, cbHeight, ppx, ppy)
+			if precincts == nil {
 				continue
 			}
-			grid[resKey{c, r}] = bands
+			grid[resKey{c, r}] = precincts
 		}
 	}
 
 	useSOP, useEPH := packetMarkers(h.CodingStyle.CodingStyle)
 	r := newPktReader(tileData, useSOP, useEPH)
 
-	// One precinct per resolution: Scod without a precinct partition uses the
-	// maximal precinct, so every code-block of a band falls in one packet.
-	// Progression order only permutes these packets; with one precinct and the
-	// orders in use the resolution-major walk below matches all of them.
+	// One packet per precinct. Without an explicit partition there is exactly
+	// one precinct per resolution, which is the geometry this walk used to
+	// assume unconditionally — and why a codestream declaring a real partition
+	// was read against the wrong grid from its second packet onward.
 	order := codestream.ProgressionOrder(h.CodingStyle.ProgressionOrder)
+	numPrec := func(res, c int) int { return len(grid[resKey{c, res}]) }
+
+	pos := &posInfo{tx0: tile.X0, ty0: tile.Y0, tx1: tile.X1, ty1: tile.Y1}
+	for c := 0; c < len(tile.Components); c++ {
+		sx, sy := 1, 1
+		if c < len(h.ComponentInfo) {
+			sx, sy = int(h.ComponentInfo[c].SubsamplingX), int(h.ComponentInfo[c].SubsamplingY)
+		}
+		pos.dx, pos.dy = append(pos.dx, max(sx, 1)), append(pos.dy, max(sy, 1))
+	}
+	for r := 0; r < numRes; r++ {
+		px, py := precinctExps(h.CodingStyle, r)
+		pos.ppx, pos.ppy = append(pos.ppx, px), append(pos.ppy, py)
+	}
+	pos.pw = func(res, c int) int {
+		tc := tile.Components[c]
+		if tc == nil {
+			return 0
+		}
+		w, _ := precinctGridDims(tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
+			numRes, res, pos.ppx[res], pos.ppy[res])
+		return w
+	}
+
 	var perr error
-	forEachPacket(order, numLayers, numRes, len(tile.Components), func(layer, res, c int) bool {
-		bands := grid[resKey{c, res}]
-		if bands == nil {
+	forEachPacket(order, numLayers, numRes, len(tile.Components), numPrec, pos, func(layer, res, c, prec int) bool {
+		precincts := grid[resKey{c, res}]
+		if prec >= len(precincts) {
 			return true
 		}
+		bands := precincts[prec]
 		// A quality limit drops the contributions of the later layers, but
 		// their packets still have to be parsed: they carry the inclusion and
 		// length state the packets between them are read against, and their
@@ -408,80 +683,81 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 		tcW := tc.X1 - tc.X0
 		tcH := tc.Y1 - tc.Y0
 		for res := 0; res < numRes; res++ {
-			bands := grid[resKey{c, res}]
-			for b, bg := range bands {
-				sb := bg.sb
-				for cby := 0; cby < bg.cbY; cby++ {
-					by0 := max(sb.y0, (bg.firstY+cby)*cbHeight)
-					by1 := min(sb.y1, (bg.firstY+cby+1)*cbHeight)
-					for cbx := 0; cbx < bg.cbX; cbx++ {
-						cb := bg.blocks[cby*bg.cbX+cbx]
-						if !cb.included || len(cb.data) == 0 {
-							continue
-						}
-						bx0 := max(sb.x0, (bg.firstX+cbx)*cbWidth)
-						bx1 := min(sb.x1, (bg.firstX+cbx+1)*cbWidth)
-						w, hh := bx1-bx0, by1-by0
-						if w <= 0 || hh <= 0 {
-							continue
-						}
-						// Mb is the band's total magnitude bit-planes; the
-						// tag tree above gives how many leading ones are all
-						// zero in this block, so the coded planes are the
-						// difference. The clamp bounds a file-supplied count
-						// against the coefficient word being decoded into.
-						mb := h.BandMb(res, b)
-						numbps := clampBitPlanes(mb-cb.zeroPlanes, wide)
-						if numbps < 1 {
-							continue
-						}
-						var coeffs []int32
-						var coeffs64 []int64
-						switch {
-						case wide && h.IsHTJ2K():
-							// The signalled magnitude budget does not fit a
-							// 32-bit coefficient word; see wide.go.
-							dec := entropy.GetHTDecoder(w, hh)
-							coeffs64 = append([]int64(nil),
-								dec.Decode64(cb.data, numbps, bg.bandType)...)
-							entropy.PutHTDecoder(dec)
-						case h.IsHTJ2K():
-							dec := entropy.GetHTDecoder(w, hh)
-							coeffs = dec.Decode(cb.data, numbps, bg.bandType)
-							entropy.PutHTDecoder(dec)
-						default:
-							// The Part 1 MQ coder carries int32 coefficients
-							// and nothing wider. A codestream that declares a
-							// budget above 32 bits and codes it with MQ is out
-							// of this decoder's reach; widening what MQ
-							// produces at least keeps the data flow consistent
-							// with the wide tile-component, rather than
-							// running the HT decoder over MQ bytes.
-							t1 := entropy.NewT1(w, hh)
-							coeffs = t1.Decode(cb.data, numbps, bg.bandType)
-							if wide {
-								coeffs64 = make([]int64, len(coeffs))
-								for i, v := range coeffs {
-									coeffs64[i] = int64(v)
+			for _, bands := range grid[resKey{c, res}] {
+				for b, bg := range bands {
+					sb := bg.sb
+					for cby := 0; cby < bg.cbY; cby++ {
+						by0 := max(sb.y0, (bg.firstY+cby)*bg.cbH)
+						by1 := min(sb.y1, (bg.firstY+cby+1)*bg.cbH)
+						for cbx := 0; cbx < bg.cbX; cbx++ {
+							cb := bg.blocks[cby*bg.cbX+cbx]
+							if !cb.included || len(cb.data) == 0 {
+								continue
+							}
+							bx0 := max(sb.x0, (bg.firstX+cbx)*bg.cbW)
+							bx1 := min(sb.x1, (bg.firstX+cbx+1)*bg.cbW)
+							w, hh := bx1-bx0, by1-by0
+							if w <= 0 || hh <= 0 {
+								continue
+							}
+							// Mb is the band's total magnitude bit-planes; the
+							// tag tree above gives how many leading ones are all
+							// zero in this block, so the coded planes are the
+							// difference. The clamp bounds a file-supplied count
+							// against the coefficient word being decoded into.
+							mb := h.BandMb(res, b)
+							numbps := clampBitPlanes(mb-cb.zeroPlanes, wide)
+							if numbps < 1 {
+								continue
+							}
+							var coeffs []int32
+							var coeffs64 []int64
+							switch {
+							case wide && h.IsHTJ2K():
+								// The signalled magnitude budget does not fit a
+								// 32-bit coefficient word; see wide.go.
+								dec := entropy.GetHTDecoder(w, hh)
+								coeffs64 = append([]int64(nil),
+									dec.Decode64(cb.data, numbps, bg.bandType)...)
+								entropy.PutHTDecoder(dec)
+							case h.IsHTJ2K():
+								dec := entropy.GetHTDecoder(w, hh)
+								coeffs = dec.Decode(cb.data, numbps, bg.bandType)
+								entropy.PutHTDecoder(dec)
+							default:
+								// The Part 1 MQ coder carries int32 coefficients
+								// and nothing wider. A codestream that declares a
+								// budget above 32 bits and codes it with MQ is out
+								// of this decoder's reach; widening what MQ
+								// produces at least keeps the data flow consistent
+								// with the wide tile-component, rather than
+								// running the HT decoder over MQ bytes.
+								t1 := entropy.NewT1(w, hh)
+								coeffs = t1.Decode(cb.data, numbps, bg.bandType)
+								if wide {
+									coeffs64 = make([]int64, len(coeffs))
+									for i, v := range coeffs {
+										coeffs64[i] = int64(v)
+									}
 								}
 							}
-						}
-						// The offsets are relative to the tile-component
-						// array, which holds the subbands in the Mallat
-						// layout: band origin plus the position of this
-						// code-block within the band.
-						for yy := 0; yy < hh; yy++ {
-							for xx := 0; xx < w; xx++ {
-								dx := sb.ox + bx0 - sb.x0 + xx
-								dy := sb.oy + by0 - sb.y0 + yy
-								if dx < 0 || dy < 0 || dx >= tcW || dy >= tcH {
-									continue
+							// The offsets are relative to the tile-component
+							// array, which holds the subbands in the Mallat
+							// layout: band origin plus the position of this
+							// code-block within the band.
+							for yy := 0; yy < hh; yy++ {
+								for xx := 0; xx < w; xx++ {
+									dx := sb.ox + bx0 - sb.x0 + xx
+									dy := sb.oy + by0 - sb.y0 + yy
+									if dx < 0 || dy < 0 || dx >= tcW || dy >= tcH {
+										continue
+									}
+									if wide {
+										tc.Data64[dy*tcW+dx] = coeffs64[yy*w+xx]
+										continue
+									}
+									tc.Data[dy*tcW+dx] = coeffs[yy*w+xx]
 								}
-								if wide {
-									tc.Data64[dy*tcW+dx] = coeffs64[yy*w+xx]
-									continue
-								}
-								tc.Data[dy*tcW+dx] = coeffs[yy*w+xx]
 							}
 						}
 					}
