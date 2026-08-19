@@ -26,6 +26,14 @@ FAILURES=0
 CHECKS=0
 GAPS=0
 
+# STRICT=1 turns a gap into a failure.
+#
+# A gap is "this could not be measured" — an oracle that is not installed, or a
+# fixture the oracle would not produce. Locally that is information. In CI it is
+# a way for the gate to pass while measuring nothing, so the conformance job
+# sets STRICT=1 and a missing oracle fails the build instead of shrinking it.
+STRICT=${STRICT:-0}
+
 pass() { CHECKS=$((CHECKS + 1)); printf '  ok   - %s\n' "$*"; }
 fail() {
 	CHECKS=$((CHECKS + 1))
@@ -34,6 +42,12 @@ fail() {
 }
 note() { printf '  ..   - %s\n' "$*"; }
 gap() {
+	if [ "$STRICT" = "1" ]; then
+		CHECKS=$((CHECKS + 1))
+		FAILURES=$((FAILURES + 1))
+		printf '  FAIL - (strict) %s\n' "$*"
+		return
+	fi
 	GAPS=$((GAPS + 1))
 	printf '  gap  - %s\n' "$*"
 }

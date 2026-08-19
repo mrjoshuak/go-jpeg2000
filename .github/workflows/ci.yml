@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.23", "1.24"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+      # -race also enables checkptr, which catches invalid unsafe.Pointer
+      # arithmetic. The block coders and the frame buffer accessors do strided
+      # pointer work, so a suite can be green while the package has undefined
+      # behaviour.
+      - name: Run tests with race detector
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.24'
+        run: go test -race ./...
+
+  # The interoperability gate is the thing that actually holds this library to
+  # the standard, and it needs the two reference implementations. They are built
+  # from source because no runner image carries them, which is why this is a
+  # separate job: the matrix above stays fast, and a missing oracle here is a
+  # failure rather than a silent skip.
+  conformance:
+    name: Conformance gate (OpenJPEG + OpenJPH)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install OpenJPEG
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenjp2-tools
+
+      - name: Build OpenJPH
+        run: |
+          sudo apt-get install -y cmake build-essential
+          git clone --depth 1 https://github.com/aous72/OpenJPH.git /tmp/openjph
+          cmake -S /tmp/openjph -B /tmp/openjph/build \
+            -DCMAKE_BUILD_TYPE=Release -DOJPH_ENABLE_TIFF_SUPPORT=OFF
+          cmake --build /tmp/openjph/build -j"$(nproc)"
+          sudo cmake --install /tmp/openjph/build
+          sudo ldconfig
+
+      - name: Report the oracles in use
+        run: |
+          opj_compress -h 2>&1 | head -2 || true
+          ojph_compress 2>&1 | head -2 || true
+
+      # STRICT makes a section that cannot find its oracle a failure instead of
+      # a skip, so this job cannot pass by measuring nothing.
+      - name: Run the conformance gate
+        env:
+          STRICT: "1"
+        run: bash scripts/validate.sh
