@@ -541,19 +541,36 @@ PYEOF
 			# transformed coefficients rather than assuming the nominal value,
 			# signals 32, and OpenJPH reads it back exactly -- which the write
 			# side below asserts.
-			if ! ojph_expand -i "$f" -o "$f.ctl.pfm" >/dev/null 2>&1 ||
-				! go run ./scripts/floatpfm cmp "$WORK/$src.pfm" "$f.ctl.pfm" >/dev/null 2>&1; then
-				gap "read float $src -num_decomps $nd: oracle control failed, measurement would be meaningless"
+			if ! ojph_expand -i "$f" -o "$f.ctl.pfm" >/dev/null 2>&1; then
+				gap "read float $src -num_decomps $nd: the oracle could not read its own codestream"
 				continue
 			fi
 			if ! out=$(go run ./scripts/floatpfm dec "$f" "$f.ours.pfm" 2>&1); then
 				fail "read float $src -num_decomps $nd: $out"
 				continue
 			fi
-			if out=$(go run ./scripts/floatpfm cmp "$WORK/$src.pfm" "$f.ours.pfm"); then
-				pass "read float binary32 $src -num_decomps $nd: we decode OpenJPH's codestream exactly"
+
+			# What is asserted is that we read OpenJPH's codestream the way
+			# OpenJPH reads it. That is the claim worth making, and unlike
+			# "we recover the original samples" it does not require the
+			# oracle's own round trip to be lossless.
+			#
+			# The distinction is not hypothetical. At zero decomposition levels
+			# ojph_compress signals Mb = 31 for a signed 32-bit component,
+			# while the float bit pattern 0xFFFFFFFF becomes -2^31 under the
+			# NLT Type 3 point transform and needs 32. OpenJPH loses exactly
+			# that one sample of 1024 from its own file. Comparing against the
+			# source would blame this library for the oracle's lost sample and
+			# so had to be skipped; comparing against the oracle's own reading
+			# measures the thing that matters and passes.
+			if out=$(go run ./scripts/floatpfm cmp "$f.ctl.pfm" "$f.ours.pfm"); then
+				if go run ./scripts/floatpfm cmp "$WORK/$src.pfm" "$f.ctl.pfm" >/dev/null 2>&1; then
+					pass "read float binary32 $src -num_decomps $nd: we decode OpenJPH's codestream exactly, and it round-trips the source"
+				else
+					pass "read float binary32 $src -num_decomps $nd: we decode OpenJPH's codestream exactly as OpenJPH does (its own round trip is lossy here; see the write check below)"
+				fi
 			else
-				fail "read float binary32 $src -num_decomps $nd: $out"
+				fail "read float binary32 $src -num_decomps $nd: we and OpenJPH disagree about its own codestream: $out"
 			fi
 		done
 	done
