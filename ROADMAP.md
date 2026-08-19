@@ -154,7 +154,7 @@ value. PCRL and CPRL needed the coordinate walk of B.12.1.4 rather than a
 precinct-index walk; the other three are index walks with the precinct
 dimension in the right place.
 
-### ~~Component subsampling~~ — done for reading, gated
+### ~~Component subsampling~~ — done, read and written, gated both ways
 
 `XRsiz`/`YRsiz` above 1 put each component on its own grid, where one sample
 covers `XRsiz` by `YRsiz` samples of the reference grid (A.5.1). This library
@@ -171,9 +171,18 @@ layout convention — a measurement of the convention, not of the codec. The che
 compares against the fixture's own planes instead, and runs a control on the
 fixture's declared geometry first.
 
-Writing subsampled components is not implemented: the encoder emits `XRsiz` and
-`YRsiz` of 1 for every component. That is conformant output, not a defect, and
-it is the remaining half of this item.
+Writing is done too, through `Options.ComponentSubsampling`. Samples are taken
+by decimation rather than averaging, because the format specifies no filter and
+decimation is the one choice a decoder can invert exactly. 4:2:0, 4:2:2, 4:1:1,
+tiled and lossy are gated, and OpenJPEG places every component exactly in all of
+them.
+
+Three things had to become component-aware rather than image-aware: the wavelet
+and the quantiser walk each component's own plane; a tile cuts each component's
+own rectangle and anchors the transform at that component's origin; and the
+multiple component transform is skipped when the first three components do not
+share a grid, which the format requires and which had been read past the end of
+the shorter plane.
 
 ## Later
 

@@ -104,16 +104,30 @@ func (e *encoder) encodeTileAt(tileIdx int) ([]byte, error) {
 	} else {
 		comps = make([][]int32, e.numComponents)
 		for c := 0; c < e.numComponents; c++ {
+			// The tile's corners are on the reference grid; a component
+			// subsampled by XRsiz covers ceil(x/XRsiz) of it (B.3). So the
+			// rectangle cut out of this component's plane, and the origin the
+			// wavelet is anchored at, are the component's own — not the
+			// tile's. With no subsampling the two coincide.
+			dx, dy := 1, 1
+			if c < len(e.compDX) {
+				dx, dy = e.compDX[c], e.compDY[c]
+			}
+			cx0, cy0 := ceilDivInt(x0, dx), ceilDivInt(y0, dy)
+			cx1, cy1 := ceilDivInt(x1, dx), ceilDivInt(y1, dy)
+			cw, ch := cx1-cx0, cy1-cy0
+			pw, _ := e.planeDims(c)
+
 			plane := e.componentData[c]
-			tile := make([]int32, w*h)
-			for row := 0; row < h; row++ {
-				src := (y0+row)*e.width + x0
-				if src+w > len(plane) {
+			tile := make([]int32, cw*ch)
+			for row := 0; row < ch; row++ {
+				src := (cy0+row)*pw + cx0
+				if src < 0 || src+cw > len(plane) {
 					return nil, fmt.Errorf("component %d is short of samples", c)
 				}
-				copy(tile[row*w:(row+1)*w], plane[src:src+w])
+				copy(tile[row*cw:(row+1)*cw], plane[src:src+cw])
 			}
-			e.transformTile(tile, w, h, x0, y0)
+			e.transformTile(tile, cw, ch, cx0, cy0)
 			comps[c] = tile
 		}
 	}

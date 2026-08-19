@@ -103,7 +103,23 @@ func (e *encoder) preprocessWide() error {
 
 // mctApplies reports whether the multiple component transform is used, which
 // generateCOD signals and the decoder inverts.
-func (e *encoder) mctApplies() bool { return e.numComponents >= 3 }
+//
+// It mixes the first three components sample by sample, so they must sit on the
+// same grid. Subsampling them differently makes that impossible and the format
+// forbids the combination; applying it anyway read past the end of the shorter
+// plane.
+func (e *encoder) mctApplies() bool {
+	if e.numComponents < 3 {
+		return false
+	}
+	w0, h0 := e.planeDims(0)
+	for c := 1; c < 3; c++ {
+		if w, h := e.planeDims(c); w != w0 || h != h0 {
+			return false
+		}
+	}
+	return true
+}
 
 // nominalWideBits returns the magnitude bit-planes each subband is expected to
 // occupy, in the QCD marker's subband order.

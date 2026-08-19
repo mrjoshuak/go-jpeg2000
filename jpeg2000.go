@@ -297,6 +297,21 @@ type Options struct {
 	// EnableEPH enables End of Packet Header markers.
 	EnableEPH bool
 
+	// ComponentSubsampling gives each component's XRsiz and YRsiz, the factors
+	// by which its grid is coarser than the image's reference grid. One entry
+	// per component; an empty list, or any entry of {0,0} or {1,1}, leaves that
+	// component at full resolution.
+	//
+	// {{1,1},{2,2},{2,2}} is 4:2:0 and {{1,1},{2,1},{2,1}} is 4:2:2. The
+	// samples of a subsampled component are taken by decimation — every
+	// XRsiz-th column of every YRsiz-th row — rather than by averaging, because
+	// the format specifies no filter and decimation is the one choice a
+	// decoder can invert exactly.
+	//
+	// The multi-component transform requires every component to share a grid,
+	// so it is not applied when the factors differ.
+	ComponentSubsampling []image.Point
+
 	// WritePacketLengths writes the packet length markers: PLT in every
 	// tile-part header and TLM in the main header.
 	//

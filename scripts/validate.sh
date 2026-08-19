@@ -941,6 +941,72 @@ SUBEOF
 		done
 	fi
 
+	# Writing subsampled components, read back by OpenJPEG.
+	#
+	# -upsample is what makes this measurable: it puts every component on the
+	# reference grid, so one raw file carries all of them at a known size and
+	# the expected value at each position is a closed form. Without it the
+	# reference writes only the first component to a PGM, or refuses a raw file
+	# whose components differ in size.
+	#
+	# A subsampled component also rules out the multiple component transform,
+	# which mixes the first three sample by sample and so needs them on one
+	# grid. Applying it anyway read past the end of the shorter plane.
+	sub_write() {
+		name=$1
+		dx=$2
+		dy=$3
+		f="$WORK/subw_$name.j2k"
+		shift 3
+		if ! err=$(go run ./scripts/subsampgen "$f" 64 "$dx" "$dy" "$@" 2>&1); then
+			fail "write subsampling $name: our encoder failed: $(echo "$err" | head -1 | cut -c1-90)"
+			return
+		fi
+		if ! err=$(opj_decompress -i "$f" -o "$f.raw" -upsample 2>&1); then
+			fail "write subsampling $name: OpenJPEG refused our codestream: $(echo "$err" | grep -i error | head -1 | cut -c1-70)"
+			return
+		fi
+		if out=$(python3 - "$f.raw" "$dx" "$dy" <<'SUBWEOF'
+import sys
+d = open(sys.argv[1], 'rb').read()
+dx, dy = int(sys.argv[2]), int(sys.argv[3])
+w = h = 64
+n = w * h
+if len(d) < 4 * n:
+    print("reference wrote %d bytes, expected %d" % (len(d), 4 * n))
+    sys.exit(1)
+
+def sample(c, x, y):
+    if c == 0: return (x * 3 + y) % 256
+    if c == 1: return (x + y * 5) % 256
+    if c == 2: return (x * x + y * y) // 32 % 256
+    return 255
+
+bad = [0, 0, 0, 0]
+for c in range(4):
+    sx, sy = (dx, dy) if c in (1, 2) else (1, 1)
+    for y in range(h):
+        for x in range(w):
+            want = sample(c, (x // sx) * sx, (y // sy) * sy)
+            if d[c * n + y * w + x] != want:
+                bad[c] += 1
+print("per component %s of %d" % (bad, n))
+sys.exit(1 if sum(bad) else 0)
+SUBWEOF
+		); then
+			pass "write subsampling $name: OpenJPEG places every component exactly ($out)"
+		else
+			fail "write subsampling $name: $out"
+		fi
+	}
+
+	sub_write "420" 2 2
+	sub_write "422" 2 1
+	sub_write "420_tiled" 2 2 32
+	sub_write "422_tiled" 2 1 32
+	sub_write "420_lossy" 2 2 0 1
+	sub_write "411" 4 1
+
 	# Packet length markers: PLT in every tile-part header, TLM in the main
 	# header.
 	#

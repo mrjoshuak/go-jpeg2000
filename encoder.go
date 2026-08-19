@@ -36,6 +36,12 @@ type encoder struct {
 	componentPrecision []int
 	componentSigned    []bool
 
+	// Per-component subsampling and the plane dimensions that follow from it.
+	// compW and compH are the size of componentData[c]; for an unsubsampled
+	// component they are the image's own width and height.
+	compDX, compDY []int
+	compW, compH   []int
+
 	// Component data
 	componentData [][]int32
 
@@ -376,6 +382,84 @@ func (e *encoder) extractImageData() error {
 		}
 	}
 
+	return e.applySubsampling()
+}
+
+// applySubsampling reduces each component to its own grid, after the planes
+// have been read at the image's full resolution.
+//
+// Doing it here rather than in each image-type branch keeps one definition of
+// what subsampling means to this encoder: component c keeps every XRsiz-th
+// column of every YRsiz-th row, and its plane becomes
+// ceil(width/XRsiz) by ceil(height/YRsiz) — the size a decoder derives from SIZ
+// (A.5.1). Decimation rather than averaging, because the format specifies no
+// filter and only decimation is a choice a decoder can invert exactly.
+func (e *encoder) applySubsampling() error {
+	e.compDX = make([]int, e.numComponents)
+	e.compDY = make([]int, e.numComponents)
+	e.compW = make([]int, e.numComponents)
+	e.compH = make([]int, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		e.compDX[c], e.compDY[c] = 1, 1
+		e.compW[c], e.compH[c] = e.width, e.height
+	}
+
+	subs := e.options.ComponentSubsampling
+	if len(subs) == 0 {
+		return nil
+	}
+	if len(subs) != e.numComponents {
+		return fmt.Errorf("jpeg2000: ComponentSubsampling has %d entries for %d components",
+			len(subs), e.numComponents)
+	}
+
+	any := false
+	for c, p := range subs {
+		dx, dy := p.X, p.Y
+		if dx <= 0 {
+			dx = 1
+		}
+		if dy <= 0 {
+			dy = 1
+		}
+		if dx > 255 || dy > 255 {
+			return fmt.Errorf("jpeg2000: component %d subsampling %dx%d exceeds the 255 SIZ allows", c, dx, dy)
+		}
+		e.compDX[c], e.compDY[c] = dx, dy
+		if dx != 1 || dy != 1 {
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+
+	for c := 0; c < e.numComponents; c++ {
+		dx, dy := e.compDX[c], e.compDY[c]
+		cw, ch := ceilDivInt(e.width, dx), ceilDivInt(e.height, dy)
+		e.compW[c], e.compH[c] = cw, ch
+		if dx == 1 && dy == 1 {
+			continue
+		}
+		if cw <= 0 || ch <= 0 {
+			return fmt.Errorf("jpeg2000: component %d subsamples to %dx%d", c, cw, ch)
+		}
+		src := e.componentData[c]
+		dst := make([]int32, cw*ch)
+		for y := 0; y < ch; y++ {
+			for x := 0; x < cw; x++ {
+				sx, sy := x*dx, y*dy
+				if sx >= e.width {
+					sx = e.width - 1
+				}
+				if sy >= e.height {
+					sy = e.height - 1
+				}
+				dst[y*cw+x] = src[sy*e.width+sx]
+			}
+		}
+		e.componentData[c] = dst
+	}
 	return nil
 }
 
@@ -534,8 +618,13 @@ func (e *encoder) preprocess() error {
 		return e.preprocessWide()
 	}
 
-	// Apply MCT if we have 3+ components
-	if e.numComponents >= 3 {
+	// Apply MCT if we have 3+ components.
+	//
+	// The transform mixes the first three components sample by sample, so they
+	// must share a grid. Subsampling them differently makes that impossible,
+	// and the format forbids the combination; applying it anyway read past the
+	// end of the shorter plane.
+	if e.numComponents >= 3 && e.mctApplies() {
 		if e.options.Lossless {
 			if e.maxPrecision() > 16 {
 				mct.ForwardRCT32(e.componentData[0], e.componentData[1], e.componentData[2])
@@ -585,14 +674,26 @@ func (e *encoder) preprocess() error {
 	}
 
 	for c := 0; c < e.numComponents; c++ {
+		// The transform runs on the component's own plane, which a subsampled
+		// component makes smaller than the image.
+		w, h := e.planeDims(c)
 		if e.maxPrecision() > 16 {
-			dwt.DecomposeMultiLevel53_32bit(e.componentData[c], e.width, e.height, numLevels)
+			dwt.DecomposeMultiLevel53_32bit(e.componentData[c], w, h, numLevels)
 		} else {
-			dwt.DecomposeMultiLevel53(e.componentData[c], e.width, e.height, numLevels)
+			dwt.DecomposeMultiLevel53(e.componentData[c], w, h, numLevels)
 		}
 	}
 
 	return nil
+}
+
+// planeDims returns the dimensions of one component's sample plane, which is
+// the image's own size unless the component is subsampled.
+func (e *encoder) planeDims(c int) (int, int) {
+	if c < len(e.compW) && e.compW[c] > 0 && e.compH[c] > 0 {
+		return e.compW[c], e.compH[c]
+	}
+	return e.width, e.height
 }
 
 // maxQuantIndexBits caps the magnitude of a quantization index. The HT block
@@ -632,28 +733,37 @@ func (e *encoder) transformIrreversible(numLevels int) {
 		for i, v := range e.componentData[c] {
 			coefs[c][i] = float64(v)
 		}
-		dwt.DecomposeMultiLevel97(coefs[c], e.width, e.height, numLevels)
+		cw, chh := e.planeDims(c)
+		dwt.DecomposeMultiLevel97(coefs[c], cw, chh, numLevels)
 	}
 
 	// Largest coefficient magnitude in each subband, over every component.
+	//
+	// The subband walk is per component, because a subsampled component has a
+	// smaller plane and therefore smaller subbands at the same indices. One
+	// walk over the image's own dimensions read past the end of every plane
+	// that was not full resolution.
 	numBands := 3*numLevels + 1
 	bandMax := make([]float64, numBands)
-	codestream.ForEachSubband(e.width, e.height, numRes, func(sb codestream.SubbandRect) {
-		m := 0.0
-		for _, data := range coefs {
+	for c := 0; c < e.numComponents; c++ {
+		cw, chh := e.planeDims(c)
+		data := coefs[c]
+		codestream.ForEachSubband(cw, chh, numRes, func(sb codestream.SubbandRect) {
+			if sb.Index >= len(bandMax) {
+				return
+			}
+			m := bandMax[sb.Index]
 			for y := 0; y < sb.H; y++ {
-				row := (sb.Y0 + y) * e.width
+				row := (sb.Y0 + y) * cw
 				for x := 0; x < sb.W; x++ {
 					if v := math.Abs(data[row+sb.X0+x]); v > m {
 						m = v
 					}
 				}
 			}
-		}
-		if sb.Index < len(bandMax) {
 			bandMax[sb.Index] = m
-		}
-	})
+		})
+	}
 
 	steps := packStepSizes(idealStepSizes(numRes, e.options.Quality, prec), numRes, prec)
 
@@ -680,22 +790,24 @@ func (e *encoder) transformIrreversible(numLevels int) {
 	e.qcdGuardBits = guard
 	e.qcdSteps = steps
 
-	// Quantize in place, one step size per subband.
-	codestream.ForEachSubband(e.width, e.height, numRes, func(sb codestream.SubbandRect) {
-		if sb.Index >= len(steps) {
-			return
-		}
-		delta := steps[sb.Index].Delta(prec + codestream.BandGainLog2(sb.Res, sb.Detail))
-		for c := 0; c < e.numComponents; c++ {
+	// Quantize in place, one step size per subband, walking each component's
+	// own plane for the same reason as above.
+	for c := 0; c < e.numComponents; c++ {
+		cw, chh := e.planeDims(c)
+		codestream.ForEachSubband(cw, chh, numRes, func(sb codestream.SubbandRect) {
+			if sb.Index >= len(steps) {
+				return
+			}
+			delta := steps[sb.Index].Delta(prec + codestream.BandGainLog2(sb.Res, sb.Detail))
 			for y := 0; y < sb.H; y++ {
-				row := (sb.Y0 + y) * e.width
+				row := (sb.Y0 + y) * cw
 				for x := 0; x < sb.W; x++ {
 					i := row + sb.X0 + x
 					e.componentData[c][i] = quantizeIndex(coefs[c][i], delta)
 				}
 			}
-		}
-	})
+		})
+	}
 }
 
 // guardBitsFor returns the guard-bit count Mb = G + ε_b − 1 needs so that it
@@ -884,8 +996,12 @@ func (e *encoder) generateSIZ() []byte {
 		}
 		buf[offset] = ssiz
 		// XRsiz, YRsiz: subsampling
-		buf[offset+1] = 1
-		buf[offset+2] = 1
+		dx, dy := 1, 1
+		if c < len(e.compDX) {
+			dx, dy = e.compDX[c], e.compDY[c]
+		}
+		buf[offset+1] = uint8(dx)
+		buf[offset+2] = uint8(dy)
 	}
 
 	return buf
@@ -949,7 +1065,7 @@ func (e *encoder) generateCOD() []byte {
 	// produces a stream a conforming decoder rejects: OpenJPH reports the
 	// second and third components as (0,0)-(0,0) and refuses the tile. This
 	// was previously set unconditionally, contradicting its own comment.
-	if e.numComponents >= 3 {
+	if e.numComponents >= 3 && e.mctApplies() {
 		buf[8] = 1
 	}
 
@@ -1300,7 +1416,6 @@ func (e *encoder) collectJobs(comps [][]int32, comps64 [][]int64, x0, y0, x1, y1
 	cbWidthExp, cbHeightExp := e.codeBlockExponents()
 	cbWidth := 1 << cbWidthExp
 	cbHeight := 1 << cbHeightExp
-	stride := x1 - x0
 
 	layout := newTileLayout(numComps, numRes)
 	layout.x0, layout.y0, layout.x1, layout.y1 = x0, y0, x1, y1
@@ -1312,9 +1427,23 @@ func (e *encoder) collectJobs(comps [][]int32, comps64 [][]int64, x0, y0, x1, y1
 	// the code-block partition drifted before, and the drift is invisible to a
 	// round trip because both ends move together.
 	for c := 0; c < numComps; c++ {
+		// Each component has its own grid. The tile's coordinates are on the
+		// reference grid, and a component subsampled by XRsiz covers
+		// ceil(x/XRsiz) of it (B.3), so every subband, precinct and code-block
+		// below is derived from the component's own corners rather than from
+		// the tile's. With no subsampling the two are the same and this is the
+		// geometry the encoder always used.
+		dx, dy := 1, 1
+		if c < len(e.compDX) {
+			dx, dy = e.compDX[c], e.compDY[c]
+		}
+		cx0, cy0 := ceilDivInt(x0, dx), ceilDivInt(y0, dy)
+		cx1, cy1 := ceilDivInt(x1, dx), ceilDivInt(y1, dy)
+		stride := cx1 - cx0
+
 		for res := 0; res < numRes; res++ {
 			ppx, ppy, _ := e.precinctExpsFor(res)
-			precincts := precinctsFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight, ppx, ppy)
+			precincts := precinctsFor(cx0, cy0, cx1, cy1, numRes, res, cbWidth, cbHeight, ppx, ppy)
 			if precincts == nil {
 				continue
 			}
