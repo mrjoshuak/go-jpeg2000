@@ -1149,138 +1149,19 @@ func (e *HTEncoder) Encode(bandType int) []byte {
 	return encodeCleanupHT(e.data, e.width, e.height, 0)
 }
 
-// EncodeWithRefinement encodes the code block with cleanup, SPP, and MRP passes.
-// Returns the combined data and the cleanup segment length (lcup).
-// The SPP/MRP data is appended after the cleanup data.
-func (e *HTEncoder) EncodeWithRefinement(bandType int) ([]byte, int) {
-	cleanup := e.Encode(bandType)
-	if cleanup == nil {
-		return nil, 0
-	}
-	lcup := len(cleanup)
-
-	width := e.width
-	height := e.height
-
-	// Build significance map from encoded data (same as what cleanup produces)
-	sig := make([]bool, width*height)
-	for i, v := range e.data {
-		sig[i] = (v != 0)
-	}
-
-	// Encode SPP data (forward bitstream)
-	var sppBits []byte
-	var sppBuf uint64
-	sppBitCount := 0
-
-	sppFlush := func(val, n uint32) {
-		sppBuf |= uint64(val) << sppBitCount
-		sppBitCount += int(n)
-		for sppBitCount >= 8 {
-			b := byte(sppBuf & 0xFF)
-			sppBits = append(sppBits, b)
-			sppBuf >>= 8
-			sppBitCount -= 8
-		}
-	}
-
-	// SPP pass: for insignificant samples with significant neighbors
-	newSig := make([]bool, width*height)
-	copy(newSig, sig)
-
-	hasNeighbor := func(x, y int) bool {
-		for dy := -1; dy <= 1; dy++ {
-			for dx := -1; dx <= 1; dx++ {
-				if dx == 0 && dy == 0 {
-					continue
-				}
-				nx, ny := x+dx, y+dy
-				if nx < 0 || nx >= width || ny < 0 || ny >= height {
-					continue
-				}
-				if sig[ny*width+nx] {
-					return true
-				}
-			}
-		}
-		return false
-	}
-
-	// For SPP, we encode refinement bits for samples that are NOT significant
-	// in the cleanup pass but have significant neighbors.
-	// In a real encoder, these would add precision. For testing, we encode
-	// the actual next bit of the coefficient.
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			idx := y*width + x
-			if sig[idx] || !hasNeighbor(x, y) {
-				continue
-			}
-			// This sample was insignificant in cleanup but has a neighbor.
-			// For simplicity in testing, always signal as insignificant (0).
-			// A real encoder would check if the original coefficient warrants it.
-			sppFlush(0, 1) // Not significant in SPP
-		}
-	}
-
-	// Flush remaining SPP bits
-	if sppBitCount > 0 {
-		sppBits = append(sppBits, byte(sppBuf&0xFF))
-	}
-
-	// Encode MRP data (reverse bitstream)
-	var mrpBits []byte
-	var mrpBuf uint64
-	mrpBitCount := 0
-
-	mrpFlush := func(val, n uint32) {
-		mrpBuf |= uint64(val) << mrpBitCount
-		mrpBitCount += int(n)
-		for mrpBitCount >= 8 {
-			b := byte(mrpBuf & 0xFF)
-			mrpBits = append(mrpBits, b)
-			mrpBuf >>= 8
-			mrpBitCount -= 8
-		}
-	}
-
-	// MRP pass: for each significant sample, write one refinement bit
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			idx := y*width + x
-			if !newSig[idx] {
-				continue
-			}
-			// Write the next magnitude bit (bit 0 of the absolute value)
-			v := e.data[idx]
-			if v < 0 {
-				v = -v
-			}
-			mrpFlush(uint32(v&1), 1)
-		}
-	}
-
-	// Flush remaining MRP bits
-	if mrpBitCount > 0 {
-		mrpBits = append(mrpBits, byte(mrpBuf&0xFF))
-	}
-
-	// Combine: SPP bytes followed by MRP bytes (MRP stored in reverse)
-	len2 := len(sppBits) + len(mrpBits)
-	if len2 == 0 {
-		return cleanup, lcup
-	}
-
-	combined := make([]byte, lcup+len2)
-	copy(combined[:lcup], cleanup)
-	copy(combined[lcup:lcup+len(sppBits)], sppBits)
-	// MRP bytes are stored in reverse order (backward bitstream)
-	for i, b := range mrpBits {
-		combined[lcup+len(sppBits)+len(mrpBits)-1-i] = b
-	}
-
-	return combined, lcup
-}
+// The SPP and MRP refinement passes are not written by this package.
+//
+// An implementation of them lived here and was never reachable from the live
+// encoder. It round-tripped through this package's own decoder, which is what
+// kept it looking correct, and OpenJPH refused its output outright: "ojph error
+// 0x000300A1 ... Error decoding a codeblock". Both halves shared one deviation
+// from the standard, which is the exact shape of defect this repository has
+// spent its releases removing, so the encoder was deleted rather than left in
+// place looking usable. ROADMAP.md records what closing this would take.
+//
+// A single cleanup pass is a conforming HT code-block, so what this package
+// writes is legal; what it gives up is truncating a code-block partway, which
+// quality layers already provide at packet granularity in both directions.
 
 // htDecoderPool provides pooled HT decoders to reduce allocations.
 var htDecoderPool = sync.Pool{

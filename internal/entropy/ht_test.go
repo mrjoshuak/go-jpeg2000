@@ -175,34 +175,6 @@ func TestHTDecodeSegments(t *testing.T) {
 	}
 }
 
-// TestHTEncodeWithRefinement tests encoding with SPP/MRP refinement passes.
-func TestHTEncodeWithRefinement(t *testing.T) {
-	width, height := 32, 32
-	data := make([]int32, width*height)
-	for i := range data {
-		data[i] = int32((i % 256) - 128)
-	}
-
-	enc := NewHTEncoder(width, height)
-	enc.SetData(data)
-	combined, lcup := enc.EncodeWithRefinement(BandLL)
-	if combined == nil {
-		t.Fatal("EncodeWithRefinement returned nil")
-	}
-
-	if lcup <= 0 || lcup > len(combined) {
-		t.Fatalf("Invalid lcup: %d (total: %d)", lcup, len(combined))
-	}
-
-	// Decode with segments
-	dec := NewHTDecoder(width, height)
-	decoded := dec.DecodeSegments(combined, lcup, 16, BandLL)
-
-	if len(decoded) != len(data) {
-		t.Fatalf("Decoded length mismatch: got %d, want %d", len(decoded), len(data))
-	}
-}
-
 // TestHTSPPMRPEmptyRefinement tests SPP/MRP with no refinement data.
 func TestHTSPPMRPEmptyRefinement(t *testing.T) {
 	width, height := 8, 8
@@ -221,27 +193,6 @@ func TestHTSPPMRPEmptyRefinement(t *testing.T) {
 	// Decode with no SPP/MRP (lcup == total length)
 	dec := NewHTDecoder(width, height)
 	decoded := dec.DecodeSegments(encoded, len(encoded), 16, BandLL)
-	if decoded == nil {
-		t.Fatal("DecodeSegments returned nil")
-	}
-}
-
-// TestHTSPPMRPSingleCoefficient tests SPP/MRP on a minimal code block.
-func TestHTSPPMRPSingleCoefficient(t *testing.T) {
-	// 4x4 block with a single non-zero coefficient
-	width, height := 4, 4
-	data := make([]int32, width*height)
-	data[0] = 5
-
-	enc := NewHTEncoder(width, height)
-	enc.SetData(data)
-	combined, lcup := enc.EncodeWithRefinement(BandLL)
-	if combined == nil {
-		t.Fatal("EncodeWithRefinement returned nil")
-	}
-
-	dec := NewHTDecoder(width, height)
-	decoded := dec.DecodeSegments(combined, lcup, 16, BandLL)
 	if decoded == nil {
 		t.Fatal("DecodeSegments returned nil")
 	}

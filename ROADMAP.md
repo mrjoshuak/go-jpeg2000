@@ -115,18 +115,6 @@ ignores `TLM` gets the right pixels; the only sign was a line on stderr from
 `opj_dump` — "TLM marker not of expected size". The gate now fails on any
 diagnostic from the reference's header parse, not merely on wrong pixels.
 
-### HT refinement passes (SPP/MRP)
-
-The encoder emits the cleanup pass only. That is conformant — a single pass is a
-legal HT code-block — but it leaves no room for quality-layer truncation within
-a block. `EncodeWithRefinement` exists and nothing on the live path calls it.
-
-Depends on quality layers being real. Done when OpenJPH decodes multi-pass HT
-blocks from us exactly, we decode theirs, and a decoder given a truncated prefix
-of one of our codestreams produces a complete image at reduced quality rather
-than a partial one.
-
-
 ## Next
 
 ### ~~Multiple quality layers~~ — done, both directions, gated
@@ -199,6 +187,35 @@ the shorter plane.
 
 ## Later
 
+
+### HT refinement passes (SPP/MRP) — blocked on an oracle, and measured
+
+The encoder emits the cleanup pass only. That is conformant: a single pass is a
+legal HT code-block, and every codestream this package writes is one another
+implementation reads. What it gives up is truncating a code-block partway, and
+quality layers already provide truncation at packet granularity, in both
+directions.
+
+This sits here rather than in Now because one clause of its completion bar
+cannot be evaluated with any tool available. `ojph_compress` has no layers
+option and writes `numlayers=1` cleanup-only blocks, and OpenJPEG does not
+encode HT at all, so nothing can produce a multi-pass HT code-block for this
+library to read. "We decode theirs" has no *theirs*.
+
+The write half is testable, through OpenJPH's decoder, and was tested. An
+implementation of SPP/MRP encoding lived in `internal/entropy` and was never
+reachable from the live encoder. It round-tripped through this package's own
+decoder, which is what kept it looking correct; wiring it up and handing the
+result to OpenJPH produced `ojph error 0x000300A1 ... Error decoding a
+codeblock`. Both halves shared one deviation from the standard — the same shape
+of defect as the wavelet pass order and the 20-byte deep chunk header — so the
+encoder was deleted rather than left in place looking usable.
+
+Closing this means writing SPP and MRP from ISO/IEC 15444-15 rather than
+adapting what was there, and it can be held to: OpenJPH's decoder must read the
+result exactly, and a decoder given a truncated prefix must produce a complete
+image at reduced quality. The read direction stays unverifiable until an encoder
+exists that emits multi-pass HT blocks.
 
 ### Error resilience markers
 
