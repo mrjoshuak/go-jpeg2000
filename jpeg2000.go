@@ -22,6 +22,7 @@
 package jpeg2000
 
 import (
+	"errors"
 	"image"
 	"io"
 )
@@ -200,6 +201,13 @@ const (
 // Config holds the decoding configuration.
 type Config struct {
 	// DecodeArea specifies a region to decode (nil for full image).
+	//
+	// Not implemented: setting it returns an error rather than decoding the
+	// whole image and saying nothing. Region decode needs the code-block
+	// partition walked against the requested rectangle so the packets outside
+	// it are never read, which is what makes it worth having; decoding
+	// everything and cropping would satisfy the signature and none of the
+	// point. See ROADMAP.md.
 	DecodeArea *image.Rectangle
 
 	// ReduceResolution specifies the number of resolution levels to skip.
@@ -388,8 +396,29 @@ func Decode(r io.Reader) (image.Image, error) {
 
 // DecodeConfig decodes a JPEG 2000 image with the specified configuration.
 func DecodeConfig(r io.Reader, cfg *Config) (image.Image, error) {
+	if err := checkConfig(cfg); err != nil {
+		return nil, err
+	}
 	d := newDecoder(r)
 	return d.decode(cfg)
+}
+
+// checkConfig rejects a configuration this decoder cannot honour.
+//
+// A decoder that silently ignores an option is worse than one that lacks it: a
+// caller asking for a 256-row region and receiving the whole image has no
+// indication the request was dropped, and will read the wrong pixels from the
+// buffer it sized for the answer it asked for.
+func checkConfig(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.DecodeArea != nil {
+		return errors.New("jpeg2000: Config.DecodeArea is not implemented; " +
+			"decoding a region requires walking the code-block partition against it, " +
+			"and this decoder would otherwise return the whole image")
+	}
+	return nil
 }
 
 // Encode writes the image m to w in JPEG 2000 format with the given options.
@@ -450,6 +479,9 @@ func DecodeHalf(r io.Reader) (*HalfImage, error) {
 // DecodeHalfConfig decodes a half-float JPEG 2000 image with the specified
 // configuration.
 func DecodeHalfConfig(r io.Reader, cfg *Config) (*HalfImage, error) {
+	if err := checkConfig(cfg); err != nil {
+		return nil, err
+	}
 	d := newDecoder(r)
 	return d.decodeHalf(cfg)
 }
@@ -463,6 +495,9 @@ func DecodeFloat(r io.Reader) (*FloatImage, error) {
 // DecodeFloatConfig decodes a JPEG 2000 image with the specified configuration,
 // returning a FloatImage that preserves float precision.
 func DecodeFloatConfig(r io.Reader, cfg *Config) (*FloatImage, error) {
+	if err := checkConfig(cfg); err != nil {
+		return nil, err
+	}
 	d := newDecoder(r)
 	return d.decodeFloat(cfg)
 }

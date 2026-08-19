@@ -897,6 +897,25 @@ GOEOF
 	done
 	p1_write "layers4_tiled" 64 3 16 1 8 4
 
+	# Decoder configuration options that are declared but cannot be honoured.
+	#
+	# A decoder that silently ignores an option is worse than one that lacks
+	# it: a caller sizing a buffer for a 32x16 region and receiving the whole
+	# 64x32 image gets no indication the request was dropped. Config.DecodeArea
+	# was documented as "specifies a region to decode" and read by nothing, and
+	# ReduceResolution returned wavelet-domain values as floats for any
+	# codestream carrying an NLT point transform — dimensions correct, samples
+	# off by 175 on a ramp spanning 0 to 2.
+	#
+	# Both now refuse. What is checked here is the refusal *and* the cases that
+	# must keep working, since a guard that rejects everything would satisfy
+	# half of this.
+	if out=$(go test ./ -run 'TestReduceResolution|TestDecodeArea' 2>&1); then
+		pass "decoder options: unhonourable requests are refused, and reduced-resolution integer decode still matches the full decode"
+	else
+		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test' | head -1 | cut -c1-110)"
+	fi
+
 	# Component subsampling (XRsiz, YRsiz above 1).
 	#
 	# The components of a subsampled image sit on different grids, and one

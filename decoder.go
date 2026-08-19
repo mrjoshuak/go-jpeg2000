@@ -1097,6 +1097,22 @@ func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
 		return nil, fmt.Errorf("parsing codestream: %w", err)
 	}
 
+	// The same refusal the half path carries, and for the same reason, but
+	// only where it applies.
+	//
+	// A reduced-resolution decode stops the inverse wavelet at an LL subband.
+	// For ordinary integer samples those are still samples, and the result is
+	// correct to within a count or two. For a codestream carrying an NLT point
+	// transform they are wavelet coefficients in the sign-magnitude domain
+	// that NLT maps back from, and reinterpreting them as floats gives
+	// arbitrary values: measured on a smooth 0..2 ramp, samples came back off
+	// by 175 while the dimensions were right, which is what made it look like
+	// it worked.
+	if cfg != nil && cfg.ReduceResolution > 0 && d.headerHasNLT() {
+		return nil, fmt.Errorf("jpeg2000: ReduceResolution is not supported for a codestream with an NLT point transform: " +
+			"reduced-resolution output is wavelet-domain data, not float samples")
+	}
+
 	return d.decodeTilesFloat(cfg)
 }
 
@@ -1196,4 +1212,19 @@ func (d *decoder) createFloatImage(
 		BitDepth:   precision,
 		Signed:     signed,
 	}, nil
+}
+
+// headerHasNLT reports whether any component carries a non-linear point
+// transform, which is what makes a partial synthesis meaningless: the surviving
+// values are what NLT maps back from rather than samples.
+func (d *decoder) headerHasNLT() bool {
+	if d.header == nil {
+		return false
+	}
+	for c := 0; c < int(d.header.NumComponents); c++ {
+		if d.header.HasNLT(c) {
+			return true
+		}
+	}
+	return false
 }

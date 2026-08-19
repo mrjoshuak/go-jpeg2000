@@ -217,6 +217,31 @@ result exactly, and a decoder given a truncated prefix must produce a complete
 image at reduced quality. The read direction stays unverifiable until an encoder
 exists that emits multi-pass HT blocks.
 
+### Region decode, and reduced resolution for NLT codestreams
+
+`Config.DecodeArea` was declared, documented as "specifies a region to decode",
+and read by nothing: a caller asking for a 32x16 region received the whole 64x32
+image and no indication the request was dropped. `Config.ReduceResolution` had a
+narrower version of the same problem — correct for ordinary integer samples, to
+within a count or two, and returning wavelet-domain values as floats for any
+codestream carrying an NLT point transform, with the dimensions right and the
+samples off by 175 on a ramp spanning 0 to 2.
+
+Both now refuse rather than mislead, and the refusals are gated along with the
+integer case that must keep working.
+
+Implementing them is the remaining work, and region decode is the one that
+matters: it is what turns a viewport into a small read. Decoding everything and
+cropping would satisfy the signature and none of the point — the packets outside
+the region must never be read, which needs the code-block partition walked
+against the requested rectangle. Precincts and `PLT` are both in place now, so
+the addressing exists; what is missing is the decoder using it.
+
+Done when a region decode reads a demonstrable subset of the codestream rather
+than all of it, its samples match the same region of a full decode exactly, and
+a reduced-resolution decode of an NLT codestream either produces samples that
+match a downsampled full decode or continues to refuse.
+
 ### Error resilience markers
 
 SOP and EPH are skipped on read and never written. They cost little and make a
