@@ -27,6 +27,22 @@ type Packet struct {
 type packetEntry struct {
 	addr PacketAddress
 	data []byte
+	// offset is where this packet begins in the whole codestream, which is
+	// what a ranged read over the network needs; data alone only says how long
+	// it is and requires the codestream in hand to locate.
+	offset int
+	// The image-space rectangle this packet covers. With an explicit precinct
+	// partition each packet holds one region rather than the whole image, so
+	// this is what makes a viewport resolvable to byte ranges.
+	x0, y0, x1, y1 int
+}
+
+// PacketRange locates one packet's bytes inside the codestream it came from.
+// Offset is from the start of the codestream, so a pair of these is directly a
+// HTTP Range header.
+type PacketRange struct {
+	Offset int
+	Length int
 }
 
 // PacketIndex maps packet addresses to their self-contained data.
@@ -298,40 +314,6 @@ func (idx *PacketIndex) indexTilePackets(
 	// own bytes.
 	order := codestream.ProgressionOrder(header.CodingStyle.ProgressionOrder)
 
-	addPacket := func(l, r, c, p int) {
-		addr := PacketAddress{
-			Tile:       tileIndex,
-			Resolution: uint8(r),
-			Layer:      uint16(l),
-			Component:  uint8(c),
-			Precinct:   uint16(p),
-		}
-		var data []byte
-		precincts := grids[crKey{c, r}]
-		var bands []*bandGeometry
-		if p < len(precincts) {
-			bands = precincts[p]
-		}
-		if bands != nil && !reader.overrun && reader.pos < len(tileData) {
-			from := reader.pos
-			if err := readPacket(reader, bands, l, true); err == nil && !reader.overrun {
-				data = tileData[from:reader.pos]
-			} else {
-				// A packet that does not parse ends the walk: the position of
-				// every packet after it is unknown.
-				reader.overrun = true
-			}
-		}
-		entryIdx := len(idx.entries)
-		idx.entries = append(idx.entries, packetEntry{addr: addr, data: data})
-		idx.addrMap[addr] = entryIdx
-	}
-
-	// Precinct is a real coordinate now: with an explicit partition a
-	// resolution holds many packets, each covering one region of the image,
-	// which is what makes a byte range spatially addressable.
-	numPrec := func(r, c int) int { return len(grids[crKey{c, r}]) }
-
 	pos := &posInfo{tx0: tx0, ty0: ty0, tx1: tx1, ty1: ty1}
 	for c := 0; c < numComp; c++ {
 		sx, sy := 1, 1
@@ -353,6 +335,47 @@ func (idx *PacketIndex) indexTilePackets(
 		return w
 	}
 
+	addPacket := func(l, r, c, p int) {
+		addr := PacketAddress{
+			Tile:       tileIndex,
+			Resolution: uint8(r),
+			Layer:      uint16(l),
+			Component:  uint8(c),
+			Precinct:   uint16(p),
+		}
+		var data []byte
+		var off int
+		precincts := grids[crKey{c, r}]
+		var bands []*bandGeometry
+		if p < len(precincts) {
+			bands = precincts[p]
+		}
+		if bands != nil && !reader.overrun && reader.pos < len(tileData) {
+			from := reader.pos
+			if err := readPacket(reader, bands, l, true); err == nil && !reader.overrun {
+				data = tileData[from:reader.pos]
+				off = dataStart + from
+			} else {
+				// A packet that does not parse ends the walk: the position of
+				// every packet after it is unknown.
+				reader.overrun = true
+			}
+		}
+		px0, py0, px1, py1 := packetImageRect(header, tx0, ty0, tx1, ty1, numRes, r, c, p,
+			pos.ppx[r], pos.ppy[r], pos.pw(r, c))
+		entryIdx := len(idx.entries)
+		idx.entries = append(idx.entries, packetEntry{
+			addr: addr, data: data, offset: off,
+			x0: px0, y0: py0, x1: px1, y1: py1,
+		})
+		idx.addrMap[addr] = entryIdx
+	}
+
+	// Precinct is a real coordinate now: with an explicit partition a
+	// resolution holds many packets, each covering one region of the image,
+	// which is what makes a byte range spatially addressable.
+	numPrec := func(r, c int) int { return len(grids[crKey{c, r}]) }
+
 	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(l, r, c, p int) bool {
 		addPacket(l, r, c, p)
 		return true
@@ -366,4 +389,83 @@ func ceilDivInt(a, b int) int {
 		return 0
 	}
 	return (a + b - 1) / b
+}
+
+// packetImageRect returns the image-space rectangle one packet covers: the
+// precinct's rectangle at its own resolution, scaled back up to full
+// resolution and to the component's grid.
+//
+// A precinct at resolution r covers 2^(numRes-1-r) times its own extent in
+// image coordinates, so the same precinct index names a larger region at a
+// lower resolution. That is the property a viewport query depends on, and the
+// reason a region cannot be resolved by precinct index alone.
+func packetImageRect(header *codestream.Header, tx0, ty0, tx1, ty1, numRes, res, comp, prec, ppx, ppy, pw int) (int, int, int, int) {
+	if pw <= 0 {
+		return 0, 0, 0, 0
+	}
+	ci := header.ComponentInfo[comp]
+	sx, sy := max(int(ci.SubsamplingX), 1), max(int(ci.SubsamplingY), 1)
+	cx0, cy0 := ceilDivInt(tx0, sx), ceilDivInt(ty0, sy)
+	cx1, cy1 := ceilDivInt(tx1, sx), ceilDivInt(ty1, sy)
+
+	rx0, ry0, rx1, ry1 := tileResCoords(cx0, cy0, cx1, cy1, numRes, res)
+	if rx1 <= rx0 || ry1 <= ry0 {
+		return 0, 0, 0, 0
+	}
+	pi, pj := prec%pw, prec/pw
+
+	bx0 := ((rx0 >> uint(ppx)) + pi) << uint(ppx)
+	by0 := ((ry0 >> uint(ppy)) + pj) << uint(ppy)
+	ax0, ay0 := max(rx0, bx0), max(ry0, by0)
+	ax1, ay1 := min(rx1, bx0+(1<<uint(ppx))), min(ry1, by0+(1<<uint(ppy)))
+	if ax1 <= ax0 || ay1 <= ay0 {
+		return 0, 0, 0, 0
+	}
+
+	// Back to full resolution, then onto the image grid. Parenthesised because
+	// << and * share a precedence level in Go and the grouping is the whole
+	// meaning of the expression.
+	n := uint(numRes - 1 - res)
+	return (ax0 << n) * sx, (ay0 << n) * sy, (ax1 << n) * sx, (ay1 << n) * sy
+}
+
+// Range returns where one packet sits in the codestream, without copying it.
+// A caller planning reads over a network wants this rather than GetPacket.
+func (idx *PacketIndex) Range(addr PacketAddress) (PacketRange, bool) {
+	i, ok := idx.addrMap[addr]
+	if !ok {
+		return PacketRange{}, false
+	}
+	e := idx.entries[i]
+	if len(e.data) == 0 {
+		return PacketRange{}, false
+	}
+	return PacketRange{Offset: e.offset, Length: len(e.data)}, true
+}
+
+// PacketsForRegion returns the packets that cover the image rectangle
+// [x0, x1) x [y0, y1) at resolution levels up to and including maxRes, with
+// their byte ranges, in codestream order.
+//
+// This is what a precinct partition is for. Without one a resolution holds a
+// single packet spanning the whole image, so every query returns everything
+// and the answer is useless; with one the returned ranges are a small subset
+// and a viewport can be fetched without reading the rest of the file.
+//
+// maxRes below zero means every resolution.
+func (idx *PacketIndex) PacketsForRegion(x0, y0, x1, y1, maxRes int) []PacketAddress {
+	var out []PacketAddress
+	for _, e := range idx.entries {
+		if maxRes >= 0 && int(e.addr.Resolution) > maxRes {
+			continue
+		}
+		if len(e.data) == 0 || e.x1 <= e.x0 || e.y1 <= e.y0 {
+			continue
+		}
+		if e.x0 >= x1 || e.x1 <= x0 || e.y0 >= y1 || e.y1 <= y0 {
+			continue
+		}
+		out = append(out, e.addr)
+	}
+	return out
 }

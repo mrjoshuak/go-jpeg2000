@@ -63,23 +63,32 @@ load-bearing for the use above, which is the reason they moved.
 
 ## Now
 
-### Precinct partitions
+### ~~Precinct partitions~~ — done, read and written, gated both ways
 
-`Scod` bit 0 signals explicit precinct sizes; we always write the maximal
-default, and we **mis-read** any codestream that declares more than one precinct
-per resolution — measured at 65217 of 65536 samples wrong against an OpenJPEG
-fixture, and reproducible before any of this release's work. `validate.sh`
-measures it every run and reports it as a gap rather than skipping it.
+`Scod` bit 0 signals explicit precinct sizes. This library used to ignore the
+declaration entirely and read every such codestream against one maximal
+precinct, so from the second packet onward it parsed packet headers at the wrong
+offsets: 65114 of 65536 samples wrong on the first fixture. `validate.sh` did
+not measure it at all, while this file claimed it did every run.
 
-Closing it needs a precinct dimension in the progression walk (a real coordinate
-walk for RPCL/PCRL/CPRL, B.12.1.3-4), per-precinct inclusion and zero-bit-plane
-tag trees, and the code-block partition clipped to precinct boundaries. It also
-gives `PacketAddress.Precinct` a meaning; it is currently always 0.
+Both directions are now gated. Reading covers precinct sizes from 2^3 to 2^7,
+sizes that differ per resolution, all five progression orders, tiles and quality
+layers; writing covers the same and OpenJPEG decodes every one of them exactly.
+`Options.PrecinctSizes` selects the partition.
 
-Done when we read and write explicit precinct partitions and a reference decoder
-agrees, including precincts smaller than a code-block, and when a packet index
-over a multi-precinct file resolves a given image region to the byte ranges that
-cover it.
+Closing it needed three things that each failed separately. The precinct
+partition itself, anchored at zero in the resolution's own coordinates with the
+band-space origin derived from the resolution origin rather than the band's. The
+code-block partition clipped to the precinct (B.7), without which a precinct
+smaller than the declared code-block overflows it. And a real coordinate walk
+for PCRL and CPRL (B.12.1.4): those two put position outside resolution, so
+precinct index *p* names a different region at every resolution and an index
+walk decodes each one against the wrong precinct.
+
+`PacketAddress.Precinct` now has a meaning, and `PacketIndex.Range` and
+`PacketsForRegion` turn a viewport into byte ranges: a 64x64 region of a 256x256
+image resolves to 7 of 85 packets and 2519 of 21127 bytes, measured in the gate
+on every run.
 
 ### Packet length markers (PLT, TLM)
 
@@ -136,17 +145,18 @@ Depends on Part 1 write. Done when a reference decoder reconstructs from a
 truncated prefix of our codestream, and we reconstruct from a truncated prefix
 of theirs, at several layer counts.
 
-### Progression orders
+### ~~Progression orders~~ — done, all five, both directions
 
-The standard defines five (LRCP, RLCP, RPCL, PCRL, CPRL). We emit and expect one
-packet walk, which happens to agree with all five in the degenerate case of a
-single precinct, layer and component. Anything else is untested and probably
-wrong.
+The standard defines five (LRCP, RLCP, RPCL, PCRL, CPRL). This library used to
+emit and expect one packet walk, which agrees with all five only in the
+degenerate case of a single precinct, layer and component — which is exactly
+what it always wrote, so nothing ever disagreed.
 
-Done when every order round-trips through a reference decoder on an image with
-several precincts, layers, components and resolutions — the case where the five
-orders actually differ.
-
+All five are now gated in both directions, crossed with precincts, components
+and layers, because the orders differ only when all three have more than one
+value. PCRL and CPRL needed the coordinate walk of B.12.1.4 rather than a
+precinct-index walk; the other three are index walks with the precinct
+dimension in the right place.
 
 ### Component subsampling
 

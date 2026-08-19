@@ -887,8 +887,16 @@ GOEOF
 	# Every progression order carrying a real precinct partition. With one
 	# precinct the five orders emit the same sequence, so this is the first
 	# check that can tell them apart at all.
+	#
+	# The three axes are crossed rather than checked one at a time: the orders
+	# differ only when precinct, layer and component all have more than one
+	# value, and an implementation that permutes two of the three correctly can
+	# still emit the third in the wrong place.
 	for po in 0 1 2 3 4; do
 		p1_write "prec_order$po" 64 3 0 1 8 1 0 "$po" 5
+		p1_write "prec_order${po}_rgb" 64 3 0 3 8 1 0 "$po" 5
+		p1_write "prec_order${po}_layers3" 64 3 0 1 8 3 0 "$po" 5
+		p1_write "prec_order${po}_rgb_layers3" 64 3 0 3 8 3 0 "$po" 5
 	done
 
 	# Quality layers as an external decoder sees them, one prefix at a time.
@@ -1114,12 +1122,24 @@ GOEOF
 		# precinct all five agree, which is exactly why this was never caught.
 		for po in LRCP RLCP RPCL PCRL CPRL; do
 			prec_read "order_$po" -n 3 -c "[32,32],[32,32],[32,32]" -p "$po"
+			prec_read "order_${po}_layers4" -n 3 -c "[32,32],[32,32],[32,32]" -p "$po" -l 4
 		done
 
 		# Precincts inside tiles, and precincts with several quality layers.
 		prec_read "tiled" -n 3 -c "[32,32],[32,32],[32,32]" -t 64,64
 		prec_read "tiled_odd" -n 3 -c "[32,32],[32,32],[32,32]" -t 13,13
 		prec_read "layers4" -n 3 -c "[32,32],[32,32],[32,32]" -l 4
+
+		# A packet index over a multi-precinct codestream must resolve an
+		# image region to the byte ranges covering it. This is the point of
+		# the partition: without it a resolution is one packet spanning the
+		# whole image, so every viewport query returns the whole file.
+		if out=$(go test ./ -run 'TestPacketsForRegion|TestPacketRangesAreTheRealBytes' -v 2>&1); then
+			ratio=$(printf '%s\n' "$out" | sed -n 's/.*viewport \(.*\)$/\1/p' | head -1)
+			pass "precinct byte ranges: a viewport resolves to a subset of the codestream (${ratio:-measured})"
+		else
+			fail "precinct byte ranges: $(printf '%s\n' "$out" | grep -E '^\s+packets_region_test' | head -1 | cut -c1-110)"
+		fi
 
 		# Signal: the comparison must be able to report a difference. The
 		# reference here is the same size as the real one and differs in a
