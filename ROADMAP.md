@@ -26,24 +26,66 @@ So an item below is done when, and only when:
 
 A passing round-trip test is not evidence. Neither is a green suite.
 
+## Why this order
+
+The ordering below follows a use this codec is unusually well suited to, and
+which the wrapping formats are not: serving one artifact at many resolutions and
+regions straight out of object storage.
+
+`BuildPacketIndex` already locates every packet as a byte range in the
+codestream without copying it. Given precincts, those ranges are spatially
+addressable, so a viewport at a chosen resolution becomes an HTTP range request
+against the original file — no proxy pyramid to generate, no transcode service,
+no second copy to keep in sync. Quality layers add the other axis: a usable
+image early on a poor connection, refining as bytes arrive. That is what JPIP
+was designed around, and it is inherent to JPEG 2000 rather than bolted on.
+
+Two consequences for what follows.
+
+**Precincts are the addressability unit.** Without them there is one packet per
+(layer, resolution, component), covering the whole image at that resolution.
+Region-of-interest decode does not exist without precincts; it is not an
+optimisation on top of them. That is why a defect filed as rare now sits first.
+
+**Progressive means sharper, not cleaner, until SPP/MRP lands.** The HT encoder
+emits the cleanup pass only, so there is one coding pass per block and nothing
+to distribute across layers. Resolution progression works today; quality
+progression does not, and quality is the axis that matters over a network.
+
+Neither item was near the top when this file was written. Both are load-bearing
+for the use above, which is the reason they moved.
+
 ## Now
 
-### Part 1 write interoperability
+### Precinct partitions
 
-The only path that still emits a private tile container: a code-block count, a
-fixed-width metadata table, then raw block data, which nothing but this library
-can read. `HighThroughput` output is already conforming T2.
+`Scod` bit 0 signals explicit precinct sizes; we always write the maximal
+default, and we **mis-read** any codestream that declares more than one precinct
+per resolution — measured at 65217 of 65536 samples wrong against an OpenJPEG
+fixture, and reproducible before any of this release's work. `validate.sh`
+measures it every run and reports it as a gap rather than skipping it.
 
-Two things are known. The comment claiming this is blocked on "a length per
-coding pass" is false — both sides already implement the standard
-single-length-per-contribution rule. And `buildStandardTileData` hardcoded the
-HT bit-plane constant while discarding the real per-block `numBPS`, which is a
-genuine defect but not the whole cause: `opj_decompress` parses our packets
-without error and still recovers the wrong coefficients.
+Closing it needs a precinct dimension in the progression walk (a real coordinate
+walk for RPCL/PCRL/CPRL, B.12.1.3-4), per-precinct inclusion and zero-bit-plane
+tag trees, and the code-block partition clipped to precinct boundaries. It also
+gives `PacketAddress.Precinct` a meaning; it is currently always 0.
 
-Done when: `opj_decompress` decodes our Part 1 output to the exact source
-samples, `buildTileData` and the decoder's private-container detection are
-deleted, and the gate covers Part 1 write the way it covers HTJ2K write.
+Done when we read and write explicit precinct partitions and a reference decoder
+agrees, including precincts smaller than a code-block, and when a packet index
+over a multi-precinct file resolves a given image region to the byte ranges that
+cover it.
+
+### HT refinement passes (SPP/MRP)
+
+The encoder emits the cleanup pass only. That is conformant — a single pass is a
+legal HT code-block — but it leaves no room for quality-layer truncation within
+a block. `EncodeWithRefinement` exists and nothing on the live path calls it.
+
+Depends on quality layers being real. Done when OpenJPH decodes multi-pass HT
+blocks from us exactly, we decode theirs, and a decoder given a truncated prefix
+of one of our codestreams produces a complete image at reduced quality rather
+than a partial one.
+
 
 ## Next
 
@@ -70,14 +112,6 @@ Done when every order round-trips through a reference decoder on an image with
 several precincts, layers, components and resolutions — the case where the five
 orders actually differ.
 
-### Precinct partitions
-
-`Scod` bit 0 signals explicit precinct sizes; we always use the maximal default.
-Precincts are what make packets addressable for streaming, so this matters for
-`ExtractPackets` and `ProgressiveDecoder` being useful against foreign files.
-
-Done when we read and write explicit precinct partitions and a reference decoder
-agrees, including precincts smaller than a code-block.
 
 ### Component subsampling
 
@@ -90,14 +124,6 @@ Done when 4:2:0 and 4:2:2 images round-trip through a reference decoder.
 
 ## Later
 
-### HT refinement passes (SPP/MRP)
-
-The encoder emits the cleanup pass only. That is conformant — a single pass is a
-legal HT code-block — but it leaves no room for quality-layer truncation within
-a block. `EncodeWithRefinement` exists and nothing on the live path calls it.
-
-Depends on quality layers being real. Done when OpenJPH decodes multi-pass HT
-blocks from us exactly, and we decode theirs.
 
 ### Error resilience markers
 
