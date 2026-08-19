@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-18
+
+Part 1 output is now interoperable, which was the last path this library wrote
+that nothing else could read. Both block coders emit conforming T2 packets and
+the private tile container is gone.
+
+### Changed
+- **`Encode` without `HighThroughput` now emits conforming T2 packets** instead
+  of a private tile container, so Part 1 output is readable by other
+  implementations for the first time. Files written by earlier versions are not
+  readable by this one, and vice versa. This is the reason for the minor bump:
+  the exported API is unchanged, but an existing call behaves differently.
+- Quality layers are real T2 layers rather than truncation points in a private
+  table. A reference decoder reconstructs from a truncated prefix of our
+  codestream, improving monotonically with each layer.
+
+### Fixed
+- **The coding-pass count in the packet header was the bit-plane count.** A Part
+  1 code-block with n magnitude bit-planes contributes 3n-2 coding passes
+  (D.3); we signalled n. Because the pass count only sizes the length field,
+  OpenJPEG parsed our packets without error, ran its block decoder for n of the
+  3n-2 passes, stopped early and produced wrong pixels — zero errors reported,
+  nothing correct decoded.
+- The zero-bit-plane count was computed with the HT bit-plane constant and
+  applied to MQ blocks, discarding the real per-block magnitude count.
+- **SOP and EPH packet markers were read as packet-header bits.** A decoder that
+  reads through an SOP segment takes six bytes of marker as header and recovers
+  nothing after it; 99.6% of samples came back wrong on any codestream using
+  them. Both markers are now skipped where the coding style declares them.
+
+### Added
+- `scripts/validate.sh` grew from 118 to 169 external checks: Part 1 write
+  against OpenJPEG across sizes, resolution counts, tile grids, colour, quality
+  layers and all five progression orders; and SOP/EPH read fixtures.
+- `ROADMAP.md`, listing what the format supports that this library does not yet,
+  with the acceptance standard for each.
+
+### Known limitations
+- A codestream declaring more than one precinct per resolution is mis-read. The
+  gate measures this and reports it as a gap rather than hiding it.
+- Component subsampling is unverified against a reference.
+- The HT encoder emits the cleanup pass only. Conformant, but it leaves no room
+  for quality-layer truncation within a block.
+
 ## [1.4.1] - 2026-08-18
 
 ### Documentation
