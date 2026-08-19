@@ -27,6 +27,14 @@ type decoder struct {
 	// tileParts maps a tile index to the byte range of its tile-part data,
 	// built once on first use.
 	tileParts map[int][2]int
+
+	// region is the decode area in output coordinates when one is in force,
+	// and the count of code-block bytes decoded and skipped because of it.
+	// The counts are what make "a region reads less than the whole" a
+	// measurement rather than a claim.
+	region       *image.Rectangle
+	regionBytes  int
+	skippedBytes int
 }
 
 // newDecoder creates a new decoder.
@@ -428,6 +436,14 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A region decode allocates the region, not the image. That is most of the
+	// point: a 256-row band of a 32768-row image should cost a 256-row buffer.
+	if r := decodeRegion(cfg, h, reduce); r != nil {
+		width, height = r.Dx(), r.Dy()
+		if reduce == 0 {
+			d.region = r
+		}
+	}
 	precision := h.ComponentInfo[0].Precision()
 	signed := h.ComponentInfo[0].IsSigned()
 
@@ -557,6 +573,15 @@ func (d *decoder) decodeTile(
 	reduce := tileDecoder.ReduceResolution()
 	imgXOff := reducedDimension(int(h.ImageXOffset), reduce)
 	imgYOff := reducedDimension(int(h.ImageYOffset), reduce)
+
+	// A region decode is the same copy with a different origin and extent: the
+	// destination plane covers the region rather than the image, so a sample
+	// outside it falls off the same bounds check that already guards the edges.
+	// Nothing else in this loop has to know about it.
+	if r := decodeRegion(cfg, h, reduce); r != nil {
+		imgXOff += r.Min.X
+		imgYOff += r.Min.Y
+	}
 
 	// Apply inverse DWT and copy tile data to output
 	for c := 0; c < len(tile.Components) && c < len(componentData); c++ {
@@ -943,6 +968,13 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	// A region decode allocates the region, as on the integer path.
+	if r := decodeRegion(cfg, h, reduce); r != nil {
+		width, height = r.Dx(), r.Dy()
+		if reduce == 0 {
+			d.region = r
+		}
+	}
 	precision := h.ComponentInfo[0].Precision()
 
 	// Check if any component has NLT (float mode)
@@ -1227,4 +1259,28 @@ func (d *decoder) headerHasNLT() bool {
 		}
 	}
 	return false
+}
+
+// decodeRegion returns the requested decode area in the coordinates of the
+// reduced-resolution output, clipped to the image, or nil for a full decode.
+//
+// The area a caller gives is in full-resolution image coordinates, which is the
+// only system they can express it in without knowing what reduction was
+// applied; everything downstream works in the reduced output's coordinates.
+func decodeRegion(cfg *Config, h *codestream.Header, reduce int) *image.Rectangle {
+	if cfg == nil || cfg.DecodeArea == nil {
+		return nil
+	}
+	full := image.Rect(0, 0,
+		int(h.ImageWidth)-int(h.ImageXOffset), int(h.ImageHeight)-int(h.ImageYOffset))
+	want := cfg.DecodeArea.Intersect(full)
+	if want.Empty() {
+		return nil
+	}
+	if reduce > 0 {
+		want = image.Rect(
+			reducedDimension(want.Min.X, reduce), reducedDimension(want.Min.Y, reduce),
+			reducedDimension(want.Max.X, reduce), reducedDimension(want.Max.Y, reduce))
+	}
+	return &want
 }

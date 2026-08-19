@@ -217,30 +217,35 @@ result exactly, and a decoder given a truncated prefix must produce a complete
 image at reduced quality. The read direction stays unverifiable until an encoder
 exists that emits multi-pass HT blocks.
 
-### Region decode, and reduced resolution for NLT codestreams
+### ~~Region decode~~ — done; reduced resolution for NLT codestreams remains
 
-`Config.DecodeArea` was declared, documented as "specifies a region to decode",
-and read by nothing: a caller asking for a 32x16 region received the whole 64x32
-image and no indication the request was dropped. `Config.ReduceResolution` had a
-narrower version of the same problem — correct for ordinary integer samples, to
-within a count or two, and returning wavelet-domain values as floats for any
-codestream carrying an NLT point transform, with the dimensions right and the
-samples off by 175 on a ramp spanning 0 to 2.
+`Config.DecodeArea` is implemented. It was declared, documented as "specifies a
+region to decode", and read by nothing: a caller asking for a 32x16 region
+received the whole 64x32 image and no indication.
 
-Both now refuse rather than mislead, and the refusals are gated along with the
-integer case that must keep working.
+Both halves hold. The samples are exactly the ones a full decode produces for
+that rectangle — not an approximation, because every coefficient that can reach
+the region is decoded and synthesised as usual. And it costs less: a 64x64
+region of a 256x256 image with 32x32 precincts entropy-decodes 5468 of 24913
+code-block bytes, 22%, skipping the rest. `DecodeConfigCost` reports both
+figures so the saving is a measurement rather than a claim, and the gate prints
+it every run. The returned image is allocated for the region, so a band of a
+large image costs a band-sized buffer.
 
-Implementing them is the remaining work, and region decode is the one that
-matters: it is what turns a viewport into a small read. Decoding everything and
-cropping would satisfy the signature and none of the point — the packets outside
-the region must never be read, which needs the code-block partition walked
-against the requested rectangle. Precincts and `PLT` are both in place now, so
-the addressing exists; what is missing is the decoder using it.
+The geometry is where this went wrong first and is worth recording. A code-block
+is skipped when the region cannot reach it, which needs the block's band
+rectangle mapped into output coordinates. Detail bands sit at half their
+resolution's own grid, so they scale by one factor more than the LL band does;
+treating them alike skipped blocks that did reach the region — 254 of 256
+samples wrong in a corner while the middle of the image was fine. Fixing it also
+tightened the skip from 54% of the data to 22%, because the mis-scaled blocks
+had been landing spuriously near the origin.
 
-Done when a region decode reads a demonstrable subset of the codestream rather
-than all of it, its samples match the same region of a full decode exactly, and
-a reduced-resolution decode of an NLT codestream either produces samples that
-match a downsampled full decode or continues to refuse.
+What remains is `ReduceResolution` for codestreams carrying an NLT point
+transform, which still refuses: a partial synthesis leaves values in the
+sign-magnitude domain NLT maps back from rather than samples, and reinterpreting
+them gave results off by 175 on a ramp spanning 0 to 2. Ordinary integer samples
+are correct to within a count or two and are gated.
 
 ### Error resilience markers
 

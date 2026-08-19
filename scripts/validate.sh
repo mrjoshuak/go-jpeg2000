@@ -910,10 +910,16 @@ GOEOF
 	# Both now refuse. What is checked here is the refusal *and* the cases that
 	# must keep working, since a guard that rejects everything would satisfy
 	# half of this.
-	if out=$(go test ./ -run 'TestReduceResolution|TestDecodeArea' 2>&1); then
-		pass "decoder options: unhonourable requests are refused, and reduced-resolution integer decode still matches the full decode"
+	# Region decode, both halves: the samples must be the ones a full decode
+	# produces for that rectangle, exactly, and getting them must cost less
+	# than decoding everything. A region decode that produced the right pixels
+	# by decoding the whole image and cropping would satisfy the first and none
+	# of the point.
+	if out=$(go test ./ -run 'TestReduceResolution|TestDecodeArea|TestRegionDecode' -v 2>&1); then
+		cost=$(printf '%s\n' "$out" | sed -n 's/.*\(64x64 of .*\)$/\1/p' | head -1)
+		pass "decoder options: a region decodes exactly and costs less (${cost:-measured}), and an unhonourable request is refused"
 	else
-		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test' | head -1 | cut -c1-110)"
+		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test|region_cost_test' | head -1 | cut -c1-110)"
 	fi
 
 	# Component subsampling (XRsiz, YRsiz above 1).

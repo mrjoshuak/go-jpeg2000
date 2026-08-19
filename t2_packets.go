@@ -694,6 +694,15 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 							if !cb.included || len(cb.data) == 0 {
 								continue
 							}
+							// A region decode entropy-decodes only the blocks
+							// that can reach it. The saving is the point: a
+							// viewport should cost a viewport, and the block
+							// coder is where a decode spends its time.
+							if d.skipForRegion(res, numRes, bg, cbx, cby, tc) {
+								d.skippedBytes += len(cb.data)
+								continue
+							}
+							d.regionBytes += len(cb.data)
 							bx0 := max(sb.x0, (bg.firstX+cbx)*bg.cbW)
 							bx1 := min(sb.x1, (bg.firstX+cbx+1)*bg.cbW)
 							w, hh := bx1-bx0, by1-by0
@@ -888,4 +897,57 @@ func log2Floor(n int) int {
 		l++
 	}
 	return l
+}
+
+// skipForRegion reports whether a code-block cannot contribute to the region
+// being decoded, and so need not be entropy-decoded at all.
+//
+// A block in a band of resolution r covers band coordinates that scale up by
+// 2^(numRes-1-r) in the image. The synthesis filter spreads each coefficient
+// over a few neighbouring samples at every level it passes through, so the
+// block's influence is that rectangle grown by a margin — generously, since
+// decoding a block that was not needed costs time and skipping one that was
+// costs correctness.
+//
+// It answers false whenever anything is uncertain: no region, a reduced decode
+// (where the resolution count the region was expressed against is not this
+// one), or a band whose geometry is degenerate.
+func (d *decoder) skipForRegion(res, numRes int, bg *bandGeometry, cbx, cby int, tc *tcd.TileComponent) bool {
+	if d.region == nil || bg == nil || tc == nil {
+		return false
+	}
+	// Band coordinates scale to output coordinates by 2^(numRes-1-res) for the
+	// LL band at resolution 0, and by one factor more for the detail bands of
+	// every resolution above it: those sit at half the resolution's own grid,
+	// so a coefficient at band coordinate b reaches resolution samples around
+	// 2b before the remaining levels double it again.
+	//
+	// Ignoring that treats a detail band as if it were an LL band and skips
+	// blocks that do reach the region — measured, when this first went in, as
+	// 254 of 256 samples wrong in a corner region while the middle of the
+	// image was fine.
+	shift := uint(numRes - 1 - res)
+	if res > 0 {
+		shift++
+	}
+
+	bx0 := max(bg.sb.x0, (bg.firstX+cbx)*bg.cbW)
+	bx1 := min(bg.sb.x1, (bg.firstX+cbx+1)*bg.cbW)
+	by0 := max(bg.sb.y0, (bg.firstY+cby)*bg.cbH)
+	by1 := min(bg.sb.y1, (bg.firstY+cby+1)*bg.cbH)
+	if bx1 <= bx0 || by1 <= by0 {
+		return false
+	}
+
+	// The margin covers the 5/3 and 9/7 synthesis support at every level this
+	// band still passes through: four samples a level is more than either
+	// filter reaches.
+	margin := 4 << shift
+	x0 := (bx0 << shift) - margin
+	y0 := (by0 << shift) - margin
+	x1 := (bx1 << shift) + margin
+	y1 := (by1 << shift) + margin
+
+	r := *d.region
+	return x1 <= r.Min.X || x0 >= r.Max.X || y1 <= r.Min.Y || y0 >= r.Max.Y
 }

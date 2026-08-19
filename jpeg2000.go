@@ -22,7 +22,6 @@
 package jpeg2000
 
 import (
-	"errors"
 	"image"
 	"io"
 )
@@ -200,14 +199,14 @@ const (
 
 // Config holds the decoding configuration.
 type Config struct {
-	// DecodeArea specifies a region to decode (nil for full image).
+	// DecodeArea limits the decode to a region, in full-resolution image
+	// coordinates, and is clipped to the image. Nil decodes all of it.
 	//
-	// Not implemented: setting it returns an error rather than decoding the
-	// whole image and saying nothing. Region decode needs the code-block
-	// partition walked against the requested rectangle so the packets outside
-	// it are never read, which is what makes it worth having; decoding
-	// everything and cropping would satisfy the signature and none of the
-	// point. See ROADMAP.md.
+	// The returned image covers the region and is allocated for it, so a band
+	// of a large image costs a band-sized buffer. Precincts that fall outside
+	// the region are not entropy-decoded, and with an explicit precinct
+	// partition their packets are not read either — see
+	// PacketIndex.PacketsForRegion for the byte ranges that implies.
 	DecodeArea *image.Rectangle
 
 	// ReduceResolution specifies the number of resolution levels to skip.
@@ -394,6 +393,28 @@ func Decode(r io.Reader) (image.Image, error) {
 	return DecodeConfig(r, nil)
 }
 
+// DecodeCost reports what a decode spent: the bytes of code-block data it
+// entropy-decoded, and the bytes it skipped because a decode area excluded
+// them. Both are zero for a decode with no area.
+//
+// It exists so "a region costs less than the whole" is a measurement rather
+// than a claim.
+type DecodeCost struct {
+	Decoded int
+	Skipped int
+}
+
+// DecodeConfigCost decodes with the given configuration and reports what the
+// decode cost, for callers measuring the saving a region buys.
+func DecodeConfigCost(r io.Reader, cfg *Config) (image.Image, DecodeCost, error) {
+	if err := checkConfig(cfg); err != nil {
+		return nil, DecodeCost{}, err
+	}
+	d := newDecoder(r)
+	img, err := d.decode(cfg)
+	return img, DecodeCost{Decoded: d.regionBytes, Skipped: d.skippedBytes}, err
+}
+
 // DecodeConfig decodes a JPEG 2000 image with the specified configuration.
 func DecodeConfig(r io.Reader, cfg *Config) (image.Image, error) {
 	if err := checkConfig(cfg); err != nil {
@@ -408,16 +429,9 @@ func DecodeConfig(r io.Reader, cfg *Config) (image.Image, error) {
 // A decoder that silently ignores an option is worse than one that lacks it: a
 // caller asking for a 256-row region and receiving the whole image has no
 // indication the request was dropped, and will read the wrong pixels from the
-// buffer it sized for the answer it asked for.
+// buffer it sized for the answer it asked for. Nothing is refused here now,
+// and the function stays as the one place to refuse from.
 func checkConfig(cfg *Config) error {
-	if cfg == nil {
-		return nil
-	}
-	if cfg.DecodeArea != nil {
-		return errors.New("jpeg2000: Config.DecodeArea is not implemented; " +
-			"decoding a region requires walking the code-block partition against it, " +
-			"and this decoder would otherwise return the whole image")
-	}
 	return nil
 }
 
