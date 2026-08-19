@@ -154,14 +154,26 @@ value. PCRL and CPRL needed the coordinate walk of B.12.1.4 rather than a
 precinct-index walk; the other three are index walks with the precinct
 dimension in the right place.
 
-### Component subsampling
+### ~~Component subsampling~~ — done for reading, gated
 
-`XRsiz`/`YRsiz` above 1. The subband geometry already derives from absolute
-coordinates, which is most of the work, but nothing exercises unequal component
-grids. `PIZChannel` in the sibling go-openexr repository has a matching latent
-defect, which suggests the pattern is easy to get wrong.
+`XRsiz`/`YRsiz` above 1 put each component on its own grid, where one sample
+covers `XRsiz` by `YRsiz` samples of the reference grid (A.5.1). This library
+wrote every component into the output plane at its own index, so a
+half-resolution component landed in a quarter of the plane and the rest stayed
+zero: 4091 of 4096 chroma samples wrong on a 4:2:0 fixture, while the
+full-resolution component beside it was exact. Samples are now written across
+the footprint they cover, and 4:2:0 and 4:2:2 are gated.
 
-Done when 4:2:0 and 4:2:2 images round-trip through a reference decoder.
+Worth recording how nearly this was misdiagnosed. Compared against
+`opj_decompress`'s output the *correct* component came back 4075 of 4096 wrong,
+because the reference writes a subsampled image through its own upsampling and
+layout convention — a measurement of the convention, not of the codec. The check
+compares against the fixture's own planes instead, and runs a control on the
+fixture's declared geometry first.
+
+Writing subsampled components is not implemented: the encoder emits `XRsiz` and
+`YRsiz` of 1 for every component. That is conformant output, not a defect, and
+it is the remaining half of this item.
 
 ## Later
 

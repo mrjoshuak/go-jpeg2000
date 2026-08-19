@@ -883,6 +883,64 @@ GOEOF
 	done
 	p1_write "layers4_tiled" 64 3 16 1 8 4
 
+	# Component subsampling (XRsiz, YRsiz above 1).
+	#
+	# The components of a subsampled image sit on different grids, and one
+	# sample of a subsampled component covers XRsiz by YRsiz samples of the
+	# reference grid (A.5.1). This library used to write every component into
+	# the output plane at its own index, so a half-resolution component landed
+	# in a quarter of the plane and the rest stayed zero — 4091 of 4096 samples
+	# wrong on the chroma of a 4:2:0 fixture, while the full-resolution
+	# component beside it was exact.
+	#
+	# The comparison is against the fixture's own planes rather than against
+	# opj_decompress's output, deliberately. The reference writes a subsampled
+	# image through its own upsampling and layout convention, and comparing
+	# against that reported 4075 of 4096 samples wrong for a component that was
+	# in fact bit-exact. A control below establishes that the fixture is sound
+	# before anything is concluded from it.
+	if ! python3 - "$WORK/yuv420.raw" "$WORK/yuv422.raw" <<'SUBEOF'; then
+import sys
+w = h = 64
+luma = bytes([(x * 3 + y) % 256 for y in range(h) for x in range(w)])
+cw, ch = w // 2, h // 2
+u = bytes([(x * 5 + y * 7) % 256 for y in range(ch) for x in range(cw)])
+v = bytes([(x * 11 + y * 3) % 256 for y in range(ch) for x in range(cw)])
+open(sys.argv[1], 'wb').write(luma + u + v)
+u2 = bytes([(x * 5 + y * 7) % 256 for y in range(h) for x in range(cw)])
+v2 = bytes([(x * 11 + y * 3) % 256 for y in range(h) for x in range(cw)])
+open(sys.argv[2], 'wb').write(luma + u2 + v2)
+SUBEOF
+		gap "component subsampling: the fixture planes could not be written"
+	else
+		for spec in "420:2:2:1x1:2x2:2x2" "422:2:1:1x1:2x1:2x1"; do
+			name=${spec%%:*}
+			rest=${spec#*:}
+			sdx=${rest%%:*}
+			rest=${rest#*:}
+			sdy=${rest%%:*}
+			subs=${rest#*:}
+			f="$WORK/sub_$name.j2k"
+			if ! opj_compress -i "$WORK/yuv$name.raw" -o "$f" \
+				-F "64,64,3,8,u@$subs" -n 3 -r 1 >/dev/null 2>&1; then
+				gap "read subsampling $name: OpenJPEG could not produce a fixture"
+				continue
+			fi
+			# Control: the reference must accept the fixture as the geometry it
+			# was meant to be, or a disagreement below says nothing.
+			geom=$(opj_dump -i "$f" 2>/dev/null | grep -cE "dx=$sdx, dy=$sdy")
+			if [ "${geom:-0}" -lt 2 ]; then
+				gap "read subsampling $name: the fixture does not declare two components at ${sdx}x${sdy}"
+				continue
+			fi
+			if out=$(go run ./scripts/subsampcmp "$f" "$WORK/yuv$name.raw" "$sdx" "$sdy" 2>&1); then
+				pass "read subsampling $name: every component lands on the reference grid exactly ($out)"
+			else
+				fail "read subsampling $name: $out"
+			fi
+		done
+	fi
+
 	# Packet length markers: PLT in every tile-part header, TLM in the main
 	# header.
 	#

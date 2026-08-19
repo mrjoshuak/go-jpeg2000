@@ -568,22 +568,46 @@ func (d *decoder) decodeTile(
 		// Apply inverse DWT (uses reduced number of levels)
 		tileDecoder.ApplyInverseDWT(tc)
 
-		// Copy to output
-		for y := tc.Y0; y < tc.Y1 && y-imgYOff < imgHeight; y++ {
-			for x := tc.X0; x < tc.X1 && x-imgXOff < imgWidth; x++ {
+		// Copy to output.
+		//
+		// A component's coordinates are its own: XRsiz and YRsiz above 1 mean
+		// one sample of this component covers XRsiz by YRsiz samples of the
+		// reference grid the image is measured on (ISO/IEC 15444-1 A.5.1). The
+		// output planes are the reference grid, so each sample is written
+		// across the footprint it covers rather than at its own index, which
+		// would put a half-resolution component in a quarter of the plane and
+		// leave the rest untouched.
+		//
+		// For an unsubsampled component both factors are 1 and this is the
+		// plain copy it has always been.
+		dx, dy := 1, 1
+		if c < len(d.header.ComponentInfo) {
+			dx = max(int(d.header.ComponentInfo[c].SubsamplingX), 1)
+			dy = max(int(d.header.ComponentInfo[c].SubsamplingY), 1)
+		}
+		for y := tc.Y0; y < tc.Y1; y++ {
+			for x := tc.X0; x < tc.X1; x++ {
 				srcIdx := (y-tc.Y0)*(tc.X1-tc.X0) + (x - tc.X0)
-				dstX := x - imgXOff
-				dstY := y - imgYOff
-				if dstX >= 0 && dstY >= 0 && dstX < imgWidth && dstY < imgHeight {
-					dstIdx := dstY*imgWidth + dstX
-					if wide != nil {
-						if srcIdx < len(tc.Data64) && c < len(wide.planes) {
-							wide.planes[c][dstIdx] = tc.Data64[srcIdx]
-						}
+				for ry := 0; ry < dy; ry++ {
+					dstY := y*dy + ry - imgYOff
+					if dstY < 0 || dstY >= imgHeight {
 						continue
 					}
-					if srcIdx < len(tc.Data) {
-						componentData[c][dstIdx] = tc.Data[srcIdx]
+					for rx := 0; rx < dx; rx++ {
+						dstX := x*dx + rx - imgXOff
+						if dstX < 0 || dstX >= imgWidth {
+							continue
+						}
+						dstIdx := dstY*imgWidth + dstX
+						if wide != nil {
+							if srcIdx < len(tc.Data64) && c < len(wide.planes) {
+								wide.planes[c][dstIdx] = tc.Data64[srcIdx]
+							}
+							continue
+						}
+						if srcIdx < len(tc.Data) {
+							componentData[c][dstIdx] = tc.Data[srcIdx]
+						}
 					}
 				}
 			}
