@@ -460,26 +460,32 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 	// the jobs: a band can legitimately hold no code-blocks, and a packet must
 	// then say nothing about it rather than describe a phantom block.
 	type key struct{ c, r int }
-	bandsFor := map[key][]*t2Band{}
+	bandsFor := map[key][][]*t2Band{}
 	for c := 0; c < numComp; c++ {
 		for r := 0; r < numRes; r++ {
 			rl := layout.at(c, r)
 			if !rl.present {
 				continue
 			}
-			bands := make([]*t2Band, len(rl.bands))
-			for b, bl := range rl.bands {
-				bands[b] = &t2Band{
-					cbX: bl.cbX, cbY: bl.cbY,
-					blocks: make([]*t2Block, bl.cbX*bl.cbY),
-					incl:   newTagTreeEnc(bl.cbX, bl.cbY),
-					imsb:   newTagTreeEnc(bl.cbX, bl.cbY),
+			// One entry per precinct: each carries its own tag trees, because
+			// a tag tree is scoped to the packet that codes it.
+			precincts := make([][]*t2Band, len(rl.precincts))
+			for p, pl := range rl.precincts {
+				bands := make([]*t2Band, len(pl.bands))
+				for b, bl := range pl.bands {
+					bands[b] = &t2Band{
+						cbX: bl.cbX, cbY: bl.cbY,
+						blocks: make([]*t2Block, bl.cbX*bl.cbY),
+						incl:   newTagTreeEnc(bl.cbX, bl.cbY),
+						imsb:   newTagTreeEnc(bl.cbX, bl.cbY),
+					}
+					for i := range bands[b].blocks {
+						bands[b].blocks[i] = &t2Block{lblock: 3, layers: make([]t2Contribution, numLayers)}
+					}
 				}
-				for i := range bands[b].blocks {
-					bands[b].blocks[i] = &t2Block{lblock: 3, layers: make([]t2Contribution, numLayers)}
-				}
+				precincts[p] = bands
 			}
-			bandsFor[key{c, r}] = bands
+			bandsFor[key{c, r}] = precincts
 		}
 	}
 
@@ -488,7 +494,11 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 		if i >= len(encoded) {
 			break
 		}
-		bands := bandsFor[key{j.comp, j.res}]
+		precincts := bandsFor[key{j.comp, j.res}]
+		if j.prec >= len(precincts) {
+			continue
+		}
+		bands := precincts[j.prec]
 		if bands == nil || j.bandIdx >= len(bands) {
 			continue
 		}
@@ -535,24 +545,41 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 		cb.layers = layerContributions(encoded[i], tp, numLayers, e.htCoder())
 	}
 
-	for _, bands := range bandsFor {
-		for _, bg := range bands {
-			bg.setTagTreeLeaves(numLayers)
+	for _, precincts := range bandsFor {
+		for _, bands := range precincts {
+			for _, bg := range bands {
+				bg.setTagTreeLeaves(numLayers)
+			}
 		}
 	}
 
 	var out []byte
 	order := codestream.ProgressionOrder(e.options.ProgressionOrder)
-	// The encoder writes the maximal precinct, so every resolution holds
-	// exactly one packet. Reading an explicit partition is handled; writing one
-	// is not, and this is the line that says so.
-	onePrecinct := func(res, comp int) int { return 1 }
-	forEachPacket(order, numLayers, numRes, numComp, onePrecinct, nil, func(layer, res, c, prec int) bool {
-		bands := bandsFor[key{c, res}]
-		if bands == nil {
+	// One packet per precinct, in the progression order the COD declares. The
+	// walk is forEachPacket, the same one the decoder uses, so a codestream
+	// this encoder writes and one it reads are ordered by one definition.
+	numPrec := func(res, c int) int { return len(bandsFor[key{c, res}]) }
+
+	pos := &posInfo{tx0: layout.x0, ty0: layout.y0, tx1: layout.x1, ty1: layout.y1}
+	for c := 0; c < numComp; c++ {
+		pos.dx, pos.dy = append(pos.dx, 1), append(pos.dy, 1)
+	}
+	for r := 0; r < numRes; r++ {
+		ppx, ppy, _ := e.precinctExpsFor(r)
+		pos.ppx, pos.ppy = append(pos.ppx, ppx), append(pos.ppy, ppy)
+	}
+	pos.pw = func(r, c int) int {
+		w, _ := precinctGridDims(layout.x0, layout.y0, layout.x1, layout.y1,
+			numRes, r, pos.ppx[r], pos.ppy[r])
+		return w
+	}
+
+	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(layer, res, c, prec int) bool {
+		precincts := bandsFor[key{c, res}]
+		if prec >= len(precincts) {
 			return true
 		}
-		out = append(out, encodePacket(bands, layer)...)
+		out = append(out, encodePacket(precincts[prec], layer)...)
 		return true
 	})
 	return out

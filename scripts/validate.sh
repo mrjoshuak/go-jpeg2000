@@ -640,7 +640,7 @@ else
 
 package main
 
-// p1enc <out.j2k> <size> <nres> [tile] [comps] [depth] [layers] [quality] [order]
+// p1enc <out.j2k> <size> <nres> [tile] [comps] [depth] [layers] [quality] [order] [precexp]
 //
 // Encodes a Part 1 (MQ) codestream through the public API and writes the source
 // raster beside it as a PGM or PPM.
@@ -705,6 +705,7 @@ func main() {
 	layers := arg(7, 1)
 	quality := arg(8, 0) // 0 asks for lossless
 	order := arg(9, 0)   // Table A.16: 0=LRCP, 1=RLCP, 2=RPCL, 3=PCRL, 4=CPRL
+	precexp := arg(10, 0) // 0 leaves the maximal precinct; otherwise 2^n per side
 
 	maxv := (1 << depth) - 1
 	sample := func(x, y, c int) int {
@@ -752,6 +753,12 @@ func main() {
 		NumLayers:      layers,
 
 		ProgressionOrder: jp2.ProgressionOrder(order),
+	}
+	if precexp > 0 {
+		for i := 0; i < nres; i++ {
+			opts.PrecinctSizes = append(opts.PrecinctSizes,
+				jp2.PrecinctSize{WidthExp: uint8(precexp), HeightExp: uint8(precexp)})
+		}
 	}
 	if quality > 0 {
 		opts.Quality = quality
@@ -856,6 +863,33 @@ GOEOF
 		p1_write "layers$layers" 64 3 0 1 8 "$layers"
 	done
 	p1_write "layers4_tiled" 64 3 16 1 8 4
+
+	# Explicit precinct partitions, written by us and read by OpenJPEG.
+	#
+	# The read direction is checked further down; this is the other half. A
+	# partition is only useful if other implementations accept it, and the two
+	# halves fail differently: writing a partition the COD does not describe
+	# produces a codestream nothing can read, while reading one is a decode
+	# problem alone.
+	#
+	# 2^4 is smaller than the 64x64 code-block, so the code-block partition is
+	# clipped to the precinct (B.7); 2^8 is larger than the image, which is the
+	# degenerate single-precinct case reached through the explicit path rather
+	# than the default one.
+	for pexp in 4 5 6 8; do
+		p1_write "prec2e$pexp" 64 3 0 1 8 1 0 0 "$pexp"
+	done
+	p1_write "prec_odd" 127 3 0 1 8 1 0 0 5
+	p1_write "prec_tiled" 64 3 32 1 8 1 0 0 5
+	p1_write "prec_rgb" 64 3 0 3 8 1 0 0 5
+	p1_write "prec_layers3" 64 3 0 1 8 3 0 0 5
+
+	# Every progression order carrying a real precinct partition. With one
+	# precinct the five orders emit the same sequence, so this is the first
+	# check that can tell them apart at all.
+	for po in 0 1 2 3 4; do
+		p1_write "prec_order$po" 64 3 0 1 8 1 0 "$po" 5
+	done
 
 	# Quality layers as an external decoder sees them, one prefix at a time.
 	# Decoding every layer being exact says the split loses nothing; it does not

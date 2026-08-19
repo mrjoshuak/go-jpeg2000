@@ -875,11 +875,32 @@ func (e *encoder) generateSIZ() []byte {
 }
 
 // generateCOD generates the COD marker segment.
+// precinctExpsFor returns the precinct exponents this encoder writes at one
+// resolution, and whether an explicit partition is in force at all. A list
+// shorter than the resolution count repeats its last entry, which is what makes
+// a single {7,7} mean "128x128 everywhere".
+func (e *encoder) precinctExpsFor(res int) (int, int, bool) {
+	ps := e.options.PrecinctSizes
+	if len(ps) == 0 {
+		return 15, 15, false
+	}
+	p := ps[len(ps)-1]
+	if res < len(ps) {
+		p = ps[res]
+	}
+	return int(p.WidthExp), int(p.HeightExp), true
+}
+
 func (e *encoder) generateCOD() []byte {
 	numRes := e.numResolutions()
 
-	// Base length = 12 (without precinct sizes)
+	// Base length is 12; an explicit precinct partition adds one byte per
+	// resolution, which is the only variable-length part of SPcod.
 	length := 12
+	_, _, explicit := e.precinctExpsFor(0)
+	if explicit {
+		length += numRes
+	}
 
 	buf := make([]byte, 2+length)
 	binary.BigEndian.PutUint16(buf[0:2], uint16(codestream.COD))
@@ -892,6 +913,9 @@ func (e *encoder) generateCOD() []byte {
 	}
 	if e.options.EnableEPH {
 		scod |= codestream.CodingStyleEPH
+	}
+	if explicit {
+		scod |= codestream.CodingStylePrecincts
 	}
 	buf[4] = scod
 
@@ -933,6 +957,15 @@ func (e *encoder) generateCOD() []byte {
 		buf[13] = 1 // 5-3 reversible wavelet
 	} else {
 		buf[13] = 0 // 9-7 irreversible wavelet
+	}
+
+	// Cprecincts: one byte per resolution, PPx in the low nibble and PPy in
+	// the high one, lowest resolution first.
+	if explicit {
+		for r := 0; r < numRes; r++ {
+			ppx, ppy, _ := e.precinctExpsFor(r)
+			buf[14+r] = uint8(ppx&0x0F) | uint8((ppy&0x0F)<<4)
+		}
 	}
 
 	return buf
@@ -1131,11 +1164,14 @@ type codeBlockJob struct {
 	height   int
 	bandType int
 
-	// Packet grouping. T2 packets are formed per (component, resolution), so
-	// each code-block must know where it sits in that structure.
+	// Packet grouping. A T2 packet covers one precinct of one (component,
+	// resolution), so each code-block must know which precinct it belongs to
+	// as well as where it sits inside it. Without an explicit partition there
+	// is one precinct per resolution and prec is always 0.
 	comp     int
 	res      int
 	bandIdx  int
+	prec     int
 	cbx, cby int
 }
 
@@ -1186,20 +1222,31 @@ type bandLayout struct {
 	cbX, cbY int
 }
 
+// precLayout is the code-block partition of one precinct: one bandLayout per
+// band of the resolution the precinct belongs to.
+type precLayout struct {
+	bands []bandLayout
+}
+
 // resLayout is the code-block partition of one resolution of one
 // tile-component. A resolution with no samples has no precinct and therefore
 // contributes no packet at all (ISO/IEC 15444-1 B.6), which is what present
 // records; that is not the same as a resolution whose bands happen to be
 // empty, and a decoder that reads a packet for it desynchronises.
 type resLayout struct {
-	present bool
-	bands   []bandLayout
+	present   bool
+	bands     []bandLayout
+	precincts []precLayout
 }
 
 // tileLayout holds the resolution layouts of every component of one tile.
 type tileLayout struct {
 	numRes int
 	res    []resLayout
+	// The tile's own coordinates. The positional progression orders walk image
+	// coordinates rather than precinct indices, so the packet writer needs
+	// them as much as the reader does.
+	x0, y0, x1, y1 int
 }
 
 func newTileLayout(numComp, numRes int) *tileLayout {
@@ -1238,50 +1285,75 @@ func (e *encoder) collectJobs(comps [][]int32, comps64 [][]int64, x0, y0, x1, y1
 	stride := x1 - x0
 
 	layout := newTileLayout(numComps, numRes)
-	bands := tileBands(x0, y0, x1, y1, numRes, cbWidth, cbHeight)
+	layout.x0, layout.y0, layout.x1, layout.y1 = x0, y0, x1, y1
 	var jobs []codeBlockJob
 
+	// The partition comes from precinctsFor, the same function the decoder
+	// reads packet headers against. One definition, walked from both ends:
+	// a writer and a reader with their own copies of this arithmetic is how
+	// the code-block partition drifted before, and the drift is invisible to a
+	// round trip because both ends move together.
 	for c := 0; c < numComps; c++ {
-		for _, bd := range bands {
-			rl := layout.at(c, bd.res)
-			if !rl.present {
-				rl.present = true
-				n := 1
-				if bd.res > 0 {
-					n = 3
-				}
-				rl.bands = make([]bandLayout, n)
+		for res := 0; res < numRes; res++ {
+			ppx, ppy, _ := e.precinctExpsFor(res)
+			precincts := precinctsFor(x0, y0, x1, y1, numRes, res, cbWidth, cbHeight, ppx, ppy)
+			if precincts == nil {
+				continue
 			}
-			rl.bands[bd.band] = bandLayout{cbX: bd.cbX, cbY: bd.cbY}
+			rl := layout.at(c, res)
+			rl.present = true
+			rl.precincts = make([]precLayout, len(precincts))
 
-			for cby := 0; cby < bd.cbY; cby++ {
-				for cbx := 0; cbx < bd.cbX; cbx++ {
-					ox, oy, w, h := bd.blockRect(cbx, cby, cbWidth, cbHeight)
-					var narrow []int32
-					var wide []int64
-					if comps64 != nil {
-						wide = extractCodeBlock(comps64[c], stride, ox, oy, w, h)
-					} else {
-						narrow = extractCodeBlock(comps[c], stride, ox, oy, w, h)
+			for p, pbands := range precincts {
+				rl.precincts[p].bands = make([]bandLayout, len(pbands))
+				for b, bg := range pbands {
+					rl.precincts[p].bands[b] = bandLayout{cbX: bg.cbX, cbY: bg.cbY}
+
+					for cby := 0; cby < bg.cbY; cby++ {
+						by0 := max(bg.sb.y0, (bg.firstY+cby)*bg.cbH)
+						by1 := min(bg.sb.y1, (bg.firstY+cby+1)*bg.cbH)
+						for cbx := 0; cbx < bg.cbX; cbx++ {
+							bx0 := max(bg.sb.x0, (bg.firstX+cbx)*bg.cbW)
+							bx1 := min(bg.sb.x1, (bg.firstX+cbx+1)*bg.cbW)
+							w, h := bx1-bx0, by1-by0
+							if w <= 0 || h <= 0 {
+								continue
+							}
+							ox := bg.sb.ox + bx0 - bg.sb.x0
+							oy := bg.sb.oy + by0 - bg.sb.y0
+
+							var narrow []int32
+							var wide []int64
+							if comps64 != nil {
+								wide = extractCodeBlock(comps64[c], stride, ox, oy, w, h)
+							} else {
+								narrow = extractCodeBlock(comps[c], stride, ox, oy, w, h)
+							}
+							jobs = append(jobs, codeBlockJob{
+								index:    len(jobs),
+								data:     narrow,
+								data64:   wide,
+								width:    w,
+								height:   h,
+								bandType: bg.bandType,
+								comp:     c,
+								res:      res,
+								bandIdx:  b,
+								prec:     p,
+								cbx:      cbx,
+								cby:      cby,
+							})
+						}
 					}
-					jobs = append(jobs, codeBlockJob{
-						index:    len(jobs),
-						data:     narrow,
-						data64:   wide,
-						width:    w,
-						height:   h,
-						bandType: bd.bandType,
-						comp:     c,
-						res:      bd.res,
-						bandIdx:  bd.band,
-						cbx:      cbx,
-						cby:      cby,
-					})
 				}
+			}
+			// Kept for callers that still read rl.bands: the whole-resolution
+			// view is the first precinct's when there is only one.
+			if len(rl.precincts) > 0 {
+				rl.bands = rl.precincts[0].bands
 			}
 		}
 	}
-
 	return jobs, layout
 }
 

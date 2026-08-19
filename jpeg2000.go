@@ -211,6 +211,13 @@ type Config struct {
 	QualityLayers int
 }
 
+// PrecinctSize is one resolution's precinct partition, as base-2 exponents.
+// {WidthExp: 7, HeightExp: 7} is a 128x128 precinct.
+type PrecinctSize struct {
+	WidthExp  uint8
+	HeightExp uint8
+}
+
 // Options holds the encoding options.
 type Options struct {
 	// Format specifies the output format (J2K, JP2, or JPX).
@@ -289,6 +296,23 @@ type Options struct {
 
 	// EnableEPH enables End of Packet Header markers.
 	EnableEPH bool
+
+	// PrecinctSizes gives the precinct partition, one entry per resolution
+	// from the lowest upward, as base-2 exponents of width and height. A
+	// shorter list repeats its last entry for the resolutions above it, and an
+	// empty list writes the maximal precinct, which is one packet per
+	// resolution and what the format assumes when Scod bit 0 is clear.
+	//
+	// Precincts are what make a codestream spatially addressable: without them
+	// a resolution is one packet covering the whole image, so a region of
+	// interest cannot be located without decoding everything. With them each
+	// packet covers one rectangle, and a packet index resolves a viewport to
+	// byte ranges.
+	//
+	// Each exponent must be in [1, 15], except that the lowest resolution may
+	// use 0. A precinct smaller than the code-block clips the code-block
+	// partition to it, which is legal and is how small precincts behave.
+	PrecinctSizes []PrecinctSize
 
 	// Precision overrides the bit depth for encoding.
 	// If 0, uses the natural precision of the input image (8 or 16).
