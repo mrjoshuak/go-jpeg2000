@@ -1255,6 +1255,57 @@ GOEOF
 		fi
 	done
 
+	# Quality layers in the read direction: a prefix of someone else's
+	# codestream must reconstruct a complete image at lower quality.
+	#
+	# The write direction above asserts the mirror of this. What is asserted
+	# here is not that our reconstruction equals OpenJPEG's at every layer
+	# count — reconstructing a coefficient whose low bits were not transmitted
+	# is implementation-defined, and the two libraries choose differently — but
+	# the three properties that are not: each further layer improves the
+	# result, the image is complete at every layer count rather than partial,
+	# and decoding every layer is exact.
+	#
+	# Decoding every layer alone would be a weak check: a codestream whose
+	# first layer held everything would pass it. The monotone improvement is
+	# what says the coding passes are really distributed across the packets.
+	if ! opj_compress -i "$WORK/src32.pgm" -o "$WORK/rl.j2k" -n 3 -r 20,10,5,2,1 >/dev/null 2>&1; then
+		gap "read quality layers: OpenJPEG could not produce a multi-layer fixture"
+	elif [ "$(opj_dump -i "$WORK/rl.j2k" 2>/dev/null | grep -c 'numlayers=5')" -lt 1 ]; then
+		gap "read quality layers: the fixture does not declare five layers"
+	else
+		prev=""
+		monotone=1
+		detail=""
+		bad=""
+		for l in 1 2 3 4 5; do
+			out=$(go run ./scripts/layercmp "$WORK/rl.j2k" "$WORK/src32.pgm" "$l" 2>&1)
+			mse=$(printf '%s' "$out" | awk '{print $1}')
+			dim=$(printf '%s' "$out" | awk '{print $2}')
+			case "$mse" in
+			''|*[!0-9.]*) bad="layer $l: $out"; break ;;
+			esac
+			if [ "$dim" != "32x32" ]; then
+				bad="layer $l reconstructed $dim, not the whole 32x32 image"
+				break
+			fi
+			detail="$detail l$l=$mse"
+			if [ -n "$prev" ] && ! python3 -c "import sys; sys.exit(0 if float('$mse') <= float('$prev') + 1e-9 else 1)"; then
+				monotone=0
+			fi
+			prev=$mse
+		done
+		if [ -n "$bad" ]; then
+			fail "read quality layers: $bad"
+		elif [ "$monotone" = "0" ]; then
+			fail "read quality layers: a further layer of OpenJPEG's codestream made our reconstruction worse ($detail )"
+		elif ! python3 -c "import sys; sys.exit(0 if float('$prev') == 0 else 1)"; then
+			fail "read quality layers: all five layers of OpenJPEG's codestream still leave error $prev"
+		else
+			pass "read quality layers: each prefix of OpenJPEG's codestream improves our reconstruction and all five are exact ($detail )"
+		fi
+	fi
+
 	# Tiled Part 1: same geometry, MQ-coded rather than HT.
 	for tile in 8 16 12 13; do
 		f="$WORK/pt_$tile.j2k"

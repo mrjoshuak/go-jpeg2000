@@ -129,17 +129,30 @@ than a partial one.
 
 ## Next
 
-### Multiple quality layers
+### ~~Multiple quality layers~~ — done, both directions, gated
 
-`buildMultiLayerTileData` writes per-layer truncation points into the private
-container. Real quality layers are a T2 concept: a code-block contributes
-different numbers of coding passes to successive layers, each with its own
-length in its own packet. Until this lands, `NumLayers > 1` stays on the private
-path and progressive transmission is not interoperable.
+Real quality layers are a T2 concept: a code-block contributes different numbers
+of coding passes to successive layers, each with its own length in its own
+packet. That is what this encoder writes — `NumLayers > 1` has been on the
+conforming path since Part 1 write landed, and this section's claim that it
+"stays on the private path" was stale.
 
-Depends on Part 1 write. Done when a reference decoder reconstructs from a
-truncated prefix of our codestream, and we reconstruct from a truncated prefix
-of theirs, at several layer counts.
+Both directions are gated, and both are stated as progression rather than as
+exactness, because exactness alone is a weak claim: a codestream whose first
+layer held everything would satisfy it.
+
+Writing: OpenJPEG's reconstruction of our eight-layer codestream improves with
+every prefix — mean squared error 2078, 1039, 61, 4.3, 0 at one, two, four, six
+and eight layers.
+
+Reading: our reconstruction of OpenJPEG's five-layer codestream improves with
+every prefix — 1240, 883, 344, 0, 0 — and every prefix yields the whole image
+rather than part of one.
+
+What is deliberately not asserted is that the two agree at intermediate layer
+counts. Reconstructing a coefficient whose low bits were never transmitted is
+implementation-defined, and the two libraries choose differently; requiring
+agreement there would be requiring OpenJPEG's choice, not the standard's.
 
 ### ~~Progression orders~~ — done, all five, both directions
 
