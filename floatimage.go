@@ -11,6 +11,11 @@ type FloatImage struct {
 	Components    [][]float32 // one slice per component (R, G, B, ...)
 	BitDepth      int         // original bit depth
 	Signed        bool
+
+	// Cost reports what the decode spent. DecodeConfigCost exists because
+	// image.Image is an interface with nowhere to hang this; a FloatImage is
+	// a concrete type, so it carries the same figures directly.
+	Cost DecodeCost
 }
 
 // Bounds returns the image rectangle.

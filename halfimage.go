@@ -47,6 +47,11 @@ func halfToFloat32(h uint16) float32 {
 type HalfImage struct {
 	Width, Height int
 	Components    [][]uint16 // one slice per component (R, G, B, ...)
+
+	// Cost reports what the decode spent. DecodeConfigCost exists because
+	// image.Image is an interface with nowhere to hang this; a HalfImage is
+	// a concrete type, so it carries the same figures directly.
+	Cost DecodeCost
 }
 
 // Bounds returns the image rectangle.

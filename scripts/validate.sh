@@ -915,11 +915,25 @@ GOEOF
 	# than decoding everything. A region decode that produced the right pixels
 	# by decoding the whole image and cropping would satisfy the first and none
 	# of the point.
+	#
+	# The half and float paths are checked separately from the image.Image one
+	# because they are different functions, and they are the only ones an EXR
+	# HTJ2K chunk ever reaches: a region correct on DecodeConfigCost and broken
+	# on DecodeFloatConfig would pass every check written against image.Image
+	# and fail the only caller there is.
 	if out=$(go test ./ -run 'TestReduceResolution|TestDecodeArea|TestRegionDecode' -v 2>&1); then
 		cost=$(printf '%s\n' "$out" | sed -n 's/.*\(64x64 of .*\)$/\1/p' | head -1)
 		pass "decoder options: a region decodes exactly and costs less (${cost:-measured}), and an unhonourable request is refused"
+		for path in float half; do
+			line=$(printf '%s\n' "$out" | sed -n "s/.*\($path path, .*\)\$/\1/p" | head -1)
+			if [ -n "$line" ]; then
+				pass "decoder options: $line"
+			else
+				fail "decoder options: the $path path reported no region measurement"
+			fi
+		done
 	else
-		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test|region_cost_test' | head -1 | cut -c1-110)"
+		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test|region_(cost|planes)_test' | head -1 | cut -c1-110)"
 	fi
 
 	# Component subsampling (XRsiz, YRsiz above 1).

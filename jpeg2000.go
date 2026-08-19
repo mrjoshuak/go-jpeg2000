@@ -497,7 +497,11 @@ func DecodeHalfConfig(r io.Reader, cfg *Config) (*HalfImage, error) {
 		return nil, err
 	}
 	d := newDecoder(r)
-	return d.decodeHalf(cfg)
+	img, err := d.decodeHalf(cfg)
+	if img != nil {
+		img.Cost = DecodeCost{Decoded: d.regionBytes, Skipped: d.skippedBytes}
+	}
+	return img, err
 }
 
 // DecodeFloat reads a JPEG 2000 image and returns it as a FloatImage,
@@ -513,7 +517,11 @@ func DecodeFloatConfig(r io.Reader, cfg *Config) (*FloatImage, error) {
 		return nil, err
 	}
 	d := newDecoder(r)
-	return d.decodeFloat(cfg)
+	img, err := d.decodeFloat(cfg)
+	if img != nil {
+		img.Cost = DecodeCost{Decoded: d.regionBytes, Skipped: d.skippedBytes}
+	}
+	return img, err
 }
 
 // DecodeMetadata reads only the header information without decoding the image.
