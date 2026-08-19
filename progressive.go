@@ -203,6 +203,7 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 
 		// Decode received packets into tile component data
 		numRes := int(h.CodingStyle.NumDecompositions) + 1
+		psop, peph := packetMarkers(h.CodingStyle.CodingStyle)
 		bestRes := numRes - 1 - reduce
 		for addr, pktData := range d.receivedPkts {
 			if addr.Tile != uint16(tileIdx) {
@@ -220,6 +221,7 @@ func (d *ProgressiveDecoder) Reconstruct() (*FloatImage, error) {
 				decodePacketIntoTile(tc.Data, tcWidth, tcHeight,
 					tc.FullX0, tc.FullY0, tc.FullX1, tc.FullY1,
 					numRes, res, pktData,
+					psop, peph,
 					h.CodingStyle.CodeBlockWidth(), h.CodingStyle.CodeBlockHeight(),
 					func(band int) int { return h.BandMb(res, band) }, h.IsHTJ2K())
 			}
@@ -358,6 +360,7 @@ func decodePacketIntoTile(
 	x0, y0, x1, y1 int,
 	numRes, res int,
 	pktData []byte,
+	useSOP, useEPH bool,
 	cbWidth, cbHeight int,
 	mb func(band int) int,
 	ht bool,
@@ -378,7 +381,7 @@ func decodePacketIntoTile(
 	if bands == nil {
 		return
 	}
-	r := newPktReader(pktData)
+	r := newPktReader(pktData, useSOP, useEPH)
 	if err := readPacket(r, bands, 0, true); err != nil {
 		return
 	}

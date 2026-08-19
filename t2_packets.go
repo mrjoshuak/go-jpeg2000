@@ -22,6 +22,10 @@ import (
 
 // pktReader reads packet-header bits, applying the bit-unstuffing rule: a byte
 // following one equal to 0xFF carries only seven bits.
+// useSOP and useEPH come from the coding style (Table A.13) and say whether the
+// tile data carries the two optional packet-delimiting markers. They are not
+// decorative: a decoder that reads through an SOP segment takes six bytes of
+// marker as packet header and recovers nothing from that point on.
 type pktReader struct {
 	data    []byte
 	pos     int
@@ -29,9 +33,48 @@ type pktReader struct {
 	bitCnt  uint
 	lastFF  bool
 	overrun bool
+	useSOP  bool
+	useEPH  bool
 }
 
-func newPktReader(data []byte) *pktReader { return &pktReader{data: data} }
+func newPktReader(data []byte, useSOP, useEPH bool) *pktReader {
+	return &pktReader{data: data, useSOP: useSOP, useEPH: useEPH}
+}
+
+// packetMarkers reports whether an Scod byte declares SOP marker segments
+// before packets and EPH markers after packet headers.
+func packetMarkers(style uint8) (useSOP, useEPH bool) {
+	return style&codestream.CodingStyleSOP != 0, style&codestream.CodingStyleEPH != 0
+}
+
+// skipSOP steps over a start-of-packet marker segment (A.8.1): the 0xFF91
+// marker, a two-byte length of 4 and a two-byte packet counter, six bytes in
+// all. SOP is permitted rather than required before any given packet even when
+// the coding style allows it, so its absence is not an error and only an actual
+// marker is consumed.
+func (r *pktReader) skipSOP() {
+	if !r.useSOP || r.bitCnt != 0 || r.pos+6 > len(r.data) {
+		return
+	}
+	if r.data[r.pos] != 0xFF || r.data[r.pos+1] != 0x91 {
+		return
+	}
+	r.pos += 6
+	r.lastFF = false
+}
+
+// skipEPH steps over the end-of-packet-header marker (A.8.2), which follows
+// every packet header when the coding style declares it, including the single
+// zero bit that is an empty packet's whole header.
+func (r *pktReader) skipEPH() {
+	if !r.useEPH || r.pos+2 > len(r.data) {
+		return
+	}
+	if r.data[r.pos] != 0xFF || r.data[r.pos+1] != 0x92 {
+		return
+	}
+	r.pos += 2
+}
 
 func (r *pktReader) readBit() uint32 {
 	if r.bitCnt == 0 {
@@ -327,7 +370,8 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 		}
 	}
 
-	r := newPktReader(tileData)
+	useSOP, useEPH := packetMarkers(h.CodingStyle.CodingStyle)
+	r := newPktReader(tileData, useSOP, useEPH)
 
 	// One precinct per resolution: Scod without a precinct partition uses the
 	// maximal precinct, so every code-block of a band falls in one packet.
@@ -454,8 +498,10 @@ func readPacket(r *pktReader, bands []*bandGeometry, layer int, keep bool) error
 	if r.pos >= len(r.data) {
 		return nil
 	}
+	r.skipSOP()
 	if r.readBit() == 0 {
 		r.align()
+		r.skipEPH()
 		return nil // empty packet
 	}
 
@@ -528,6 +574,7 @@ func readPacket(r *pktReader, bands []*bandGeometry, layer int, keep bool) error
 	}
 
 	r.align()
+	r.skipEPH()
 
 	for _, ct := range order {
 		if ct.length < 0 || r.pos+ct.length > len(r.data) {

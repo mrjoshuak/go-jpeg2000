@@ -289,7 +289,8 @@ func (idx *PacketIndex) indexTilePackets(
 		}
 	}
 
-	reader := newPktReader(tileData)
+	sop, eph := packetMarkers(header.CodingStyle.CodingStyle)
+	reader := newPktReader(tileData, sop, eph)
 
 	// Generate packet addresses in progression order and record each packet's
 	// own bytes.

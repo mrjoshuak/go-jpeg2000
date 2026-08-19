@@ -1024,6 +1024,26 @@ GOEOF
 			fail "read Part 1 MQ ${tile}x${tile} tiles: $out samples differ"
 		fi
 	done
+
+	# SOP and EPH packet markers. A decoder that reads through an SOP segment
+	# takes six bytes of marker as packet header and recovers nothing after it,
+	# so these are worth asserting rather than assuming: with the coding-style
+	# detection disabled every sample of these fixtures comes back wrong.
+	for opt in "-SOP -EPH:sopeph" "-SOP:sop" "-EPH:eph"; do
+		flags=${opt%%:*}
+		name=${opt##*:}
+		f="$WORK/pm_$name.j2k"
+		if ! opj_compress -i "$WORK/src32.pgm" -o "$f" -n 4 $flags -r 1 >/dev/null 2>&1; then
+			gap "read Part 1 $name: OpenJPEG could not produce a fixture"
+			continue
+		fi
+		out=$(go run ./scripts/decodecmp "$f" "$WORK/src32.pgm" 2>&1)
+		if [ "$out" = "0" ]; then
+			pass "read Part 1 $name markers: we decode OpenJPEG's codestream exactly"
+		else
+			fail "read Part 1 $name markers: $out samples differ"
+		fi
+	done
 fi
 
 echo
