@@ -23,6 +23,12 @@ type encoder struct {
 	img     image.Image
 	options *Options
 
+	// Tile-part index and length, in the order the tile-parts were written.
+	// TLM lists these, and it sits in the main header, so it can only be built
+	// after every tile-part exists.
+	tilePartIdx []int
+	tilePartLen []uint32
+
 	// Image parameters
 	width              int
 	height             int
@@ -803,10 +809,21 @@ func (e *encoder) generateCodestream() ([]byte, error) {
 		buf = append(buf, com...)
 	}
 
-	// Generate tile data
+	// Generate tile data.
+	//
+	// TLM lists every tile-part's length and lives in the main header, so the
+	// tiles have to exist before the header is complete. They are assembled
+	// here and the marker is spliced in above them rather than appended, which
+	// is the whole point: a reader gets the tile-part map without seeking to
+	// the end of the file.
 	tileData, err := e.generateTiles()
 	if err != nil {
 		return nil, err
+	}
+	if e.options.WritePacketLengths {
+		if tlm := generateTLM(e.tilePartIdx, e.tilePartLen); tlm != nil {
+			buf = append(buf, tlm...)
+		}
 	}
 	buf = append(buf, tileData...)
 
@@ -1214,7 +1231,8 @@ func computeNumBPS(data []int32) int {
 func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	jobs, layout := e.collectJobs(e.componentData, e.wideData, 0, 0, e.width, e.height)
 	encoded, numBPS, passes := e.encodeJobs(jobs)
-	return e.createTileHeader(tileIdx, e.assembleTileData(layout, jobs, encoded, numBPS, passes)), nil
+	data, pktLens := e.assembleTileData(layout, jobs, encoded, numBPS, passes)
+	return e.createTileHeader(tileIdx, data, pktLens), nil
 }
 
 // bandLayout is the code-block grid of one subband.
@@ -1430,7 +1448,7 @@ func (e *encoder) encodeJobs(jobs []codeBlockJob) ([][]byte, []int, [][]int) {
 
 // assembleTileData turns the encoded code-blocks of one tile into the bytes
 // that follow its SOD marker.
-func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) []byte {
+func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) ([]byte, []int) {
 	// Conforming T2 packets, verified end to end against both references:
 	// OpenJPH decodes the HT output and OpenJPEG the Part 1 MQ output to the
 	// exact source samples. Quality layers are real packets too — one per
@@ -1456,19 +1474,35 @@ func extractCodeBlock[T int32 | int64](data []T, stride, x, y, w, h int) []T {
 	return out
 }
 
-// createTileHeader creates the tile-part header.
-func (e *encoder) createTileHeader(tileIdx int, tileData []byte) []byte {
-	sotLength := 10
-	tilePartLength := uint32(14 + len(tileData))
+// createTileHeader creates the tile-part header, optionally carrying the PLT
+// segments that list this tile-part's packet lengths.
+//
+// PLT sits between the SOT segment and SOD, and its bytes count toward Psot,
+// so the length has to be computed after the segments exist rather than from
+// the tile data alone.
+func (e *encoder) createTileHeader(tileIdx int, tileData []byte, pktLens []int) []byte {
+	var plt []byte
+	if e.options.WritePacketLengths {
+		plt = generatePLT(pktLens)
+	}
 
-	header := make([]byte, 14)
+	sotLength := 10
+	tilePartLength := uint32(14 + len(plt) + len(tileData))
+
+	header := make([]byte, 12, 14+len(plt))
 	binary.BigEndian.PutUint16(header[0:2], uint16(codestream.SOT))
 	binary.BigEndian.PutUint16(header[2:4], uint16(sotLength))
 	binary.BigEndian.PutUint16(header[4:6], uint16(tileIdx))
 	binary.BigEndian.PutUint32(header[6:10], tilePartLength)
 	header[10] = 0 // Tile-part index
 	header[11] = 1 // Number of tile-parts
-	binary.BigEndian.PutUint16(header[12:14], uint16(codestream.SOD))
+
+	header = append(header, plt...)
+	header = binary.BigEndian.AppendUint16(header, uint16(codestream.SOD))
+
+	// Every tile-part's length, in order, is what TLM records.
+	e.tilePartIdx = append(e.tilePartIdx, tileIdx)
+	e.tilePartLen = append(e.tilePartLen, tilePartLength)
 
 	return append(header, tileData...)
 }

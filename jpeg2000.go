@@ -297,6 +297,20 @@ type Options struct {
 	// EnableEPH enables End of Packet Header markers.
 	EnableEPH bool
 
+	// WritePacketLengths writes the packet length markers: PLT in every
+	// tile-part header and TLM in the main header.
+	//
+	// They change nothing about the image. What they change is the cost of
+	// finding a packet: without them a reader learns where packet N begins
+	// only by parsing packets 0 to N-1, which over a network is a chain of
+	// small dependent round trips. With them the offsets follow by summation
+	// from a few kilobytes near the front of the file, so a rolling prefetch
+	// across a frame sequence becomes one ranged read per frame.
+	//
+	// The cost is a few bytes per packet, and any conforming decoder that does
+	// not want them skips both markers.
+	WritePacketLengths bool
+
 	// PrecinctSizes gives the precinct partition, one entry per resolution
 	// from the lowest upward, as base-2 exponents of width and height. A
 	// shorter list repeats its last entry for the resolutions above it, and an

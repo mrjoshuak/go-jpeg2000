@@ -90,34 +90,30 @@ walk decodes each one against the wrong precinct.
 image resolves to 7 of 85 packets and 2519 of 21127 bytes, measured in the gate
 on every run.
 
-### Packet length markers (PLT, TLM)
+### ~~Packet length markers (PLT, TLM)~~ — done, written, parsed and measured
 
 `PLT` lists every packet's length in the tile-part header; `TLM` does the same
-for tile-parts in the main header. Given either, every packet's byte offset
-follows by summation from a few kilobytes near the front of the file. We
-recognise all three marker codes and parse `PLM` and `TLM`, but write none of
-them.
+for tile-parts in the main header. Both are written when
+`Options.WritePacketLengths` is set, and `BuildPacketIndex` uses `PLT` when it
+is present instead of walking the packets.
 
-Without `PLT`, building a packet index means walking the codestream: read a
-packet header, learn its body length, skip, repeat. That is what
-`BuildPacketIndex` does today. It is correct, and it is the wrong shape for
-remote storage — a chain of small dependent reads where each round trip costs
-milliseconds, when the whole map could have come from one ranged request.
+The measurement the marker exists for, from the gate: indexing a 128x128 image
+reads 152 of 5486 bytes (2.8%), and a 512x512 image 788 of 85048 (0.9%). The
+fraction falls as the image grows, because the cost tracks the packet count
+rather than the data — which is what "a small constant near the front of the
+file" means in practice. Without the markers the whole codestream must be read,
+since a packet's length is only known once its header is parsed.
 
-This is what makes a rolling header prefetch practical for sequence playback:
-read the tile-part headers for the next few seconds of frames, and you hold the
-byte ranges for every packet in them before the playhead arrives. Offsets are
-content-dependent and differ in every frame, so an index from one frame cannot
-be reused across a sequence — the map has to be cheap to build per file rather
-than built once.
+The index built from the markers is checked against the index built by walking:
+same packets, same byte ranges, byte-identical contents. The two share no
+arithmetic, so their agreement is evidence rather than a round trip.
 
-Complementary to precincts: precincts make packets addressable by *region*,
-`PLT` makes them cheap to *locate*. Neither substitutes for the other.
-
-Done when we write `PLT` for every tile-part and `TLM` in the main header, a
-reference decoder still reads the result, our own index is built from them
-rather than by walking, and the byte count needed to index a file is measured
-and shown to be a small constant rather than proportional to the codestream.
+Worth recording how the one defect here was caught. Our first `TLM` set `Stlm`
+to 0x60, which puts 2 in the ST field and promises a two-byte tile index where a
+one-byte one was written. Every decode was still perfect, because a decoder that
+ignores `TLM` gets the right pixels; the only sign was a line on stderr from
+`opj_dump` — "TLM marker not of expected size". The gate now fails on any
+diagnostic from the reference's header parse, not merely on wrong pixels.
 
 ### HT refinement passes (SPP/MRP)
 

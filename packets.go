@@ -49,6 +49,26 @@ type PacketRange struct {
 type PacketIndex struct {
 	entries []packetEntry
 	addrMap map[PacketAddress]int // maps address to entries index
+
+	// headerBytes counts the bytes that had to be read to build this index,
+	// and fromPLT records whether the packet lengths came from PLT markers
+	// rather than from parsing every packet. See IndexCost.
+	headerBytes int
+	totalBytes  int
+	fromPLT     bool
+}
+
+// IndexCost reports how this index was built: how many bytes of the codestream
+// had to be read, out of how many, and whether the packet lengths came from PLT
+// markers rather than from walking the packets.
+//
+// The distinction is the point of PLT. Walking requires the whole codestream,
+// because a packet's length is only known once its header is parsed. With PLT
+// the lengths are listed in the tile-part headers, so the cost is the headers
+// alone — a small constant near the front of the file rather than a figure
+// proportional to the image.
+func (idx *PacketIndex) IndexCost() (read, total int, fromPLT bool) {
+	return idx.headerBytes, idx.totalBytes, idx.fromPLT
 }
 
 // ExtractPackets parses a J2K codestream and returns all packets with their data.
@@ -85,6 +105,11 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 
 	idx := &PacketIndex{
 		addrMap: make(map[PacketAddress]int),
+		// The main header had to be read whatever happens; the tile-part
+		// headers are added as they are walked.
+		headerBytes: headerEnd,
+		totalBytes:  len(cs),
+		fromPLT:     true,
 	}
 
 	// Walk tile-parts
@@ -136,23 +161,49 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 		// Scan for SOD marker in tile-part header. The scan bound is clamped
 		// to the real end of the buffer: Psot is file-supplied and routinely
 		// larger than the bytes actually present in a truncated file.
+		// Walk the marker segments rather than scanning for the SOD bytes.
+		// A PLT body is a list of seven-bit groups with a continuation bit, so
+		// it can legitimately contain the two bytes 0xFF93, and a scan would
+		// stop inside it and take the rest of the header for pixel data.
 		sodPos := -1
-		for p := tpHeaderPos; p+1 < tpEnd; p++ {
+		var pltLens []int
+		for p := tpHeaderPos; p+1 < tpEnd; {
 			m := binary.BigEndian.Uint16(cs[p : p+2])
 			if m == uint16(codestream.SOD) {
 				sodPos = p + 2 // data starts after SOD marker
 				break
 			}
+			if m>>8 != 0xFF {
+				return nil, fmt.Errorf("expected a marker in the tile-part header at offset %d, got 0x%04X", p, m)
+			}
+			if p+4 > tpEnd {
+				return nil, fmt.Errorf("truncated marker segment at offset %d", p)
+			}
+			segLen := int(binary.BigEndian.Uint16(cs[p+2 : p+4]))
+			if segLen < 2 || p+2+segLen > tpEnd {
+				return nil, fmt.Errorf("marker segment at offset %d declares %d bytes", p, segLen)
+			}
+			if m == uint16(codestream.PLT) {
+				_, lens, err := parsePLT(cs[p+4 : p+2+segLen])
+				if err != nil {
+					return nil, fmt.Errorf("PLT at offset %d: %w", p, err)
+				}
+				pltLens = append(pltLens, lens...)
+			}
+			p += 2 + segLen
 		}
 		if sodPos < 0 || sodPos > tpEnd {
 			return nil, fmt.Errorf("no SOD marker found in tile-part at offset %d", pos)
 		}
+		// Everything before SOD had to be read to find the packets; with PLT
+		// that is all that has to be read.
+		idx.headerBytes += sodPos - tpStart
 
 		// Tile data extends from SOD to end of tile-part
 		tileDataEnd := tpEnd
 
 		// Index packets in this tile
-		if err := idx.indexTilePackets(header, tileIndex, cs, sodPos, tileDataEnd); err != nil {
+		if err := idx.indexTilePackets(header, tileIndex, cs, sodPos, tileDataEnd, pltLens); err != nil {
 			return nil, fmt.Errorf("indexing tile %d packets: %w", tileIndex, err)
 		}
 
@@ -231,6 +282,7 @@ func (idx *PacketIndex) indexTilePackets(
 	tileIndex uint16,
 	cs []byte,
 	dataStart, dataEnd int,
+	pltLens []int,
 ) error {
 	numComp := int(header.NumComponents)
 	numRes := header.CodingStyle.NumResolutions()
@@ -310,6 +362,16 @@ func (idx *PacketIndex) indexTilePackets(
 	sop, eph := packetMarkers(header.CodingStyle.CodingStyle)
 	reader := newPktReader(tileData, sop, eph)
 
+	// Where the next packet begins when the lengths come from PLT, and which
+	// entry this tile-part's first packet is, so the two stay aligned.
+	pltPos := 0
+	firstEntry := len(idx.entries)
+	if len(pltLens) == 0 {
+		// One tile-part without PLT means the index as a whole was not built
+		// from the markers, whatever the others carry.
+		idx.fromPLT = false
+	}
+
 	// Generate packet addresses in progression order and record each packet's
 	// own bytes.
 	order := codestream.ProgressionOrder(header.CodingStyle.ProgressionOrder)
@@ -350,7 +412,24 @@ func (idx *PacketIndex) indexTilePackets(
 		if p < len(precincts) {
 			bands = precincts[p]
 		}
-		if bands != nil && !reader.overrun && reader.pos < len(tileData) {
+
+		if len(pltLens) > 0 {
+			// PLT listed this packet's length, so its position follows by
+			// summation and no packet header has to be parsed at all. This is
+			// the whole reason the marker exists: the walk below needs every
+			// preceding packet, this needs none of them.
+			n := len(idx.entries) - firstEntry
+			if n < len(pltLens) && !reader.overrun {
+				want := pltLens[n]
+				if want >= 0 && pltPos+want <= len(tileData) {
+					data = tileData[pltPos : pltPos+want]
+					off = dataStart + pltPos
+					pltPos += want
+				} else {
+					reader.overrun = true
+				}
+			}
+		} else if bands != nil && !reader.overrun && reader.pos < len(tileData) {
 			from := reader.pos
 			if err := readPacket(reader, bands, l, true); err == nil && !reader.overrun {
 				data = tileData[from:reader.pos]

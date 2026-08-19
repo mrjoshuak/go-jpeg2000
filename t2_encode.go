@@ -445,7 +445,11 @@ func layerContributions(encoded []byte, truncPoints []int, numLayers int, ht boo
 // codestream has a single precinct per resolution. A resolution that has no
 // samples carries no precinct, so it carries no packet either: the layout says
 // which resolutions are present.
-func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) []byte {
+// buildStandardTileData returns the bytes that follow SOD, and the length of
+// every packet in the order it was written. The lengths are what PLT records:
+// given them a reader knows where each packet starts without parsing any of
+// them.
+func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) ([]byte, []int) {
 	numRes := layout.numRes
 	numComp := 0
 	if numRes > 0 {
@@ -574,13 +578,16 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 		return w
 	}
 
+	var pktLens []int
 	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(layer, res, c, prec int) bool {
 		precincts := bandsFor[key{c, res}]
 		if prec >= len(precincts) {
 			return true
 		}
-		out = append(out, encodePacket(precincts[prec], layer)...)
+		pkt := encodePacket(precincts[prec], layer)
+		out = append(out, pkt...)
+		pktLens = append(pktLens, len(pkt))
 		return true
 	})
-	return out
+	return out, pktLens
 }

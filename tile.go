@@ -120,7 +120,8 @@ func (e *encoder) encodeTileAt(tileIdx int) ([]byte, error) {
 
 	jobs, layout := e.collectJobs(comps, comps64, x0, y0, x1, y1)
 	encoded, numBPS, passes := e.encodeJobs(jobs)
-	return e.createTileHeader(tileIdx, e.assembleTileData(layout, jobs, encoded, numBPS, passes)), nil
+	data, pktLens := e.assembleTileData(layout, jobs, encoded, numBPS, passes)
+	return e.createTileHeader(tileIdx, data, pktLens), nil
 }
 
 // transformTile applies the wavelet decomposition to one tile-component,

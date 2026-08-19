@@ -706,6 +706,7 @@ func main() {
 	quality := arg(8, 0) // 0 asks for lossless
 	order := arg(9, 0)   // Table A.16: 0=LRCP, 1=RLCP, 2=RPCL, 3=PCRL, 4=CPRL
 	precexp := arg(10, 0) // 0 leaves the maximal precinct; otherwise 2^n per side
+	pktlen := arg(11, 0)  // non-zero writes PLT in every tile-part and TLM in the main header
 
 	maxv := (1 << depth) - 1
 	sample := func(x, y, c int) int {
@@ -760,6 +761,7 @@ func main() {
 				jp2.PrecinctSize{WidthExp: uint8(precexp), HeightExp: uint8(precexp)})
 		}
 	}
+	opts.WritePacketLengths = pktlen != 0
 	if quality > 0 {
 		opts.Quality = quality
 	}
@@ -863,6 +865,66 @@ GOEOF
 		p1_write "layers$layers" 64 3 0 1 8 "$layers"
 	done
 	p1_write "layers4_tiled" 64 3 16 1 8 4
+
+	# Packet length markers: PLT in every tile-part header, TLM in the main
+	# header.
+	#
+	# These do not change the image, so a decode check alone is close to
+	# vacuous: a decoder that ignores both markers returns the right pixels
+	# whatever they contain. The marker that is present but malformed is the
+	# real risk, and it is silent — OpenJPEG reported our first TLM as "not of
+	# expected size" and carried on decoding perfectly, because Stlm claimed a
+	# two-byte tile index (0x60) where a one-byte one was written (0x50). So
+	# what is asserted here is that the reference parses the main header with
+	# no diagnostic at all, not merely that the pixels survive.
+	plt_write() {
+		name=$1
+		shift
+		# Three components come back as P6; anything else as P5. The reference
+		# raster's own format is what the comparison is against.
+		local ext=pgm
+		[ "${4:-1}" = 3 ] && ext=ppm
+		f="$WORK/plt_$name.j2k"
+		if ! ref=$(go run "$WORK/p1enc.go" "$f" "$@" 2>&1); then
+			fail "write PLT/TLM $name: our encoder failed: $(echo "$ref" | head -1)"
+			return
+		fi
+		if ! err=$(opj_decompress -i "$f" -o "$f.out.$ext" 2>&1); then
+			fail "write PLT/TLM $name: OpenJPEG refused our codestream: $(echo "$err" | grep -i error | head -1 | cut -c1-70)"
+			return
+		fi
+		if ! d=$(cmp_raster "$f.out.$ext" "$ref"); then
+			fail "write PLT/TLM $name: $d"
+			return
+		fi
+		if command -v opj_dump >/dev/null 2>&1; then
+			diag=$(opj_dump -i "$f" 2>&1 | grep -iE "warning|error" | head -1)
+			if [ -n "$diag" ]; then
+				fail "write PLT/TLM $name: the reference decodes it but complains: $(echo "$diag" | cut -c1-95)"
+				return
+			fi
+			pass "write PLT/TLM $name: OpenJPEG decodes it exactly and parses both markers without complaint"
+		else
+			pass "write PLT/TLM $name: OpenJPEG decodes it exactly (opj_dump absent, markers not inspected)"
+		fi
+	}
+
+	# p1enc argument 11 turns the markers on.
+	plt_write "plain" 64 3 0 1 8 1 0 0 0 1
+	plt_write "precincts" 64 3 0 1 8 1 0 0 5 1
+	plt_write "tiled" 128 3 64 1 8 1 0 0 5 1
+	plt_write "rgb" 64 3 0 3 8 1 0 0 5 1
+	plt_write "layers3" 64 3 0 1 8 3 0 0 5 1
+
+	# An index built from the markers must name the same packets, at the same
+	# byte ranges, as one built by parsing every packet header; and it must
+	# cost the headers rather than the file.
+	if out=$(go test ./ -run 'TestPLTIndex' -v 2>&1); then
+		cost=$(printf '%s\n' "$out" | sed -n 's/.*size *\([0-9]* *: indexed .*\)$/\1/p' | tail -1)
+		pass "PLT index: built from the markers, identical to the walked index (${cost:-measured})"
+	else
+		fail "PLT index: $(printf '%s\n' "$out" | grep -E 'lengthmarkers_index_test' | head -1 | cut -c1-110)"
+	fi
 
 	# Explicit precinct partitions, written by us and read by OpenJPEG.
 	#
