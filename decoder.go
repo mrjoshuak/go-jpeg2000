@@ -676,10 +676,6 @@ func (d *decoder) indexTileParts() map[int][2]int {
 		if lsot := binary.BigEndian.Uint16(cs[i+2 : i+4]); lsot != 10 {
 			continue
 		}
-		// Verify SOD marker at i+12
-		if cs[i+12] != 0xFF || cs[i+13] != 0x93 {
-			continue
-		}
 		isot := int(binary.BigEndian.Uint16(cs[i+4 : i+6]))
 		if _, seen := out[isot]; seen {
 			continue
@@ -687,7 +683,43 @@ func (d *decoder) indexTileParts() map[int][2]int {
 		// Read tile-part length. Psot = 0 means the tile-part runs to the end
 		// of the codestream.
 		psot := binary.BigEndian.Uint32(cs[i+6 : i+10])
-		dataStart := i + 14
+		tpEnd := len(cs)
+		if psot > 0 && i+int(psot) < tpEnd {
+			tpEnd = i + int(psot)
+		}
+		// Walk the tile-part header's marker segments to SOD.
+		//
+		// This used to require SOD at exactly i+12, which is true only when
+		// the tile-part header is empty. A PLT marker sits between SOT and
+		// SOD, so a codestream carrying packet lengths — everything
+		// Options.WritePacketLengths writes — had every SOT rejected here,
+		// every tile indexed as absent, and decoded to DC-shifted nothing:
+		// 99.6% of samples wrong on a grey ramp, while OpenJPEG read the same
+		// bytes correctly. Scanning for the SOD bytes instead would be no
+		// better: a PLT body is seven-bit groups with a continuation bit and
+		// can legitimately contain 0xFF93.
+		dataStart := -1
+		for p := i + 12; p+1 < tpEnd; {
+			m := binary.BigEndian.Uint16(cs[p : p+2])
+			if m == uint16(codestream.SOD) {
+				dataStart = p + 2
+				break
+			}
+			if m>>8 != 0xFF || p+4 > tpEnd {
+				break
+			}
+			segLen := int(binary.BigEndian.Uint16(cs[p+2 : p+4]))
+			if segLen < 2 || p+2+segLen > tpEnd {
+				break
+			}
+			p += 2 + segLen
+		}
+		if dataStart < 0 {
+			// Not a tile-part header after all; this SOT was a false positive
+			// in compressed data, which is what the old SOD check screened
+			// for.
+			continue
+		}
 		dataEnd := len(cs)
 		if psot > 0 {
 			dataEnd = i + int(psot)

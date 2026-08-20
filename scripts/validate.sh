@@ -936,6 +936,30 @@ GOEOF
 		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test|region_(cost|planes)_test' | head -1 | cut -c1-110)"
 	fi
 
+	# The other half of PLT, and the half an external oracle cannot see.
+	#
+	# Everything above asks OpenJPEG whether our PLT codestream is valid. It
+	# said yes, and this library still could not read its own output: the tile
+	# index required SOD immediately after SOT, which holds only for an empty
+	# tile-part header, so a codestream carrying PLT had every tile indexed as
+	# absent and decoded to DC-shifted nothing — 99.6% of samples wrong while
+	# the reference read the same bytes correctly.
+	#
+	# A defect that lives only on this side of the round trip is invisible to
+	# an oracle by construction. The check below is against the source image,
+	# not against a decode of a PLT-free codestream, since those two could
+	# agree on being wrong.
+	if out=$(go test ./ -run 'TestPacketLengthMarkers' -v 2>&1); then
+		n=$(printf '%s\n' "$out" | grep -cE '^\s*--- PASS')
+		if [ "$n" -lt 4 ]; then
+			fail "read our own PLT: only $n assertions ran"
+		else
+			pass "read our own PLT: a codestream we wrote with packet lengths is one we can read, with and without precincts, and the markers change no sample"
+		fi
+	else
+		fail "read our own PLT: $(printf '%s\n' "$out" | grep -E '^\s+plt_roundtrip_test' | head -1 | cut -c1-110)"
+	fi
+
 	# Component subsampling (XRsiz, YRsiz above 1).
 	#
 	# The components of a subsampled image sit on different grids, and one
