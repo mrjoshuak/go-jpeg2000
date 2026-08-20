@@ -35,6 +35,13 @@ type decoder struct {
 	region       *image.Rectangle
 	regionBytes  int
 	skippedBytes int
+
+	// reduceRes is how many of the finest resolution levels the decode is not
+	// reconstructing. Their code-blocks contribute nothing to the output and
+	// are not entropy-decoded, which is most of the saving a reduced decode
+	// exists for: the finest resolution alone carries about 72% of a
+	// codestream's code-block bytes and the next about 22%.
+	reduceRes int
 }
 
 // newDecoder creates a new decoder.
@@ -444,6 +451,7 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 			d.region = r
 		}
 	}
+	d.reduceRes = reduce
 	precision := h.ComponentInfo[0].Precision()
 	signed := h.ComponentInfo[0].IsSigned()
 
@@ -475,7 +483,9 @@ func (d *decoder) decodeTiles(cfg *Config) (image.Image, error) {
 	// The wide planes carry the inverse colour transform themselves, because
 	// the chrominance differences it undoes are what needed the extra bits.
 	if wide != nil {
-		wide.finish(h, componentData)
+		if err := wide.finish(h, componentData); err != nil {
+			return nil, err
+		}
 	}
 
 	// Check if any component has NLT (float mode)
@@ -1007,6 +1017,7 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 			d.region = r
 		}
 	}
+	d.reduceRes = reduce
 	precision := h.ComponentInfo[0].Precision()
 
 	// Check if any component has NLT (float mode)
@@ -1041,7 +1052,9 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 	}
 
 	if wide != nil {
-		wide.finish(h, componentData)
+		if err := wide.finish(h, componentData); err != nil {
+			return nil, 0, 0, err
+		}
 	}
 
 	// Apply inverse MCT
@@ -1089,16 +1102,6 @@ func (d *decoder) decodePlanes(cfg *Config) (componentData [][]int32, width, hei
 
 // decodeHalf decodes the image as a HalfImage.
 func (d *decoder) decodeHalf(cfg *Config) (*HalfImage, error) {
-	// A reduced-resolution decode stops the inverse wavelet at an LL subband,
-	// so the surviving int32 values are wavelet coefficients in the
-	// sign-magnitude domain, not samples. Reinterpreting those as binary16
-	// yields arbitrary bit patterns -- measured: a smooth 0..1 gradient comes
-	// back with negative values. Refuse rather than return silent garbage.
-	if cfg != nil && cfg.ReduceResolution > 0 {
-		return nil, fmt.Errorf("jpeg2000: ReduceResolution is not supported for half decoding: " +
-			"reduced-resolution output is wavelet-domain data, not half samples")
-	}
-
 	if err := d.readFormat(); err != nil {
 		return nil, fmt.Errorf("reading format: %w", err)
 	}
@@ -1172,11 +1175,6 @@ func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
 	// arbitrary values: measured on a smooth 0..2 ramp, samples came back off
 	// by 175 while the dimensions were right, which is what made it look like
 	// it worked.
-	if cfg != nil && cfg.ReduceResolution > 0 && d.headerHasNLT() {
-		return nil, fmt.Errorf("jpeg2000: ReduceResolution is not supported for a codestream with an NLT point transform: " +
-			"reduced-resolution output is wavelet-domain data, not float samples")
-	}
-
 	return d.decodeTilesFloat(cfg)
 }
 

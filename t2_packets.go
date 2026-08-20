@@ -694,6 +694,24 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 							if !cb.included || len(cb.data) == 0 {
 								continue
 							}
+							// A reduced decode reconstructs only the lower
+							// resolutions, so the blocks above them contribute
+							// nothing to any output sample. Skipping them is
+							// where a reduced decode's saving lives, and it is
+							// the largest saving available anywhere here: the
+							// finest resolution alone carries about 72% of a
+							// codestream's code-block bytes.
+							//
+							// The packets are still parsed. Their headers
+							// carry the inclusion and length state the packets
+							// after them are read against, and without PLT
+							// their bodies are what separates one packet from
+							// the next — so what is skipped is the block
+							// coder, which is where the time goes.
+							if d.skipForResolution(res, numRes) {
+								d.skippedBytes += len(cb.data)
+								continue
+							}
 							// A region decode entropy-decodes only the blocks
 							// that can reach it. The saving is the point: a
 							// viewport should cost a viewport, and the block
@@ -897,6 +915,22 @@ func log2Floor(n int) int {
 		l++
 	}
 	return l
+}
+
+// skipForResolution reports whether a code-block belongs to a resolution the
+// decode is not reconstructing.
+//
+// A decode reduced by k produces resolutions 0 through numRes-1-k; the bands of
+// every resolution above that are discarded by the inverse wavelet, so
+// entropy-decoding them is pure waste. Before this they were decoded in full
+// and thrown away — a reduced decode returned the right samples at every level
+// and cost exactly what a full one did, which is the shape of saving that
+// isn't one.
+func (d *decoder) skipForResolution(res, numRes int) bool {
+	if d.reduceRes <= 0 {
+		return false
+	}
+	return res > numRes-1-d.reduceRes
 }
 
 // skipForRegion reports whether a code-block cannot contribute to the region

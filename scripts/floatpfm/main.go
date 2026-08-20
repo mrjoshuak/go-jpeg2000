@@ -12,7 +12,7 @@
 // Modes:
 //
 //	floatpfm enc <src.pfm> <out.j2c> [numres [tile]]  encode with EncodeFloat
-//	floatpfm dec <in.j2c> <out.pfm>             decode with DecodeFloat
+//	floatpfm dec <in.j2c> <out.pfm> [reduce]    decode with DecodeFloat
 //	floatpfm cmp <a.pfm> <b.pfm>                compare bit patterns
 //
 // cmp compares the raw sample bits, not the numeric values: -0.0 and +0.0 are
@@ -193,7 +193,21 @@ func main() {
 			fail("%v", err)
 		}
 		defer f.Close()
-		img, err := jp2.DecodeFloat(f)
+		// An optional fourth argument asks for a reduced-resolution decode,
+		// which is the only way to compare one against ojph_expand -skip_res.
+		reduce := 0
+		if len(os.Args) > 4 {
+			reduce, err = strconv.Atoi(os.Args[4])
+			if err != nil {
+				fail("reduce: %v", err)
+			}
+		}
+		var img *jp2.FloatImage
+		if reduce > 0 {
+			img, err = jp2.DecodeFloatConfig(f, &jp2.Config{ReduceResolution: reduce})
+		} else {
+			img, err = jp2.DecodeFloat(f)
+		}
 		if err != nil {
 			fail("decode: %v", err)
 		}

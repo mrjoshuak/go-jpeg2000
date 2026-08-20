@@ -28,7 +28,9 @@ package jpeg2000
 //   - the Ccap^15 B_p field, which declares that budget in the CAP marker.
 
 import (
+	"errors"
 	"fmt"
+	"math"
 
 	"github.com/mrjoshuak/go-jpeg2000/internal/codestream"
 	"github.com/mrjoshuak/go-jpeg2000/internal/dwt"
@@ -329,9 +331,31 @@ func newWideDecode(numComp, n int) *wideDecode {
 	return w
 }
 
+// ErrSampleNotRepresentable is returned when a decoded sample has no value in
+// the sample domain to be mapped back to.
+//
+// It arises only from a reduced-resolution decode of binary32 content that uses
+// the extremes of the NLT Type 3 word. A full decode reconstructs the original
+// words, which fit int32 by construction; a reduced decode returns an LL band,
+// whose coefficients are a lowpass of those words and can leave the range NLT
+// Type 3 maps from — there is then no float bit pattern to return.
+//
+// The alternative was what this did before: narrow with a plain int32
+// conversion and return the wrapped value. That produced a sample bearing no
+// relation to the data — measured against OpenJPH on a fixture of arbitrary bit
+// patterns, 9 of 256 samples differed, each by exactly the sign-magnitude
+// complement, and nothing reported it.
+var ErrSampleNotRepresentable = errors.New("jpeg2000: decoded sample is outside the range the point transform maps from")
+
 // finish applies the inverse colour transform and narrows the planes back to
 // the int32 sample words the rest of the decoder works in.
-func (w *wideDecode) finish(h *codestream.Header, dst [][]int32) {
+//
+// The narrowing is checked rather than truncating. The planes are int64 exactly
+// because a reversible transform over binary32 words needs 33 bits, and up to
+// 35 once the RCT has widened the chrominance differences; a value that still
+// does not fit int32 at this point is one the sample domain cannot express, and
+// saying so beats returning the low 32 bits of it.
+func (w *wideDecode) finish(h *codestream.Header, dst [][]int32) error {
 	if h.CodingStyle.MultipleComponentXf != 0 && len(w.planes) >= 3 {
 		mct.InverseRCT64(w.planes[0], w.planes[1], w.planes[2])
 	}
@@ -341,9 +365,21 @@ func (w *wideDecode) finish(h *codestream.Header, dst [][]int32) {
 		}
 		src := w.planes[c]
 		for i := range dst[c] {
-			if i < len(src) {
-				dst[c][i] = int32(src[i])
+			if i >= len(src) {
+				continue
 			}
+			v := src[i]
+			// The representable set is the whole int32 range, both ends
+			// included. -2^31 is not a spare pattern here: nltType3 maps it
+			// to the float bits 0xFFFFFFFF, which the hostile-content fixture
+			// carries, so excluding it rejects a sample the codec round-trips
+			// exactly.
+			if v > math.MaxInt32 || v < math.MinInt32 {
+				return fmt.Errorf("%w: component %d sample %d is %d",
+					ErrSampleNotRepresentable, c, i, v)
+			}
+			dst[c][i] = int32(v)
 		}
 	}
+	return nil
 }

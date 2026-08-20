@@ -110,7 +110,7 @@ PYEOF
 # and a spread of exponents and signs. Small positive integers are what hid the
 # 32-bit overflow on this path -- they occupy a handful of magnitude bits, so no
 # coefficient ever needed the 33rd.
-python3 - "$WORK/src.pfm" "$WORK/src3.pfm" <<'PYEOF'
+python3 - "$WORK/src.pfm" "$WORK/src3.pfm" "$WORK/srcb.pfm" <<'PYEOF'
 import struct, sys
 
 N = 32
@@ -134,6 +134,25 @@ for path, nc in ((sys.argv[1], 1), (sys.argv[2], 3)):
             for c in range(nc):
                 out.append(struct.pack('<I', bits(y * N + x, c)))
     open(path, 'wb').write(b''.join(out))
+
+# The same content with every magnitude held under 2^30.
+#
+# It exists for the reduced-resolution checks and nowhere else. A reduced
+# decode returns an LL band, whose coefficients are a lowpass of the NLT words
+# rather than the words themselves, so content using the extremes of that word
+# produces coefficients with no float bit pattern to map back to. That is not a
+# resolution the format defines an answer for, and comparing two decoders'
+# handling of it measures which way each overflows. Bounding the magnitudes
+# keeps every coefficient representable at every level, so the comparison is
+# about the decode. The unbounded fixture is still used, to check that the
+# non-representable case is reported rather than wrapped.
+out = [b'Pf\n', b'%d %d\n-1.0\n' % (N, N)]
+for row in range(N):
+    y = N - 1 - row
+    for x in range(N):
+        b = bits(y * N + x, 0)
+        out.append(struct.pack('<I', (b & 0x80000000) | (b & 0x3FFFFFFF)))
+open(sys.argv[3], 'wb').write(b''.join(out))
 PYEOF
 
 # Compare a decoded PGM/PPM against the reference raster, tolerating the
@@ -897,19 +916,23 @@ GOEOF
 	done
 	p1_write "layers4_tiled" 64 3 16 1 8 4
 
-	# Decoder configuration options that are declared but cannot be honoured.
+	# Decoder configuration options that ask for less than the whole image.
 	#
-	# A decoder that silently ignores an option is worse than one that lacks
-	# it: a caller sizing a buffer for a 32x16 region and receiving the whole
-	# 64x32 image gets no indication the request was dropped. Config.DecodeArea
-	# was documented as "specifies a region to decode" and read by nothing, and
-	# ReduceResolution returned wavelet-domain values as floats for any
-	# codestream carrying an NLT point transform — dimensions correct, samples
-	# off by 175 on a ramp spanning 0 to 2.
+	# A decoder that silently ignores such an option is worse than one that
+	# lacks it: a caller sizing a buffer for a 32x16 region and receiving the
+	# whole 64x32 image gets no indication the request was dropped.
+	# Config.DecodeArea was documented as "specifies a region to decode" and
+	# read by nothing; both it and ReduceResolution now do what they say, and
+	# both are measured for what they save rather than only that they run.
 	#
-	# Both now refuse. What is checked here is the refusal *and* the cases that
-	# must keep working, since a guard that rejects everything would satisfy
-	# half of this.
+	# ReduceResolution was refused for a while on the strength of a comparison
+	# against a downsample of the full decode — "off by 175 on a ramp spanning
+	# 0 to 2". That was the wrong oracle: the LL band at resolution r is the
+	# image the wavelet reconstructs at that scale, not an arithmetic average
+	# of the finer one, so the two disagree by construction. Against the
+	# reference's own reduced decode, checked below, this library was already
+	# bit-exact. The refusal cost a real capability for a measurement error,
+	# which is why the external check now runs rather than a refusal assertion.
 	# Region decode, both halves: the samples must be the ones a full decode
 	# produces for that rectangle, exactly, and getting them must cost less
 	# than decoding everything. A region decode that produced the right pixels
@@ -934,6 +957,131 @@ GOEOF
 		done
 	else
 		fail "decoder options: $(printf '%s\n' "$out" | grep -E 'config_(options|int)_test|region_(cost|planes)_test' | head -1 | cut -c1-110)"
+	fi
+
+	# Reduced-resolution decode against the reference's own reduced decode.
+	#
+	# This is the oracle the refusal never used. ojph_expand -skip_res N and
+	# opj_decompress -r N each reconstruct the same resolution this library is
+	# asked for, so the comparison is between two decoders reading one
+	# codestream — which is the claim worth making, and the only one that does
+	# not require agreeing first on what a "downsample" means.
+	#
+	# Both entry points are covered because an EXR HTJ2K chunk is float or
+	# half and they are different functions. The half path refused this
+	# outright until it was measured, so it has never been compared to anything.
+	if ! command -v ojph_expand >/dev/null 2>&1; then
+		gap "reduced resolution float: ojph_expand is not installed"
+	else
+		rr_fail=0
+		rr_ran=0
+		rr_last=""
+		for nd in 2 3 5; do
+			rf="$WORK/rr_$nd.j2c"
+			if ! ojph_compress -i "$WORK/srcb.pfm" -o "$rf" \
+				-num_decomps "$nd" -reversible true >/dev/null 2>&1; then
+				gap "reduced resolution float -num_decomps $nd: no fixture"
+				continue
+			fi
+			for r in 1 2 3; do
+				[ "$r" -gt "$nd" ] && continue
+				if ! ojph_expand -i "$rf" -o "$rf.ref$r.pfm" -skip_res "$r" >/dev/null 2>&1; then
+					gap "reduced resolution float nd=$nd r=$r: the oracle would not produce it"
+					continue
+				fi
+				if ! out=$(go run ./scripts/floatpfm dec "$rf" "$rf.ours$r.pfm" "$r" 2>&1); then
+					fail "reduced resolution float nd=$nd r=$r: $out"
+					rr_fail=1
+					continue
+				fi
+				rr_ran=$((rr_ran + 1))
+				if out=$(go run ./scripts/floatpfm cmp "$rf.ref$r.pfm" "$rf.ours$r.pfm" 2>&1); then
+					rr_last="nd=$nd r=$r"
+				else
+					fail "reduced resolution float nd=$nd r=$r: $out"
+					rr_fail=1
+				fi
+			done
+		done
+		if [ "$rr_ran" -eq 0 ]; then
+			fail "reduced resolution float: nothing was compared"
+		elif [ "$rr_fail" -eq 0 ]; then
+			pass "reduced resolution float: $rr_ran decodes bit-identical to ojph_expand -skip_res, up to $rr_last"
+		fi
+	fi
+
+	# The half entry point, against OpenJPEG.
+	#
+	# It is a different function from the float one and it refused a reduced
+	# decode outright until this was measured, so it had never been compared
+	# with anything. It is also the one an EXR chunk of half channels reaches,
+	# which is most of them.
+	if ! command -v opj_decompress >/dev/null 2>&1; then
+		gap "reduced resolution half: opj_decompress is not installed"
+	elif ! go build -o "$WORK/halfpgm" ./scripts/halfpgm/ 2>"$WORK/halfpgm.err"; then
+		fail "reduced resolution half: could not build scripts/halfpgm: $(head -1 "$WORK/halfpgm.err")"
+	elif ! "$WORK/halfpgm" enc "$WORK/hp.j2c" "$WORK/hp_src.pgm" 4 >/dev/null 2>&1; then
+		fail "reduced resolution half: could not write a fixture"
+	else
+		hp_fail=0
+		hp_ran=0
+		for r in 0 1 2 3; do
+			if ! opj_decompress -i "$WORK/hp.j2c" -o "$WORK/hp_ref$r.pgm" -r "$r" >/dev/null 2>&1; then
+				gap "reduced resolution half r=$r: the oracle would not produce it"
+				continue
+			fi
+			if ! out=$("$WORK/halfpgm" dec "$WORK/hp.j2c" "$WORK/hp_ours$r.pgm" "$r" 2>&1); then
+				fail "reduced resolution half r=$r: $out"
+				hp_fail=1
+				continue
+			fi
+			hp_ran=$((hp_ran + 1))
+			if ! d=$(cmp_raster "$WORK/hp_ref$r.pgm" "$WORK/hp_ours$r.pgm"); then
+				fail "reduced resolution half r=$r: $d"
+				hp_fail=1
+			fi
+		done
+		if [ "$hp_ran" -eq 0 ]; then
+			fail "reduced resolution half: nothing was compared"
+		elif [ "$hp_fail" -eq 0 ]; then
+			pass "reduced resolution half: $hp_ran decodes bit-identical to opj_decompress -r, full resolution through 8x8"
+		fi
+	fi
+
+	# A reduced decode of content that uses the extremes of the NLT word has no
+	# answer in the sample domain: the LL coefficient leaves the range the point
+	# transform maps from. It must say so. Before this it narrowed with a plain
+	# int32 conversion and returned the wrapped value — 9 of 256 samples wrong
+	# against OpenJPH, each by exactly the sign-magnitude complement, silently.
+	#
+	# The full decode of the same fixture must stay exact, or this has been
+	# "fixed" by refusing the content rather than the impossible request.
+	ovf="$WORK/rr_ovf.j2c"
+	if ! command -v ojph_compress >/dev/null 2>&1; then
+		gap "reduced resolution overflow: ojph_compress is not installed"
+	elif ! ojph_compress -i "$WORK/src.pfm" -o "$ovf" -num_decomps 2 -reversible true >/dev/null 2>&1; then
+		gap "reduced resolution overflow: no fixture"
+	elif ! go run ./scripts/floatpfm dec "$ovf" "$ovf.full.pfm" 0 >/dev/null 2>&1; then
+		fail "reduced resolution overflow: the full decode of the extreme fixture broke"
+	elif ! go run ./scripts/floatpfm cmp "$WORK/src.pfm" "$ovf.full.pfm" >/dev/null 2>&1; then
+		fail "reduced resolution overflow: the full decode of the extreme fixture is no longer exact"
+	elif out=$(go run ./scripts/floatpfm dec "$ovf" "$ovf.r1.pfm" 1 2>&1); then
+		fail "reduced resolution overflow: a non-representable reduced decode returned samples instead of reporting"
+	elif ! printf '%s\\n' "$out" | grep -q "outside the range"; then
+		fail "reduced resolution overflow: it failed without naming the cause: $(printf '%s\\n' "$out" | head -1 | cut -c1-90)"
+	else
+		pass "reduced resolution overflow: a coefficient with no sample to map to is reported, not wrapped, and the full decode of the same fixture stays exact"
+	fi
+
+	# And it must cost less, or it is a full decode with a smaller output —
+	# which is exactly what it was until the resolutions above the target
+	# stopped being entropy-decoded.
+	if out=$(go test ./ -run 'TestReduceResolutionCostsLess' -v 2>&1); then
+		line=$(printf '%s\n' "$out" | sed -n 's/.*\(reduce 1: .*\)$/\1/p' | head -1)
+		deep=$(printf '%s\n' "$out" | sed -n 's/.*\(reduce 5: .*\)$/\1/p' | head -1)
+		pass "reduced resolution costs less: $line; $deep"
+	else
+		fail "reduced resolution costs less: $(printf '%s\n' "$out" | grep -E 'config_options_test' | head -1 | cut -c1-110)"
 	fi
 
 	# The other half of PLT, and the half an external oracle cannot see.
