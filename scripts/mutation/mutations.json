@@ -1,0 +1,139 @@
+{
+  "_comment": [
+    "One deliberate defect per entry, applied by scripts/mutation/run.py and then reverted.",
+    "",
+    "This harness exists to answer the ROADMAP item 'Retire the remaining",
+    "self-referential tests' with a measurement instead of an opinion. A test is",
+    "self-referential when it checks this library against itself, and the way",
+    "that fails is specific: a defect applied identically to the encoder and the",
+    "decoder round-trips perfectly. nltType3 is the sharpest case — it is ONE",
+    "function shared by both directions and an involution besides, so a wrong",
+    "mask still undoes itself. Each entry below records which pre-existing test",
+    "survives the defect (the self-referentiality being measured) and which",
+    "spec- or cost-anchored test kills it.",
+    "",
+    "  id              stable name, used with --id",
+    "  codec           which area this is evidence about",
+    "  description     what the defect is, in one line",
+    "  spec            the clause or measurement the correct behaviour comes from",
+    "  symmetric       true when the defect is applied identically to both",
+    "                  directions, which a round trip cannot see by construction",
+    "  edits           exact-text replacements; count must match, so a refactor",
+    "                  that moves the anchor fails loudly instead of testing nothing",
+    "  existing_tests  the tests that claimed to cover this code before the harness",
+    "  added_tests     the anchored tests that actually kill the defect",
+    "  expect          the measured outcome per phase; run.py exits non-zero on a mismatch"
+  ],
+  "mutations": [
+    {
+      "id": "nlt-mask-narrow",
+      "codec": "NLT",
+      "description": "nltType3 masks with 2^(p-2)-1 instead of 2^(p-1)-1, in both directions at once",
+      "spec": "The NLT Type 3 point transform maps a negative two's-complement sample to sign-magnitude by XOR with 2^(precision-1)-1; it is what OpenJPEG and OpenJPH read and write byte-for-byte, which the gate's float and half rows assert against both oracles. Because nltType3 is one function used by encoder and decoder alike, and an involution, a wrong mask still undoes itself: every round trip passes while the wire carries values that mean something else to every other reader. This is the defect shape that hid the ACES matrices, the floatvector count prefix and the chroma encoding in the sibling repository.",
+      "symmetric": true,
+      "edits": [
+        {
+          "file": "nlt.go",
+          "count": 1,
+          "old": "\tmask := int32(uint32(1)<<(precision-1) - 1)",
+          "new": "\tmask := int32(uint32(1)<<(precision-2) - 1)"
+        }
+      ],
+      "existing_tests": [
+        {"pkg": "./", "run": "TestEncodeFloatGrayscaleRoundtrip"}
+      ],
+      "added_tests": [
+        {"pkg": "./", "run": "TestNLTType3MatchesTheDefinition"}
+      ],
+      "expect": {"added": "killed", "existing": "survived"}
+    },
+    {
+      "id": "plt-sod-at-fixed-offset",
+      "codec": "T2",
+      "description": "indexTileParts requires SOD immediately after SOT, as it did until v1.5.5",
+      "spec": "ISO/IEC 15444-1 A.4.2: a tile-part header may carry marker segments (PLT among them) between SOT and SOD, so SOD sits at a fixed offset only when that header is empty. Requiring it there rejects every SOT of a codestream carrying packet lengths, indexes every tile as absent, and decodes to DC-shifted nothing — measured at 99.6% of samples wrong on a grey ramp while OpenJPEG read the same bytes correctly. The gate's PLT rows could not see it either: they validated the encoder against OpenJPEG, and the encoder was right the whole time.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "decoder.go",
+          "count": 1,
+          "old": "\t\tfor p := i + 12; p+1 < tpEnd; {",
+          "new": "\t\tfor p := i + 12; p+1 < tpEnd && p == i+12; {"
+        }
+      ],
+      "existing_tests": [
+        {"pkg": "./", "run": "TestRoundtrip_Grayscale_Lossless"}
+      ],
+      "added_tests": [
+        {"pkg": "./", "run": "TestPacketLengthMarkersRoundTrip"}
+      ],
+      "expect": {"added": "killed", "existing": "survived"}
+    },
+    {
+      "id": "reduced-resolution-decodes-everything",
+      "codec": "T2",
+      "description": "A reduced decode entropy-decodes every resolution and discards the ones above the target",
+      "spec": "A decode reduced by k reconstructs resolutions 0 through numRes-1-k; the bands above contribute nothing to any output sample, and the finest resolution alone carries about 72% of a codestream's code-block bytes. Decoding them anyway returns the right samples at every level for exactly what a full decode costs — the shape of saving that isn't one, which is what this library shipped until v1.5.6. Only the cost measurement can see it: the samples are correct either way.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "t2_packets.go",
+          "count": 1,
+          "old": "\treturn res > numRes-1-d.reduceRes",
+          "new": "\treturn false"
+        }
+      ],
+      "existing_tests": [
+        {"pkg": "./", "run": "TestReduceResolutionIsStableAcrossPaths"}
+      ],
+      "added_tests": [
+        {"pkg": "./", "run": "TestReduceResolutionCostsLess"}
+      ],
+      "expect": {"added": "killed", "existing": "survived"}
+    },
+    {
+      "id": "region-skip-disabled",
+      "codec": "T2",
+      "description": "A region decode entropy-decodes every code-block and crops",
+      "spec": "A code-block whose band rectangle, grown by the synthesis margin, cannot reach the region contributes nothing to it and need not be entropy-decoded — the saving is most of the point of Config.DecodeArea. Decoding everything and cropping satisfies every correctness check and none of the purpose, which is why the region tests assert the decoded and skipped byte counts and not only the samples.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "t2_packets.go",
+          "count": 1,
+          "old": "\tif d.region == nil || bg == nil || tc == nil {",
+          "new": "\tif true || d.region == nil || bg == nil || tc == nil {"
+        }
+      ],
+      "existing_tests": [
+        {"pkg": "./", "run": "TestDecodeAreaMatchesTheFullDecode"}
+      ],
+      "added_tests": [
+        {"pkg": "./", "run": "TestRegionDecodeReadsASubset"}
+      ],
+      "expect": {"added": "killed", "existing": "survived"}
+    },
+    {
+      "id": "decode-area-ignored",
+      "codec": "decoder",
+      "description": "Config.DecodeArea is read and then ignored, as it was before v1.5.2",
+      "spec": "A decoder that silently ignores an option is worse than one that lacks it: a caller sizing a buffer for a 64x64 region and receiving the whole 256x256 image gets no indication the request was dropped. DecodeArea was documented as 'specifies a region to decode' and read by nothing for several releases. The dimensions are what notice, which is why the killing test checks them before any sample.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "decoder.go",
+          "count": 3,
+          "old": "\tif r := decodeRegion(cfg, h, reduce); r != nil {",
+          "new": "\tif r := decodeRegion(cfg, h, reduce); false && r != nil {"
+        }
+      ],
+      "existing_tests": [
+        {"pkg": "./", "run": "TestRoundtrip_Grayscale_Lossless"}
+      ],
+      "added_tests": [
+        {"pkg": "./", "run": "TestDecodeAreaIsHonouredNotIgnored"}
+      ],
+      "expect": {"added": "killed", "existing": "survived"}
+    }
+  ]
+}

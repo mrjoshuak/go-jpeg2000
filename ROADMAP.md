@@ -283,12 +283,28 @@ Axes not yet in it: signed components, bit depths other than 8/16/32, images
 whose dimensions are not square, non-zero image offsets (`XOsiz`/`YOsiz`), and
 tile origins offset from the image origin.
 
-### Retire the remaining self-referential tests
+### ~~Retire the remaining self-referential tests~~ — measured instead, which is better
 
-Several tests still assert this library against itself. They are not worthless,
-but they cannot fail in the way that matters. `scripts/mutation/` in the sibling
-go-openexr repository shows the shape of the check: break the subject
-deliberately and confirm the test dies.
+"Cannot fail in the way that matters" was an opinion until this repository had
+an instrument for it. It has one now: `scripts/mutation/run.py`, ported from the
+sibling go-openexr repository, with a manifest of five deliberate defects — the
+NLT mask narrowed symmetrically, SOD required at a fixed offset (the v1.5.5
+defect), a reduced decode that decodes everything, a region decode that crops
+instead of skipping, and DecodeArea read and ignored (the pre-v1.5.2 defect).
+
+The measurement: **every pre-existing round-trip test survives every one of the
+five.** That is the self-referentiality this item alleged, demonstrated per
+defect rather than asserted in general. Each mutation is killed only by an
+anchored test — cost-anchored for the two savings, wire-anchored for PLT, and
+for the NLT mask a new `TestNLTType3MatchesTheDefinition` whose vectors are
+literals, because `nltType3` is one involution shared by both codec directions
+and a wrong mask still undoes itself perfectly. Nothing was retired: a
+surviving round-trip test still guards what it does guard, and the harness now
+says exactly what that is and is not. CI runs it on both architectures beside
+the gate.
+
+The manifest is small and meant to grow the way go-openexr's did — a mutation
+per defect found, so the count only rises with evidence.
 
 ### Performance
 

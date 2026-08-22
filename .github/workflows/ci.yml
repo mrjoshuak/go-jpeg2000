@@ -52,8 +52,22 @@ jobs:
   # separate job: the matrix above stays fast, and a missing oracle here is a
   # failure rather than a silent skip.
   conformance:
-    name: Conformance gate (OpenJPEG + OpenJPH)
-    runs-on: ubuntu-latest
+    name: Conformance gate (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both architectures, because this package carries per-architecture
+          # assembly (internal/dwt has amd64 and arm64 implementations,
+          # internal/entropy an amd64 one) and a defect can live in one build
+          # and not the other. The sibling repository's first amd64 gate run
+          # found two assembly declaration errors its arm64 machine had never
+          # built; the same hole is closed here the same way.
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -86,6 +100,14 @@ jobs:
 
       # STRICT makes a section that cannot find its oracle a failure instead of
       # a skip, so this job cannot pass by measuring nothing.
+      # The gate says the code is right; the mutation harness says the tests
+      # would notice if it stopped being right. Its manifest records, for each
+      # historically hidden defect, which pre-existing round-trip test survives
+      # it — the self-referentiality being measured — and which anchored test
+      # kills it. Both or neither.
+      - name: Run the mutation harness
+        run: python3 scripts/mutation/run.py
+
       - name: Run the conformance gate
         env:
           STRICT: "1"
