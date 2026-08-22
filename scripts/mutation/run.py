@@ -139,17 +139,29 @@ RUN_RE = re.compile(r"^=== RUN\s+(\S+)", re.M)
 RESULT_RE = re.compile(r"^\s*--- (PASS|FAIL|SKIP):\s+(\S+)", re.M)
 
 
-def run_test(pkg, name, timeout=300):
+def run_test(pkg, name, timeout=300, goarch=None):
     """Run one test. Returns (status, detail) where status is
-    pass | fail | skip | notfound | buildfail."""
+    pass | fail | skip | notfound | buildfail.
+
+    goarch runs the test under a different GOARCH. Architecture-specific
+    assembly is invisible to a harness that only builds the host's: a mutation
+    applied to b44_amd64.s changes nothing an arm64 test run can see, and would
+    be reported as survived-by-everything rather than as not-built. A test
+    listed with a goarch runs there instead, which on a machine that cannot
+    execute that architecture natively means an emulator, and without one the
+    run is reported as a build failure rather than a pass."""
     cmd = [
         "go", "test", pkg,
         "-run", f"^{name}$",
         "-count=1", "-v",
         f"-timeout={timeout}s",
     ]
+    env = None
+    if goarch:
+        env = dict(os.environ, GOARCH=goarch)
     proc = subprocess.run(
-        cmd, cwd=REPO, capture_output=True, text=True, timeout=timeout + 60
+        cmd, cwd=REPO, capture_output=True, text=True, timeout=timeout + 60,
+        env=env,
     )
     out = proc.stdout + proc.stderr
     if "build failed" in out or "cannot use" in out or "[build failed]" in out:
@@ -203,7 +215,40 @@ def main():
         for p in problems:
             print("  " + p)
         sys.exit(1)
-    print(f"manifest: {len(mutations)} mutations, all anchor texts found")
+    # A test named in the manifest that does not exist reports notfound, and
+    # notfound is not killed, so it reads as "the pre-existing tests survived
+    # this defect" — the exact claim the harness is here to make, asserted from
+    # a test that never ran. This is how TestDecodeRGBA, which does not exist,
+    # certified the RGBA reader for one commit. Names are checked up front now.
+    missing = []
+    for m in mutations:
+        for phase in ("existing", "added"):
+            for t in m.get(phase + "_tests", []):
+                # A name may be a -run pattern: alternation for "these two
+                # together", a trailing $ to stop a prefix from dragging in
+                # TestFooBar alongside TestFoo. Every alternative must exist.
+                sources = []
+                for root, _dirs, files in os.walk(os.path.join(REPO, t["pkg"].lstrip("./"))):
+                    for fn in files:
+                        if fn.endswith("_test.go"):
+                            with open(os.path.join(root, fn), "r", encoding="utf-8") as fh:
+                                sources.append(fh.read())
+                for alt in t["run"].split("|"):
+                    # A subtest path names the parent function and then a
+                    # t.Run label, which is not a Go declaration; only the
+                    # parent can be checked for existence here.
+                    alt = alt.strip().split("/")[0].rstrip("$").lstrip("^")
+                    if not alt:
+                        continue
+                    if not any(("func " + alt + "(") in src for src in sources):
+                        missing.append(
+                            f"{m['id']}: {phase} test {alt} is not defined in {t['pkg']}")
+    if missing:
+        print("manifest problems:")
+        for x in missing:
+            print("  " + x)
+        sys.exit(1)
+    print(f"manifest: {len(mutations)} mutations, all anchor texts and test names found")
     if args.check:
         return
 
@@ -222,7 +267,11 @@ def main():
         saved = apply_mutation(m)
         try:
             for phase, t in entries:
-                status, detail = run_test(t["pkg"], t["run"])
+                status, detail = run_test(t["pkg"], t["run"], goarch=t.get("goarch"))
+                if status == "notfound":
+                    print(f"   ERROR   {phase:8s} {t['pkg']} {t['run']}: no such test")
+                    restore(saved)
+                    sys.exit(1)
                 killed = status in ("fail", "buildfail")
                 rows.append({
                     "mutation": m["id"],
