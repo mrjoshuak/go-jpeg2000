@@ -217,7 +217,13 @@ result exactly, and a decoder given a truncated prefix must produce a complete
 image at reduced quality. The read direction stays unverifiable until an encoder
 exists that emits multi-pass HT blocks.
 
-### ~~Region decode~~ — done; reduced resolution for NLT codestreams remains
+### ~~Region decode~~ — done, and reduced resolution followed in v1.5.6
+
+The second half of this heading used to say reduced resolution for NLT
+codestreams remained. It does not: the refusal turned out to rest on comparing
+a reduced decode against a downsample — the wrong oracle — and against
+`ojph_expand -skip_res` and `opj_decompress -r` this library was already
+bit-exact on both the float and half paths. See v1.5.6.
 
 `Config.DecodeArea` is implemented. It was declared, documented as "specifies a
 region to decode", and read by nothing: a caller asking for a 32x16 region
