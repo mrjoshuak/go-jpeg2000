@@ -19,6 +19,15 @@ type Header struct {
 	NumComponents uint16
 	ComponentInfo []ComponentInfo
 
+	// ROIShift is the max-shift value from an RGN marker, per component, or 0
+	// where no RGN applies. See H.2: coefficients belonging to the region of
+	// interest are scaled up by this many bits before encoding, and a decoder
+	// must scale them back down. Ignoring it is invisible on a lossless
+	// untruncated stream — the shift up and the shift down cancel exactly —
+	// and produces a wrongly scaled image on any stream where rate allocation
+	// actually discarded something, which is what the marker exists for.
+	ROIShift []uint8
+
 	// Derived values
 	NumTilesX uint32
 	NumTilesY uint32

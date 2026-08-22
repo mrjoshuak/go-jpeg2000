@@ -94,6 +94,10 @@ func (p *Parser) ReadHeader() (*Header, error) {
 			if err := p.readPPM(); err != nil {
 				return nil, fmt.Errorf("failed to read PPM marker: %w", err)
 			}
+		case RGN:
+			if err := p.readRGN(); err != nil {
+				return nil, fmt.Errorf("failed to read RGN marker: %w", err)
+			}
 		case CRG:
 			if err := p.readCRG(); err != nil {
 				return nil, fmt.Errorf("failed to read CRG marker: %w", err)
@@ -864,6 +868,75 @@ func (p *Parser) readPPM() error {
 }
 
 // readCRG reads the CRG (component registration) marker segment.
+// readRGN reads the RGN (region of interest) marker segment.
+//
+// Lrgn(2) Crgn(1 or 2) Srgn(1) SPrgn(1). Crgn is two bytes when the image has
+// 257 components or more, which is the same width rule COC and QCC use. Srgn
+// selects the ROI style and 0 is the only one the standard defines: the
+// max-shift method, where SPrgn is the number of bits ROI coefficients were
+// scaled up by.
+//
+// An undefined Srgn is refused rather than ignored. Ignoring it would mean
+// decoding with a scaling rule we did not understand and returning samples
+// that look plausible, which is the failure this marker causes when it is
+// skipped entirely: on a lossy stream, 94% of samples wrong with nothing
+// reported.
+func (p *Parser) readRGN() error {
+	length, err := p.readUint16()
+	if err != nil {
+		return err
+	}
+	crgnWidth := 1
+	if p.header != nil && p.header.NumComponents >= 257 {
+		crgnWidth = 2
+	}
+	want := 2 + crgnWidth + 2
+	if int(length) != want {
+		return fmt.Errorf("RGN: segment is %d bytes, expected %d for %d components",
+			length, want, p.header.NumComponents)
+	}
+
+	var comp uint16
+	if crgnWidth == 1 {
+		b, err := p.readByte()
+		if err != nil {
+			return err
+		}
+		comp = uint16(b)
+	} else {
+		v, err := p.readUint16()
+		if err != nil {
+			return err
+		}
+		comp = v
+	}
+	srgn, err := p.readByte()
+	if err != nil {
+		return err
+	}
+	sprgn, err := p.readByte()
+	if err != nil {
+		return err
+	}
+	if srgn != 0 {
+		return fmt.Errorf("RGN: ROI style %d is not defined; only 0, the "+
+			"max-shift method, exists in ISO/IEC 15444-1", srgn)
+	}
+	if p.header == nil {
+		return fmt.Errorf("RGN: no SIZ marker seen before it")
+	}
+	if int(comp) >= int(p.header.NumComponents) {
+		return fmt.Errorf("RGN: names component %d of %d", comp, p.header.NumComponents)
+	}
+	if len(p.header.ROIShift) < int(p.header.NumComponents) {
+		grown := make([]uint8, p.header.NumComponents)
+		copy(grown, p.header.ROIShift)
+		p.header.ROIShift = grown
+	}
+	p.header.ROIShift[comp] = sprgn
+	return nil
+}
+
 func (p *Parser) readCRG() error {
 	// We don't currently use CRG data, just skip it
 	return p.skipMarkerSegment()

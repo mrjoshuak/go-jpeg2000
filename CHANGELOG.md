@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.10] - 2026-08-22
+
+### Added
+- **The RGN region-of-interest marker is parsed** rather than skipped. Until now
+  it appeared only in a table of marker names and the parser fell through to the
+  default branch. An ROI style the standard does not define is refused by name
+  instead of being assumed to be the one it does, and an RGN naming a component
+  the image does not have is refused too.
+
+### Not done, and why
+- **The max-shift reconstruction is not implemented**, because no encoder
+  available here writes a stream where the shift is applied.
+  `opj_compress -ROI c=0,U=8` emits the marker with SPrgn=8 and shifts nothing:
+  its ROI and non-ROI streams decode to identical samples — 0 of 1536 differ —
+  and the files differ by exactly seven bytes, the RGN segment itself. Kakadu
+  and Grok are not installed; OpenJPH has no ROI support.
+
+  An attempt was made and reverted. A threshold downshift of the shape
+  OpenJPEG's decoder uses left the lossy case unchanged and broke a case that
+  worked — a lossless stream that decoded exactly went to 1528 of 1536 samples
+  wrong, because our coefficients are already dequantised where the threshold
+  belongs in the raw-magnitude domain. Writing an unverifiable scaling rule
+  into a decoder is the failure this project exists to prevent.
+
+  The gate re-measures the limitation every run, so the day an encoder does
+  produce a real ROI the check fails and says the oracle now exists.
+
+### Corrected
+- An earlier reading of this was wrong and is retracted here. A lossy ROI
+  stream differing from the reference on 1439 of 1536 samples was attributed to
+  the missing reconstruction. The control — the same lossy stream with no ROI —
+  differs by exactly the same 1439. That divergence is about lossy
+  rate-truncated decoding of noise and has nothing to do with RGN. The
+  measurement was run without a control; the control is what corrected it.
+
+### Gate
+- 255 checks, 0 failures, 0 known gaps.
+
 ## [1.5.9] - 2026-08-22
 
 ### Fixed

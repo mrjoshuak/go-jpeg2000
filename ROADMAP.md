@@ -284,11 +284,42 @@ the count, because "it still decoded" is not evidence of resynchronisation —
 the first version of the test asserted exactly that and passed while recovering
 nothing, which is why the counter exists.
 
-### Region of interest
+### Region of interest — the marker is parsed; the reconstruction is blocked on an oracle, and measured
 
-The RGN marker and the max-shift method. Not implemented in either direction. A
-decoder that ignores RGN silently produces a wrongly scaled image, so reading it
-matters more than writing it.
+RGN is read rather than skipped as of v1.5.10, and an ROI style the standard
+does not define is refused by name instead of being assumed to be the one it
+does. An out-of-range component is refused too. Until then the marker appeared
+only in a table of names and the parser skipped the segment.
+
+**The max-shift reconstruction is not implemented, and the reason is a
+measurement rather than a preference.** No encoder available here writes a
+stream where the shift is applied. `opj_compress -ROI c=0,U=8` emits the marker
+with SPrgn=8 and shifts nothing: its ROI and non-ROI streams decode to identical
+samples — 0 of 1536 differ — and the two files differ by exactly seven bytes,
+which is the RGN segment itself. Kakadu and Grok, which do implement real ROI
+encoding, are not installed; OpenJPH does not support ROI at all.
+
+So the reconstruction could be written but not verified, and writing an
+unverifiable scaling rule into a decoder is the failure this whole exercise
+exists to prevent. That is not hypothetical here: an attempt was made and
+reverted. A threshold downshift of the shape OpenJPEG's decoder uses left the
+lossy case unchanged and **broke a case that worked** — a lossless stream that
+had decoded exactly went to 1528 of 1536 samples wrong, because our
+coefficients are already dequantised at that point and the threshold belongs in
+the raw-magnitude domain.
+
+Worth recording plainly: an earlier reading of this measurement was wrong. A
+lossy ROI stream differing from the reference on 1439 of 1536 samples was
+attributed to the missing reconstruction; the control — the same lossy stream
+with no ROI at all — differs by exactly the same 1439. That divergence is about
+lossy rate-truncated decoding on noise, not about RGN, and the ROI had nothing
+to do with it.
+
+**What would lift the block:** an encoder that actually applies the max-shift,
+so the reconstruction has something to be right against. The gate re-measures
+the current limitation on every run, so the day `opj_compress -ROI` starts
+changing samples — or another encoder is installed — the check fails and says
+the oracle now exists.
 
 ### ~~JP2 container conformance~~ — the reference reads our JP2 files, in v1.5.8
 

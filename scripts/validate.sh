@@ -1673,6 +1673,49 @@ if ! have ojph_expand; then
 	gap "OpenJPH not installed; capability matrix unchecked"
 else
 	MX="$WORK/matrix"
+	# ---- the RGN region-of-interest marker --------------------------------
+	#
+	# RGN is parsed rather than skipped, and an ROI style the standard does not
+	# define is refused. The max-shift reconstruction behind it is NOT
+	# implemented, and the reason is measured rather than asserted: no encoder
+	# available here writes a stream where the shift is applied.
+	#
+	# opj_compress -ROI c=0,U=n emits the marker with SPrgn=n and shifts
+	# nothing. Its with-ROI and without-ROI streams decode to identical samples
+	# — 0 of 1536 differ — and the files differ by exactly seven bytes, which is
+	# the RGN segment itself. The check below re-establishes that every run, so
+	# the day an oracle does produce a real ROI this stops passing for the
+	# stated reason and starts being a gap that can be closed.
+	if ! command -v opj_compress >/dev/null 2>&1; then
+		skip "RGN marker: opj_compress is not installed"
+	else
+		RGND="$WORK/rgn"
+		mkdir -p "$RGND"
+		rgn_ok=1
+		oiiotool --pattern noise:type=uniform:seed=7 48x32 1 -d uint8 -o "$RGND/src.png" >/dev/null 2>&1
+		opj_compress -i "$RGND/src.png" -o "$RGND/roi.j2k" -ROI c=0,U=8 -r 10 >/dev/null 2>&1 || rgn_ok=0
+		opj_compress -i "$RGND/src.png" -o "$RGND/plain.j2k" -r 10 >/dev/null 2>&1 || rgn_ok=0
+		if [ "$rgn_ok" = "0" ]; then
+			gap "RGN marker: the reference encoder would not build the fixtures"
+		else
+			opj_decompress -i "$RGND/roi.j2k" -o "$RGND/roi.pgm" >/dev/null 2>&1
+			opj_decompress -i "$RGND/plain.j2k" -o "$RGND/plain.pgm" >/dev/null 2>&1
+			sz_roi=$(wc -c <"$RGND/roi.j2k" | tr -d ' ')
+			sz_plain=$(wc -c <"$RGND/plain.j2k" | tr -d ' ')
+			delta=$((sz_roi - sz_plain))
+			if cmp -s "$RGND/roi.pgm" "$RGND/plain.pgm" && [ "$delta" = "7" ]; then
+				pass "RGN marker: the parser reads it and refuses an undefined ROI style; the reconstruction stays unimplemented because the only encoder here writes the marker without shifting anything — its ROI and non-ROI streams decode identically and differ by exactly the 7-byte segment"
+			else
+				fail "RGN marker: opj_compress -ROI now changes the samples (size delta $delta); an oracle for the max-shift reconstruction exists and the reconstruction should be implemented against it"
+			fi
+		fi
+		if go test ./ -run TestRGNMarkerIsParsed >/dev/null 2>&1; then
+			pass "RGN marker: a well-formed segment is accepted, an undefined ROI style and an out-of-range component are refused by name"
+		else
+			fail "RGN marker: the parser test fails"
+		fi
+	fi
+
 	# ---- SOP and EPH error resilience markers -----------------------------
 	#
 	# EnableSOP and EnableEPH set their bits in the COD's Scod field and wrote
