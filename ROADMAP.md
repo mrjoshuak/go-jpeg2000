@@ -253,13 +253,36 @@ sign-magnitude domain NLT maps back from rather than samples, and reinterpreting
 them gave results off by 175 on a ramp spanning 0 to 2. Ordinary integer samples
 are correct to within a count or two and are gated.
 
-### Error resilience markers
+### ~~Error resilience markers~~ — all three conditions met, and the item understated the defect
 
-SOP and EPH are skipped on read and never written. They cost little and make a
-corrupt stream recoverable.
+The item said SOP and EPH were "never written". They were worse than absent:
+`Options.EnableSOP` and `EnableEPH` set their bits in the COD's Scod field and
+emitted no markers at all, so the codestream declared a structure it did not
+have. **OpenJPEG refused an `EnableEPH` file outright** — it expects EPH after
+each packet header when Scod says so — while this library round-tripped the
+same file perfectly, because our decoder skips the marker only when present and
+never minded that it never was. A shipped option produced files no other
+implementation could read, and nothing inside the repository could tell.
 
-Done when we write both, a reference decoder reads them, and we resynchronise
-from a deliberately corrupted stream.
+All three completion conditions hold in v1.5.9. We write both, in the places
+the standard puts them — SOP before the packet with its wrapping 16-bit
+counter, EPH between the packet header and the code-block bodies, including
+after an empty packet's single-bit header. All four combinations decode through
+`opj_decompress` to exactly the fixture, and the reference's own SOP/EPH stream
+decodes here sample for sample.
+
+Resynchronisation needed a different design from the obvious one, and finding
+that out was the useful part. Recovering on a parse *error* recovers nothing: a
+packet header is a bit stream with no self-delimiting structure, so damaged bits
+produce a different-but-readable header rather than a failure. Measured — two
+flipped bytes, four 0xFFs, sixteen 0xFFs and sixteen zeros over a packet header
+all produced no error, no recovery, and wrong pixels. SOP is instead a
+*positive* check: a stream that has been writing the marker before every packet
+and then does not is demonstrably out of position, and that is testable before
+parsing anything. All four patterns now recover. `DecodeCost.Resyncs` reports
+the count, because "it still decoded" is not evidence of resynchronisation —
+the first version of the test asserted exactly that and passed while recovering
+nothing, which is why the counter exists.
 
 ### Region of interest
 

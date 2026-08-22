@@ -76,6 +76,44 @@ func (r *pktReader) skipEPH() {
 	r.pos += 2
 }
 
+// resyncToSOP scans forward for the next start-of-packet marker and positions
+// the reader on it, reporting whether one was found.
+//
+// This is what SOP is for. Without it a packet whose header cannot be parsed
+// ends the tile: the decoder has lost its place in a bit stream with no
+// self-delimiting structure, and every later packet is unreachable however
+// intact it is. With SOP the boundaries are findable, so the damage is bounded
+// by the packets it actually touched.
+//
+// The scan starts one byte past the current position so a failure at a marker
+// cannot match itself and loop. Nsop is not checked against an expected value:
+// the counter wraps at 16 bits and a stream may legitimately omit SOP before
+// any given packet, so a mismatch is not evidence of anything, whereas the
+// marker itself is a two-byte sequence the codestream cannot otherwise contain
+// — 0xFF91 is a reserved marker and code-block data is bit-stuffed to keep any
+// byte after 0xFF below 0x90.
+// atSOP reports whether the reader is positioned on a start-of-packet marker.
+func (r *pktReader) atSOP() bool {
+	return r.bitCnt == 0 && r.pos+1 < len(r.data) &&
+		r.data[r.pos] == 0xFF && r.data[r.pos+1] == 0x91
+}
+
+func (r *pktReader) resyncToSOP() bool {
+	if !r.useSOP {
+		return false
+	}
+	for p := r.pos + 1; p+1 < len(r.data); p++ {
+		if r.data[p] == 0xFF && r.data[p+1] == 0x91 {
+			r.pos = p
+			r.bitCnt = 0
+			r.lastFF = false
+			r.overrun = false
+			return true
+		}
+	}
+	return false
+}
+
 func (r *pktReader) readBit() uint32 {
 	if r.bitCnt == 0 {
 		if r.pos >= len(r.data) {
@@ -653,6 +691,12 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 	}
 
 	var perr error
+	resynced := 0
+	// sopSeen becomes true once a packet has actually been preceded by SOP.
+	// The standard permits a stream to omit the marker before any given packet
+	// even when the coding style allows it, so the absence of SOP is only
+	// evidence of trouble in a stream that has been writing it.
+	sopSeen := false
 	forEachPacket(order, numLayers, numRes, len(tile.Components), numPrec, pos, func(layer, res, c, prec int) bool {
 		precincts := grid[resKey{c, res}]
 		if prec >= len(precincts) {
@@ -663,16 +707,52 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 		// their packets still have to be parsed: they carry the inclusion and
 		// length state the packets between them are read against, and their
 		// bodies are what separates one packet from the next.
+		// SOP is a positive check, not a fallback. Waiting for a parse error
+		// to trigger resynchronisation does not work: a packet header is a bit
+		// stream with no self-delimiting structure, so damaged bits produce a
+		// different-but-readable header rather than a failure, and the decoder
+		// marches on with wrong inclusion decisions and never knows. Measured
+		// on this library before the check below existed, corrupting a packet
+		// header with two flipped bytes, four 0xFFs, sixteen 0xFFs or sixteen
+		// zeros produced no error and no resynchronisation in any case — the
+		// decode simply returned wrong pixels.
+		//
+		// So when a stream has been putting SOP before every packet, a packet
+		// that does not begin with one is the evidence that the position is
+		// wrong, and that is checkable before parsing anything.
+		if r.useSOP && sopSeen && !r.atSOP() {
+			if r.resyncToSOP() {
+				resynced++
+			}
+		}
+		if r.useSOP && r.atSOP() {
+			sopSeen = true
+		}
 		keep := qualityLimit <= 0 || layer < qualityLimit
 		if err := readPacket(r, bands, layer, keep); err != nil {
+			// With SOP the next packet boundary is findable, so a damaged
+			// packet costs its own contents rather than the rest of the tile.
+			// Without it there is nothing to look for and the error stands:
+			// guessing at a boundary in a bit stream with no self-delimiting
+			// structure would turn a reported failure into a silent one, which
+			// is the worse outcome of the two.
+			if r.resyncToSOP() {
+				resynced++
+				return true
+			}
 			perr = err
 			return false
+		}
+		if r.overrun && r.resyncToSOP() {
+			resynced++
+			return true
 		}
 		return !r.overrun
 	})
 	if perr != nil {
 		return perr
 	}
+	d.resyncs += resynced
 
 	// Decode every contributing code-block and scatter its coefficients.
 	for c := 0; c < len(tile.Components); c++ {

@@ -402,6 +402,10 @@ func Decode(r io.Reader) (image.Image, error) {
 type DecodeCost struct {
 	Decoded int
 	Skipped int
+	// Resyncs is how many packets were recovered by scanning to the next SOP
+	// marker after a parse failure. Zero for an undamaged stream, and zero for
+	// any stream without SOP markers, where there is nothing to scan to.
+	Resyncs int
 }
 
 // DecodeConfigCost decodes with the given configuration and reports what the
@@ -412,7 +416,7 @@ func DecodeConfigCost(r io.Reader, cfg *Config) (image.Image, DecodeCost, error)
 	}
 	d := newDecoder(r)
 	img, err := d.decode(cfg)
-	return img, DecodeCost{Decoded: d.regionBytes, Skipped: d.skippedBytes}, err
+	return img, DecodeCost{Decoded: d.regionBytes, Skipped: d.skippedBytes, Resyncs: d.resyncs}, err
 }
 
 // DecodeConfig decodes a JPEG 2000 image with the specified configuration.

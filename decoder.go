@@ -35,6 +35,12 @@ type decoder struct {
 	region       *image.Rectangle
 	regionBytes  int
 	skippedBytes int
+	// resyncs counts how many times a damaged packet was recovered from by
+	// scanning to the next SOP marker. It is the only direct evidence that
+	// resynchronisation happened rather than that the decode happened to
+	// survive: the entropy coder tolerates a good deal of damage without
+	// losing its place, so "it still decoded" proves nothing on its own.
+	resyncs int
 
 	// reduceRes is how many of the finest resolution levels the decode is not
 	// reconstructing. Their code-blocks contribute nothing to the output and

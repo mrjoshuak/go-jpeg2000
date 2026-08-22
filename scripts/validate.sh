@@ -1673,6 +1673,77 @@ if ! have ojph_expand; then
 	gap "OpenJPH not installed; capability matrix unchecked"
 else
 	MX="$WORK/matrix"
+	# ---- SOP and EPH error resilience markers -----------------------------
+	#
+	# EnableSOP and EnableEPH set their bits in the COD's Scod field and wrote
+	# no markers at all until v1.5.9, so the codestream declared a structure it
+	# did not have. OpenJPEG refused an EnableEPH file outright — it expects
+	# EPH after each packet header when Scod says so — while this library
+	# round-tripped the same file perfectly, because our decoder skips the
+	# marker only when present and never minded that it never was.
+	#
+	# The check is the reference decoding all four combinations to exactly the
+	# fixture, plus the reference's own SOP/EPH stream decoding here.
+	if ! command -v opj_compress >/dev/null 2>&1; then
+		skip "error resilience markers: opj_compress is not installed"
+	else
+		SOPD="$WORK/sop"
+		mkdir -p "$SOPD"
+		if ! go run ./scripts/sopgen "$SOPD" >"$WORK/sop.tsv" 2>"$WORK/sop.err"; then
+			fail "error resilience markers: generator failed: $(head -1 "$WORK/sop.err")"
+		else
+			sop_fail=0
+			sop_n=0
+			while IFS=$'\t' read -r name nsop neph path; do
+				if [ "$nsop" = "ENCODE_FAIL" ]; then
+					fail "error resilience $name: encoder failed"
+					sop_fail=1
+					continue
+				fi
+				out="$SOPD/$name.out.pgm"
+				if ! opj_decompress -i "$path" -o "$out" >/dev/null 2>&1; then
+					fail "error resilience $name: the reference refused a file declaring SOP=$nsop EPH=$neph"
+					sop_fail=1
+					continue
+				fi
+				if d=$(python3 scripts/jp2cmp.py "$out" 1 8); then
+					sop_n=$((sop_n + 1))
+				else
+					fail "error resilience $name: $d"
+					sop_fail=1
+				fi
+			done <"$WORK/sop.tsv"
+			if [ "$sop_fail" = "0" ] && [ "$sop_n" -gt 0 ]; then
+				pass "error resilience markers: $sop_n combinations of SOP and EPH decode through the reference to exactly the fixture, markers present as the coding style declares"
+			fi
+		fi
+
+		# And the other direction: the reference's own SOP/EPH stream read here.
+		if oiiotool --pattern noise:type=uniform:seed=3 48x32 1 -d uint8 -o "$SOPD/src.png" >/dev/null 2>&1 &&
+			opj_compress -i "$SOPD/src.png" -o "$SOPD/ref.j2k" -SOP -EPH >/dev/null 2>&1 &&
+			opj_decompress -i "$SOPD/ref.j2k" -o "$SOPD/ref.pgm" >/dev/null 2>&1; then
+			d=$(go run ./scripts/decodecmp "$SOPD/ref.j2k" "$SOPD/ref.pgm" 2>&1 | head -1)
+			if [ "$d" = "0" ]; then
+				pass "error resilience markers: a codestream the reference wrote with SOP and EPH decodes here sample for sample"
+			else
+				fail "error resilience markers: $d samples differ reading the reference's SOP/EPH stream"
+			fi
+		else
+			gap "error resilience markers: could not build the reference's SOP/EPH fixture"
+		fi
+
+		# Resynchronisation, which is the third of the item's conditions and
+		# the one that needed a positive check rather than a fallback: a
+		# damaged packet header parses into a different-but-readable header
+		# instead of failing, so waiting for an error recovers nothing. The Go
+		# test asserts the recovery count, not merely that the decode survived.
+		if go test ./ -run 'TestSOPResynchronisesAfterCorruption|TestErrorResilienceMarkersAreWritten' >/dev/null 2>&1; then
+			pass "error resilience markers: a corrupted packet header is recovered from by scanning to the next SOP marker, and an undamaged stream resynchronises zero times"
+		else
+			fail "error resilience markers: the resynchronisation test fails"
+		fi
+	fi
+
 	# ---- the JP2 container, read by another implementation ----------------
 	#
 	# The codestreams this library writes have been checked against two oracles

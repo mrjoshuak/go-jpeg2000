@@ -226,7 +226,7 @@ func (bg *t2Band) setTagTreeLeaves(numLayers int) {
 }
 
 // encodePacket writes one packet: header then bodies, for the given bands.
-func encodePacket(bands []*t2Band, layer int) []byte {
+func encodePacket(bands []*t2Band, layer int, useEPH bool) []byte {
 	w := &pktWriter{}
 
 	anyIncluded := false
@@ -240,6 +240,12 @@ func encodePacket(bands []*t2Band, layer int) []byte {
 	if !anyIncluded {
 		w.writeBit(0) // empty packet
 		w.flush()
+		// An empty packet still has a header, so it still takes an EPH: the
+		// marker terminates every packet header, not only the ones with
+		// code-block data behind them (ISO/IEC 15444-1 A.8.2).
+		if useEPH {
+			return append(w.buf, ephMarker...)
+		}
 		return w.buf
 	}
 	w.writeBit(1)
@@ -300,10 +306,35 @@ func encodePacket(bands []*t2Band, layer int) []byte {
 
 	w.flush()
 	out := w.buf
+	// EPH goes between the packet header and the code-block bodies, which is
+	// what "end of packet header" means. Until v1.5.9 the COD's Scod bit was
+	// set for EnableEPH and no marker was ever written, so the codestream
+	// declared a structure it did not have and OpenJPEG refused the file
+	// outright.
+	if useEPH {
+		out = append(out, ephMarker...)
+	}
 	for _, b := range bodies {
 		out = append(out, b...)
 	}
 	return out
+}
+
+// sopMarker is SOP with its fixed 4-byte segment length; the two-byte sequence
+// number follows. ephMarker has no segment body at all.
+var (
+	sopMarkerPrefix = []byte{0xFF, 0x91, 0x00, 0x04}
+	ephMarker       = []byte{0xFF, 0x92}
+)
+
+// appendSOP writes the start-of-packet marker segment for packet n.
+//
+// Nsop wraps at 16 bits, which the standard requires rather than merely
+// permits: a tile with more than 65536 packets restarts the count, and a
+// decoder resynchronising on SOP must expect that.
+func appendSOP(out []byte, n int) []byte {
+	out = append(out, sopMarkerPrefix...)
+	return append(out, byte(uint16(n)>>8), byte(uint16(n)))
 }
 
 // writeNumPasses encodes the coding-pass count, per Table B.4.
@@ -579,12 +610,19 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 	}
 
 	var pktLens []int
+	sopCount := 0
 	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(layer, res, c, prec int) bool {
 		precincts := bandsFor[key{c, res}]
 		if prec >= len(precincts) {
 			return true
 		}
-		pkt := encodePacket(precincts[prec], layer)
+		pkt := encodePacket(precincts[prec], layer, e.options.EnableEPH)
+		if e.options.EnableSOP {
+			// SOP precedes the packet and is not part of it: the packet
+			// lengths recorded here feed PLT, which measures packets.
+			out = appendSOP(out, sopCount)
+			sopCount++
+		}
 		out = append(out, pkt...)
 		pktLens = append(pktLens, len(pkt))
 		return true

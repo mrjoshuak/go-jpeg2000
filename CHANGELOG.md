@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.9] - 2026-08-22
+
+### Fixed
+- **`EnableSOP` and `EnableEPH` declared markers and wrote none.** Both set
+  their bits in the COD's Scod field; neither emitted a single marker. The
+  codestream therefore declared a structure it did not have, and **OpenJPEG
+  refused an `EnableEPH` file outright** — it expects EPH after each packet
+  header when Scod says so and finds code-block data instead. This library
+  round-tripped the same file perfectly, because our decoder skips the marker
+  only when present and never minded that it never was: both directions agreed
+  on a file no other implementation could read.
+
+  Both markers are now written where the standard puts them — SOP before the
+  packet with its 16-bit wrapping counter, EPH between the packet header and
+  the code-block bodies, including after an empty packet's single-bit header.
+  All four combinations decode through `opj_decompress` to exactly the fixture.
+
+### Added
+- **Resynchronisation from a damaged packet header**, using SOP as a positive
+  check rather than an error fallback. Recovering on a parse error recovers
+  nothing here: a packet header is a bit stream with no self-delimiting
+  structure, so damaged bits produce a different-but-readable header instead of
+  a failure. Measured before the fix — two flipped bytes, four 0xFFs, sixteen
+  0xFFs, sixteen zeros over a packet header — every case produced no error, no
+  recovery and wrong pixels. A stream that has been writing SOP before every
+  packet and then does not is demonstrably out of position, which is checkable
+  before parsing anything; all four patterns now recover.
+
+- `DecodeCost.Resyncs`, the number of packets recovered by scanning to the next
+  SOP marker. It exists because "it still decoded" is not evidence of
+  resynchronisation: the first version of the test asserted exactly that,
+  passed, and was recovering nothing. Zero for an undamaged stream, which the
+  test also asserts — a decoder that silently recovers from nothing is hiding a
+  parse it got wrong.
+
+### Gate
+- 253 checks, 0 failures, 0 known gaps. 7 mutations, 0 mismatches. Mutation 64
+  stops the EPH marker being written; the pre-existing round trip survives it
+  and only the reference-backed check kills it.
+
 ## [1.5.8] - 2026-08-22
 
 ### Added

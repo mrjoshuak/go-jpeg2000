@@ -210,6 +210,37 @@
         "added": "killed",
         "existing": "survived"
       }
+    },
+    {
+      "id": "eph-declared-but-not-written",
+      "codec": "T2",
+      "description": "EnableEPH sets the Scod bit and writes no EPH marker, as it did until v1.5.9",
+      "spec": "ISO/IEC 15444-1 A.8.2: when Scod bit 2 is set an EPH marker terminates every packet header. Setting the bit and omitting the marker produces a codestream that declares a structure it does not have — OpenJPEG refuses such a file outright, because it expects the two bytes after each header and finds code-block data. This library round-tripped it perfectly for as long as it shipped: our decoder skips EPH only when it is present and never minded that it never was, so both directions agreed on a file no other implementation could read. Only an external decoder can see it, which is what the gate's four SOP/EPH combinations are for.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "t2_encode.go",
+          "count": 1,
+          "old": "\tif useEPH {\n\t\tout = append(out, ephMarker...)\n\t}\n\tfor _, b := range bodies {",
+          "new": "\tif false && useEPH {\n\t\tout = append(out, ephMarker...)\n\t}\n\tfor _, b := range bodies {"
+        }
+      ],
+      "existing_tests": [
+        {
+          "pkg": "./",
+          "run": "TestRoundtrip_Grayscale_Lossless"
+        }
+      ],
+      "added_tests": [
+        {
+          "pkg": "./",
+          "run": "TestErrorResilienceMarkersAreWritten"
+        }
+      ],
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     }
   ]
 }
