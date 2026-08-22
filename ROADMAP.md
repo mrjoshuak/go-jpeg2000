@@ -267,13 +267,32 @@ The RGN marker and the max-shift method. Not implemented in either direction. A
 decoder that ignores RGN silently produces a wrongly scaled image, so reading it
 matters more than writing it.
 
-### JP2 container conformance
+### ~~JP2 container conformance~~ — the reference reads our JP2 files, in v1.5.8
 
-Box parsing is thorough, but the boxes we *write* have never been checked by
-another implementation — only the raw codestream has. Palette, channel
-definition and component mapping boxes are the likely gaps.
+Four wrappers — greyscale 8 and 16 bit, sRGB, and a one-resolution RGB case
+whose codestream is trivial so anything the reference objects to is the
+container — decode through `opj_decompress` to exactly the fixture, sample for
+sample. The comparison recomputes the expected samples from the ramp rather
+than reading a file the generator wrote, so a generator that built its fixture
+and its image from one wrong expression cannot agree with itself.
 
-Done when a reference tool reads our JP2 files, not just our J2K codestreams.
+The completion bar was "a reference tool reads our JP2 files, not just our J2K
+codestreams", and that is what the gate now does on every run.
+
+Two notes on what this did and did not find. The boxes were already correct —
+nothing here was broken — which is worth stating plainly rather than implying a
+save. And the paragraph's guess at the likely gaps was off: palette, channel
+definition and component mapping boxes are written for palettised images, which
+this library does not produce, so they were never candidates.
+
+What the exercise did add is the check that can see the class. Mutation 63
+swaps the colr box's enumerated colourspace — sRGB for greyscale and back —
+and **the pre-existing JP2 round-trip test survives it**, because our decoder
+takes the component count from the codestream's SIZ marker and never consults
+the box. A wrong enumeration round-trips here perfectly while telling every
+other implementation that a three-component image is greyscale. That is the
+container-shaped version of the defect this whole goal has been about, and
+until now nothing in the repository could have detected it.
 
 ## Standing work
 

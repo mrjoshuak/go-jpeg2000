@@ -40,12 +40,21 @@
         }
       ],
       "existing_tests": [
-        {"pkg": "./", "run": "TestEncodeFloatGrayscaleRoundtrip"}
+        {
+          "pkg": "./",
+          "run": "TestEncodeFloatGrayscaleRoundtrip"
+        }
       ],
       "added_tests": [
-        {"pkg": "./", "run": "TestNLTType3MatchesTheDefinition"}
+        {
+          "pkg": "./",
+          "run": "TestNLTType3MatchesTheDefinition"
+        }
       ],
-      "expect": {"added": "killed", "existing": "survived"}
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     },
     {
       "id": "plt-sod-at-fixed-offset",
@@ -62,12 +71,21 @@
         }
       ],
       "existing_tests": [
-        {"pkg": "./", "run": "TestRoundtrip_Grayscale_Lossless"}
+        {
+          "pkg": "./",
+          "run": "TestRoundtrip_Grayscale_Lossless"
+        }
       ],
       "added_tests": [
-        {"pkg": "./", "run": "TestPacketLengthMarkersRoundTrip"}
+        {
+          "pkg": "./",
+          "run": "TestPacketLengthMarkersRoundTrip"
+        }
       ],
-      "expect": {"added": "killed", "existing": "survived"}
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     },
     {
       "id": "reduced-resolution-decodes-everything",
@@ -84,12 +102,21 @@
         }
       ],
       "existing_tests": [
-        {"pkg": "./", "run": "TestReduceResolutionIsStableAcrossPaths"}
+        {
+          "pkg": "./",
+          "run": "TestReduceResolutionIsStableAcrossPaths"
+        }
       ],
       "added_tests": [
-        {"pkg": "./", "run": "TestReduceResolutionCostsLess"}
+        {
+          "pkg": "./",
+          "run": "TestReduceResolutionCostsLess"
+        }
       ],
-      "expect": {"added": "killed", "existing": "survived"}
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     },
     {
       "id": "region-skip-disabled",
@@ -106,12 +133,21 @@
         }
       ],
       "existing_tests": [
-        {"pkg": "./", "run": "TestDecodeAreaMatchesTheFullDecode"}
+        {
+          "pkg": "./",
+          "run": "TestDecodeAreaMatchesTheFullDecode"
+        }
       ],
       "added_tests": [
-        {"pkg": "./", "run": "TestRegionDecodeReadsASubset"}
+        {
+          "pkg": "./",
+          "run": "TestRegionDecodeReadsASubset"
+        }
       ],
-      "expect": {"added": "killed", "existing": "survived"}
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     },
     {
       "id": "decode-area-ignored",
@@ -128,12 +164,52 @@
         }
       ],
       "existing_tests": [
-        {"pkg": "./", "run": "TestRoundtrip_Grayscale_Lossless"}
+        {
+          "pkg": "./",
+          "run": "TestRoundtrip_Grayscale_Lossless"
+        }
       ],
       "added_tests": [
-        {"pkg": "./", "run": "TestDecodeAreaIsHonouredNotIgnored"}
+        {
+          "pkg": "./",
+          "run": "TestDecodeAreaIsHonouredNotIgnored"
+        }
       ],
-      "expect": {"added": "killed", "existing": "survived"}
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
+    },
+    {
+      "id": "jp2-colr-enumeration-swapped",
+      "codec": "JP2",
+      "description": "The JP2 colour specification box declares greyscale for RGB and sRGB for greyscale",
+      "spec": "ISO/IEC 15444-1 I.5.3.3: the colr box's EnumCS is 16 for sRGB, 17 for greyscale, 18 for sYCC. The value describes the codestream's components to every reader but this one — our own decoder takes the component count from the codestream's SIZ marker, so a wrong enumeration round-trips here perfectly and tells another implementation that a three-component image is greyscale. Nothing inside this repository can see it, which is why the JP2 boxes needed an external reader at all: the codestreams had two oracles across the whole matrix and the container had none.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "encoder.go",
+          "count": 1,
+          "old": "\t\tif e.numComponents == 1 {\n\t\t\tcolorspace = box.CSGray\n\t\t} else {",
+          "new": "\t\tif e.numComponents != 1 {\n\t\t\tcolorspace = box.CSGray\n\t\t} else {"
+        }
+      ],
+      "existing_tests": [
+        {
+          "pkg": "./",
+          "run": "TestRoundtrip_JP2_Format"
+        }
+      ],
+      "added_tests": [
+        {
+          "pkg": "./",
+          "run": "TestJP2ColourspaceEnumerationIsCorrect"
+        }
+      ],
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     }
   ]
 }

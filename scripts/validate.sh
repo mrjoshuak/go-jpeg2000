@@ -1673,6 +1673,57 @@ if ! have ojph_expand; then
 	gap "OpenJPH not installed; capability matrix unchecked"
 else
 	MX="$WORK/matrix"
+	# ---- the JP2 container, read by another implementation ----------------
+	#
+	# The codestreams this library writes have been checked against two oracles
+	# across the whole capability matrix. The JP2 boxes around them had never
+	# been read by anything else: a codestream is the payload of a JP2, not the
+	# container, and every box was validated only by the parser in this same
+	# repository — a wrapper both halves of one library agree on, which is the
+	# shape of defect an external oracle exists to catch.
+	#
+	# The comparison recomputes the expected samples from the ramp rather than
+	# reading a reference file the generator wrote, so a generator that built
+	# its fixture and its image from one wrong expression cannot agree with
+	# itself. A one-resolution RGB case is included because its codestream is
+	# trivial, so anything the reference objects to there is the container.
+	if ! command -v opj_decompress >/dev/null 2>&1; then
+		skip "JP2 container: opj_decompress is not installed"
+	else
+		J2D="$WORK/jp2"
+		mkdir -p "$J2D"
+		if ! go run ./scripts/jp2gen "$J2D" >"$WORK/jp2.tsv" 2>"$WORK/jp2.err"; then
+			fail "JP2 container: generator failed: $(head -1 "$WORK/jp2.err")"
+		else
+			jp2_fail=0
+			jp2_n=0
+			while IFS=$'\t' read -r name comps depth path; do
+				if [ "$comps" = "ENCODE_FAIL" ]; then
+					fail "JP2 container $name: encoder failed"
+					jp2_fail=1
+					continue
+				fi
+				ext=pgm
+				[ "$comps" = "3" ] && ext=ppm
+				out="$J2D/$name.out.$ext"
+				if ! opj_decompress -i "$path" -o "$out" >/dev/null 2>&1; then
+					fail "JP2 container $name: the reference refused the file this library wrote"
+					jp2_fail=1
+					continue
+				fi
+				if d=$(python3 scripts/jp2cmp.py "$out" "$comps" "$depth"); then
+					jp2_n=$((jp2_n + 1))
+				else
+					fail "JP2 container $name: $d"
+					jp2_fail=1
+				fi
+			done <"$WORK/jp2.tsv"
+			if [ "$jp2_fail" = "0" ] && [ "$jp2_n" -gt 0 ]; then
+				pass "JP2 container: $jp2_n files this library wrapped decode through the reference to exactly the fixture — greyscale 8 and 16 bit and sRGB, including a one-resolution case whose codestream is trivial"
+			fi
+		fi
+	fi
+
 	# ---- a non-zero image offset, written by the reference ----------------
 	#
 	# XOsiz and YOsiz shift the image origin on the reference grid, and every

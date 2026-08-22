@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.8] - 2026-08-22
+
+### Added
+- **The JP2 container is now checked by another implementation.** The
+  codestreams this library writes have been verified against two oracles across
+  the whole capability matrix; the boxes wrapping them had been read only by the
+  parser in this same repository. Four wrappers — greyscale 8 and 16 bit, sRGB,
+  and a one-resolution RGB case whose codestream is trivial so anything the
+  reference objects to is the container — now decode through `opj_decompress`
+  to exactly the fixture on every gate run.
+
+  The boxes were already correct; nothing here was broken. What the exercise
+  added is a check that can see the class of defect. Mutation 63 swaps the colr
+  box's enumerated colourspace, and **the pre-existing JP2 round-trip test
+  survives it** — our decoder takes the component count from the codestream's
+  SIZ marker and never consults the box, so a wrong enumeration round-trips
+  perfectly here while telling every other implementation that a
+  three-component image is greyscale.
+
+- **The conformance matrix gained five axes.** Non-square dimensions in both
+  orientations on the integer and float paths; a non-zero image offset, which
+  our encoder cannot write at all so the gate has `opj_compress -d 7,5` write
+  one and compares our decode against the reference's own; and a tile grid
+  origin offset from the image origin. All clean, and they stay in the matrix —
+  an axis that passes is evidence, and an axis removed after passing is
+  evidence thrown away.
+
+### Fixed
+- **`FloatImage.BitDepth` and `Signed` were accepted and ignored.** `BitDepth:
+  12` produced a codestream declaring 32-bit signed with no indication — the
+  same shape as `Config.DecodeArea` before v1.5.2, a field declared,
+  documented, and read by nothing. They cannot be honoured: the float path
+  reinterprets binary32 bit patterns as signed 32-bit samples, so Ssiz can only
+  say 32-bit signed.
+
+  A refusal was written first and reverted. Three existing tests pass
+  `BitDepth: 16` and `Signed: false` and their files are correct, so refusing
+  would have broken working callers to make a point. The fields are documented
+  as decoder output instead, and `TestFloatImageBitDepthIsOutputOnly` asserts
+  every value produces Ssiz 0x9F, so the asymmetry fails loudly if it changes.
+
+### Gate
+- 250 checks, 0 failures, 0 known gaps. 6 mutations, 0 mismatches.
+
 ## [1.5.7] - 2026-08-20
 
 ### Added
