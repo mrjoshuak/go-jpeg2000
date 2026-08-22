@@ -277,7 +277,7 @@ Done when a reference tool reads our JP2 files, not just our J2K codestreams.
 
 ## Standing work
 
-### Widen the matrix before widening the claim
+### ~~Widen the matrix before widening the claim~~ — widened; four axes clean, one found something
 
 `scripts/matrixgen` covers pixel types, component counts, resolution levels,
 tilings and both transforms. The day it was widened past 8-bit greyscale it
@@ -285,9 +285,42 @@ found three whole capabilities broken — lossy, tiling and float — each of wh
 had been shipping non-conformant output while the suite was green. Every new
 axis is likely to find something.
 
-Axes not yet in it: signed components, bit depths other than 8/16/32, images
-whose dimensions are not square, non-zero image offsets (`XOsiz`/`YOsiz`), and
-tile origins offset from the image origin.
+All five of those axes have now been addressed, in v1.5.8.
+
+**Non-square dimensions**, both orientations (40x24 and 24x40), on the integer
+and float paths. This one mattered most on paper: every index in a wavelet, a
+code-block grid and a packet header is a function of width and height, and on a
+square image a transposed one is indistinguishable from a correct one — the
+matrix had been square in every case. The reference decodes all four exactly.
+
+**Non-zero image offset.** Our encoder does not write `XOsiz`/`YOsiz`, so a
+round trip cannot reach this at all; the gate has `opj_compress -d 7,5` write
+one and compares our decode against the reference's own. Exact. A decoder that
+ignored the offset would return a plausible image of the right size holding the
+wrong samples.
+
+**Tile origin offset from the image origin.** `Options.TileOffset`, which makes
+the first tile partial in a way a zero origin never does. Exact.
+
+**Signed components and bit depths other than 8/16/32 are not expressible**, and
+finding that out was the axis that paid. The integer API is Go's `image.Image`,
+which reaches 8- and 16-bit unsigned and no further. `FloatImage` carries
+`BitDepth` and `Signed` — and `EncodeFloat` ignores both, writing `Ssiz` as
+32-bit signed whatever they hold, because binary32 bit patterns reinterpreted as
+samples can only be described that way. So `BitDepth: 12` produced a 32-bit
+codestream with no indication: the same shape as `Config.DecodeArea` before
+v1.5.2, a field declared, documented, and read by nothing.
+
+The fix is documentation and a test, not a refusal. Refusing was written first
+and reverted: three existing tests pass `BitDepth: 16` and `Signed: false` and
+their files are correct, so refusing would have broken working callers to make a
+point. The fields are now documented as decoder output, and
+`TestFloatImageBitDepthIsOutputOnly` asserts every value produces `Ssiz` 0x9F,
+so the asymmetry fails loudly if it ever changes.
+
+Four axes clean, one finding — and the four clean ones stay in the matrix.
+An axis that passes is evidence; an axis removed after passing is evidence
+thrown away.
 
 ### ~~Retire the remaining self-referential tests~~ — measured instead, which is better
 

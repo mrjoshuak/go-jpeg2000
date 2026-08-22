@@ -1673,6 +1673,39 @@ if ! have ojph_expand; then
 	gap "OpenJPH not installed; capability matrix unchecked"
 else
 	MX="$WORK/matrix"
+	# ---- a non-zero image offset, written by the reference ----------------
+	#
+	# XOsiz and YOsiz shift the image origin on the reference grid, and every
+	# tile and code-block rectangle is computed relative to them. A decoder
+	# that ignores the offset produces a plausible image of the right size
+	# holding the wrong samples, which no round trip through this library can
+	# see: our encoder does not write a non-zero offset, so the codestream has
+	# to come from somewhere else. opj_compress -d writes one.
+	#
+	# This axis was added when the matrix was widened. It found nothing, which
+	# is recorded rather than quietly dropped: an axis that passes is evidence,
+	# and one that is removed after passing is evidence thrown away.
+	if ! command -v opj_compress >/dev/null 2>&1; then
+		skip "image offset: opj_compress is not installed"
+	else
+		OFFD="$WORK/imgoffset"
+		mkdir -p "$OFFD"
+		if ! oiiotool --pattern noise:type=uniform:seed=7 48x32 1 -d uint8 -o "$OFFD/src.png" >/dev/null 2>&1; then
+			gap "image offset: could not build the source raster"
+		elif ! opj_compress -i "$OFFD/src.png" -o "$OFFD/off.j2k" -d 7,5 >/dev/null 2>&1; then
+			fail "image offset: the reference encoder would not write a non-zero XOsiz/YOsiz"
+		elif ! opj_decompress -i "$OFFD/off.j2k" -o "$OFFD/off.ref.pgm" >/dev/null 2>&1; then
+			fail "image offset: the reference cannot decode its own offset codestream"
+		else
+			d=$(go run ./scripts/decodecmp "$OFFD/off.j2k" "$OFFD/off.ref.pgm" 2>&1 | head -1)
+			if [ "$d" = "0" ]; then
+				pass "image offset: a codestream the reference wrote with XOsiz=7 YOsiz=5 decodes here sample for sample"
+			else
+				fail "image offset: $d samples differ from the reference's own decode of its offset codestream"
+			fi
+		fi
+	fi
+
 	if ! go run ./scripts/matrixgen "$MX" >"$WORK/matrix.tsv" 2>"$WORK/matrix.err"; then
 		fail "capability matrix: generator failed"
 		head -5 "$WORK/matrix.err"

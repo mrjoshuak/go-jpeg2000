@@ -9,8 +9,23 @@ import "image"
 type FloatImage struct {
 	Width, Height int
 	Components    [][]float32 // one slice per component (R, G, B, ...)
-	BitDepth      int         // original bit depth
-	Signed        bool
+
+	// BitDepth and Signed are filled in by the decoder from the codestream's
+	// Ssiz field. They are NOT inputs: EncodeFloat ignores whatever they hold.
+	//
+	// That is not an oversight but it was undocumented, which is worse. The
+	// float path reinterprets binary32 bit patterns as signed 32-bit samples,
+	// so Ssiz must say 32-bit signed for the samples to mean anything to
+	// another reader; a caller setting BitDepth to 12 cannot be given a 12-bit
+	// codestream, and until this was written down they were given a 32-bit one
+	// with no indication. Encoding refuses nothing here on purpose — callers
+	// already pass 16 and 32 and their files are correct — but the asymmetry
+	// is now stated rather than discovered.
+	//
+	// This came out of widening the conformance matrix past its existing axes,
+	// which is what that exercise is for.
+	BitDepth int
+	Signed   bool
 
 	// Cost reports what the decode spent. DecodeConfigCost exists because
 	// image.Image is an interface with nowhere to hang this; a FloatImage is

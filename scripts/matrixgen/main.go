@@ -97,7 +97,7 @@ func options(nres int, lossless bool, tile int) *jp2.Options {
 	return o
 }
 
-func writeRef(path string, comps, depth int) error {
+func writeRef(path string, comps, depth, w, h int) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -110,9 +110,9 @@ func writeRef(path string, comps, depth int) error {
 	if depth >= 16 {
 		maxv = 65535
 	}
-	fmt.Fprintf(f, "%s\n%d %d\n%d\n", magic, size, size, maxv)
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
+	fmt.Fprintf(f, "%s\n%d %d\n%d\n", magic, w, h, maxv)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
 			for c := 0; c < comps; c++ {
 				v := ramp(x, y, c)
 				if depth >= 16 {
@@ -128,18 +128,18 @@ func writeRef(path string, comps, depth int) error {
 
 // writeFloatRef writes the binary32 fixture as a little-endian PFM, whose rows
 // run bottom to top.
-func writeFloatRef(path string, comps int) error {
+func writeFloatRef(path string, comps, w, h int) error {
 	magic := "Pf"
 	if comps == 3 {
 		magic = "PF"
 	}
-	buf := []byte(fmt.Sprintf("%s\n%d %d\n-1.0\n", magic, size, size))
+	buf := []byte(fmt.Sprintf("%s\n%d %d\n-1.0\n", magic, w, h))
 	var word [4]byte
-	for row := 0; row < size; row++ {
-		y := size - 1 - row
-		for x := 0; x < size; x++ {
+	for row := 0; row < h; row++ {
+		y := h - 1 - row
+		for x := 0; x < w; x++ {
 			for c := 0; c < comps; c++ {
-				binary.LittleEndian.PutUint32(word[:], math.Float32bits(floatFixture(y*size+x, c)))
+				binary.LittleEndian.PutUint32(word[:], math.Float32bits(floatFixture(y*w+x, c)))
 				buf = append(buf, word[:]...)
 			}
 		}
@@ -180,6 +180,7 @@ type result struct {
 	kind   string
 	comps  int
 	depth  int
+	w, h   int
 	stream string
 	ref    string
 	err    error
@@ -196,30 +197,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	gray := func() *image.Gray {
-		img := image.NewGray(image.Rect(0, 0, size, size))
-		for y := 0; y < size; y++ {
-			for x := 0; x < size; x++ {
+	grayWH := func(w, h int) *image.Gray {
+		img := image.NewGray(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
 				img.Set(x, y, color.Gray{Y: uint8(ramp(x, y, 0))})
 			}
 		}
 		return img
 	}
+	gray := func() *image.Gray { return grayWH(size, size) }
 
-	floatImage := func(comps int) *jp2.FloatImage {
-		img := &jp2.FloatImage{Width: size, Height: size, BitDepth: 32, Signed: true,
+	floatImageWH := func(comps, w, h int) *jp2.FloatImage {
+		img := &jp2.FloatImage{Width: w, Height: h, BitDepth: 32, Signed: true,
 			Components: make([][]float32, comps)}
 		for c := 0; c < comps; c++ {
-			img.Components[c] = make([]float32, size*size)
+			img.Components[c] = make([]float32, w*h)
 			for i := range img.Components[c] {
 				img.Components[c][i] = floatFixture(i, c)
 			}
 		}
 		return img
 	}
+	floatImage := func(comps int) *jp2.FloatImage { return floatImageWH(comps, size, size) }
 
 	var results []result
-	run := func(name, kind string, comps, depth int, fn func(f *os.File) error) {
+	// runWH is run for a fixture whose dimensions are not the default square.
+	// Non-square is its own axis for a specific reason: every index in a
+	// wavelet, a code-block grid and a packet header is a function of width and
+	// height, and on a square image a transposed one is indistinguishable from
+	// a correct one. The matrix was square in every case until now.
+	runWH := func(name, kind string, comps, depth, w, h int, fn func(f *os.File) error) {
 		p := filepath.Join(dir, name+".j2c")
 		f, err := os.Create(p)
 		if err != nil {
@@ -231,12 +239,15 @@ func main() {
 		ref := filepath.Join(dir, name+".ref."+kind)
 		if err == nil {
 			if kind == "pfm" {
-				err = writeFloatRef(ref, comps)
+				err = writeFloatRef(ref, comps, w, h)
 			} else {
-				err = writeRef(ref, comps, depth)
+				err = writeRef(ref, comps, depth, w, h)
 			}
 		}
-		results = append(results, result{name, kind, comps, depth, p, ref, err})
+		results = append(results, result{name, kind, comps, depth, w, h, p, ref, err})
+	}
+	run := func(name, kind string, comps, depth int, fn func(f *os.File) error) {
+		runWH(name, kind, comps, depth, size, size, fn)
 	}
 
 	// Integer greyscale across resolution counts: the wavelet is only exercised
@@ -246,6 +257,34 @@ func main() {
 			return jp2.Encode(f, gray(), options(n, true, 0))
 		})
 	}
+
+	// Non-square, both paths. Every index in a wavelet, a code-block grid and
+	// a packet header is a function of width and height, and on a square image
+	// a transposed one is indistinguishable from a correct one. Both
+	// orientations are generated, because a decoder that transposes is correct
+	// on neither and a decoder that confuses the two is wrong on exactly one.
+	// The dimensions are odd multiples so the wavelet's odd-length case is
+	// exercised at more than one level.
+	for _, d := range [][2]int{{40, 24}, {24, 40}} {
+		w, h := d[0], d[1]
+		runWH(fmt.Sprintf("gray8_%dx%d", w, h), "pgm", 1, 8, w, h, func(f *os.File) error {
+			return jp2.Encode(f, grayWH(w, h), options(3, true, 0))
+		})
+		runWH(fmt.Sprintf("float3_%dx%d", w, h), "pfm", 3, 32, w, h, func(f *os.File) error {
+			return jp2.EncodeFloat(f, floatImageWH(3, w, h), options(3, true, 0))
+		})
+	}
+
+	// A tile grid whose origin is not the image origin. The tile rectangle is
+	// max(XTOsiz + i*XTsiz, XOsiz) .. min(XTOsiz + (i+1)*XTsiz, Xsiz), so an
+	// offset origin makes the first tile partial in a way a zero origin never
+	// does — every tile-boundary index is then computed from a different
+	// number than the one a zero-origin stream exercises.
+	run("gray8_tileorigin", "pgm", 1, 8, func(f *os.File) error {
+		o := options(3, true, 16)
+		o.TileOffset = image.Point{X: 4, Y: 6}
+		return jp2.Encode(f, gray(), o)
+	})
 
 	run("gray16", "pgm", 1, 16, func(f *os.File) error {
 		img := image.NewGray16(image.Rect(0, 0, size, size))
