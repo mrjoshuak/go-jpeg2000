@@ -5,6 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.7] - 2026-08-20
+
+### Added
+- **A mutation harness**, `scripts/mutation/`, ported from the sibling
+  go-openexr repository, closing the ROADMAP item "Retire the remaining
+  self-referential tests" with a measurement instead of a retirement. The
+  manifest carries five deliberate defects, each a bug this library actually
+  shipped or the exact shape of one. The measurement: **every pre-existing
+  round-trip test survives every one of the five.** Each is killed only by an
+  anchored test — cost-anchored for the two savings, wire-anchored for PLT, and
+  for the NLT mask a new `TestNLTType3MatchesTheDefinition` whose expected
+  values are literals. `nltType3` is one involution shared by encoder and
+  decoder, so a wrong mask still undoes itself perfectly and every round trip
+  passes while the wire means something else to every other reader. No test was
+  retired: a surviving round trip still guards what it guards, and the harness
+  now states exactly what that is and is not.
+- **CI runs the conformance gate on both architectures**, with the mutation
+  harness beside it. This package carries per-architecture assembly
+  (`internal/dwt` for amd64 and arm64, `internal/entropy` for amd64), and the
+  sibling repository's first amd64 gate run found two assembly declaration
+  errors its arm64 development machine had never built.
+
+## [1.5.6] - 2026-08-19
+
+### Fixed
+- **`ReduceResolution` was refused, and the refusal was a measurement error.**
+  It rested on comparing a reduced decode against a downsample of the full
+  decode; the LL band at resolution r is the image the wavelet reconstructs at
+  that scale, not an arithmetic average of the finer one, so the two disagree
+  by construction. Against the reference's own reduced decode this library was
+  already bit-exact: 8 configurations against `ojph_expand -skip_res` on the
+  float path, 4 against `opj_decompress -r` on the half path.
+- **A reduced decode cost exactly what a full one did**, entropy-decoding every
+  resolution and discarding the ones above the target. Now: reduce 1 decodes
+  65.7% of the code-block bytes, reduce 3 15.0%, reduce 5 2.2% (256x256, 6
+  resolutions).
+- **The wide-sample narrowing wrapped silently.** A reduced decode of binary32
+  content using the extremes of the NLT word produces an LL coefficient outside
+  the range the word maps from; `finish` truncated it with a plain int32
+  conversion — 9 of 256 samples wrong against OpenJPH, each by exactly the
+  sign-magnitude complement, nothing reported. It returns
+  `ErrSampleNotRepresentable` now, naming component, sample and value.
+
+### Gate
+- 243 checks. New: float reduced decodes against `ojph_expand -skip_res` (on a
+  magnitude-bounded fixture, because unbounded content leaves the range the
+  format defines an answer for), half reduced decodes against
+  `opj_decompress -r` via the new `scripts/halfpgm`, the non-representable case
+  reported rather than wrapped, and the measured cost.
+
+## [1.5.5] - 2026-08-19
+
+### Fixed
+- **A codestream written with `WritePacketLengths` could not be read back.**
+  `indexTileParts` required SOD immediately after SOT, which holds only when
+  the tile-part header is empty; a PLT marker sits between the two, so every
+  tile was indexed as absent and the decode produced DC-shifted nothing —
+  **99.6% of samples wrong** while OpenJPEG read the same bytes correctly. It
+  walks the marker segments to SOD now, as `packets.go` already did. The gate
+  never caught it because PLT was validated against OpenJPEG only, and the
+  encoder was right the whole time: a defect on this side of the round trip is
+  invisible to an external oracle by construction.
+
+### Gate
+- 239 checks. New: our own decoder reads our own PLT codestream, with and
+  without precincts, against the source image rather than a PLT-free decode.
+
+## [1.5.4] - 2026-08-19
+
+### Added
+- `HalfImage.Cost` and `FloatImage.Cost`, carrying the figures
+  `DecodeConfigCost` returns, because those concrete types are the only entry
+  points an EXR HTJ2K chunk ever reaches and a region gated on the
+  `image.Image` path alone would leave them unchecked. Both paths are now gated
+  for exactness and for skipping. Writing the checks measured the geometry: a
+  code-block's influence is its band rectangle grown by the synthesis margin,
+  about 64 samples at the lowest resolution of a five-level decode, so below
+  roughly 256x256 nothing can be skipped and a skip assertion on a small
+  fixture measures the image size rather than the code.
+
+## [1.5.3] - 2026-08-19
+
+### Fixed
+- **`Config.DecodeArea` is implemented.** Declared, documented as "specifies a
+  region to decode", and read by nothing; v1.5.2 made it refuse rather than
+  mislead, and it now works. The samples are exactly the ones a full decode
+  produces for that rectangle, the returned image is allocated for the region,
+  and code-blocks the region cannot reach are not entropy-decoded: a 64x64
+  region of a 256x256 image with 32x32 precincts decodes 5468 of 24913
+  code-block bytes (22%). The skip geometry took two attempts — detail bands
+  sit at half their resolution's grid and scale by one factor more than the LL
+  band; treating them alike was 254 of 256 samples wrong in a corner while the
+  middle of the image was fine.
+
+### Added
+- `DecodeConfigCost` and `DecodeCost`, so the saving a region buys is a
+  measurement rather than a claim.
+
 ## [1.5.2] - 2026-08-19
 
 ### Fixed
