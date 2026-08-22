@@ -418,9 +418,38 @@ the gate.
 The manifest is small and meant to grow the way go-openexr's did — a mutation
 per defect found, so the count only rises with evidence.
 
-### Performance
+### ~~Performance~~ — measured against both, in v1.5.11
 
-No optimisation has been attempted since correctness work began, and some was
-undone — the float path now runs a 64-bit transform chain where the magnitude
-budget requires it. Worth measuring against OpenJPEG and OpenJPH once the
-feature set is complete, not before.
+The bar was to measure once the feature set was complete. Milliseconds, best of
+three, 2048x2048 uniform noise, this machine. The reference figures are
+command-line wall clock and carry about 5.5 ms of process start and file I/O
+that an in-process Go call does not pay; that is stated rather than subtracted,
+because subtracting an estimate would be inventing a number.
+
+| implementation      | encode | decode |
+| :------------------ | -----: | -----: |
+| this library, HT    |   48.4 |  106.4 |
+| OpenJPH, HT         |   85.0 |   72.0 |
+| this library, Part 1|   84.6 | 1029.2 |
+| OpenJPEG, Part 1    |  521.0 |  502.0 |
+
+Compressed sizes are equivalent where the algorithms are — ours 263059 bytes
+against OpenJPH's 263082 on the 512x512 fixture — so this is the same work,
+not a faster encoder producing a worse file.
+
+**Against OpenJPH, the only fair HT comparison: encode is about 1.6x faster,
+decode about 1.6x slower.** Against OpenJPEG the encode is roughly six times
+faster, but Part 1 and HT are different algorithms and that number should not
+be quoted as a like-for-like win.
+
+**The outlier is our Part 1 decode: 1029 ms, twice OpenJPEG's and ten times our
+own HT decode of the same image.** The MQ arithmetic decoder is where that
+lives. It is the one figure here that looks like a defect rather than a
+trade-off, and it is recorded for a goal about speed rather than fixed under one
+about measurement.
+
+One methodological note worth keeping. At 512x512 this comparison made the
+library look eleven times faster than OpenJPH on encode — because the reference
+timings were dominated by process start at that size. The ratio reversed at
+2048x2048. A benchmark small enough to be quick is a benchmark measuring the
+harness.

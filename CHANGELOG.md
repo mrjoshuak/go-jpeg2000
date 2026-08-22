@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.11] - 2026-08-22
+
+### Added
+- **A head-to-head benchmark against OpenJPEG and OpenJPH**, `scripts/j2kbench`
+  and `scripts/j2kcmp.sh`, closing the Later item that asked for a measurement
+  once the feature set was complete. Milliseconds, best of three, 2048x2048
+  uniform noise: this library's HT path encodes in 48.4 and decodes in 106.4,
+  OpenJPH in 85.0 and 72.0, our Part 1 path in 84.6 and 1029.2, OpenJPEG in
+  521.0 and 502.0. The reference figures are CLI wall clock and carry about
+  5.5 ms of process start that an in-process call does not pay, which is stated
+  rather than subtracted.
+
+  Compressed sizes are equivalent where the algorithms are — 263059 bytes
+  against OpenJPH's 263082 — so this is the same work, not a faster encoder
+  producing a worse file.
+
+  Against OpenJPH, the only fair HT comparison, encode is about 1.6x faster and
+  decode about 1.6x slower. The outlier is our **Part 1 decode at 1029 ms**:
+  twice OpenJPEG's and ten times our own HT decode of the same image. The MQ
+  arithmetic decoder is where that lives, and it is the one figure that looks
+  like a defect rather than a trade-off.
+
+  A note on method, because the first version of this measurement was
+  misleading: at 512x512 it made this library look eleven times faster than
+  OpenJPH on encode, because the reference timings were dominated by process
+  start at that size. The ratio reversed at 2048x2048. A benchmark small enough
+  to be quick is a benchmark measuring the harness.
+
+### Gate
+- 256 checks, 0 failures, 0 known gaps. The speed check reports the ratio
+  rather than asserting a threshold — a threshold on a shared machine is a
+  check that gets excused later — and fails only past 20x, where an inner loop
+  is broken rather than merely slow.
+
 ## [1.5.10] - 2026-08-22
 
 ### Added

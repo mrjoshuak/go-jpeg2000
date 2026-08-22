@@ -1673,6 +1673,45 @@ if ! have ojph_expand; then
 	gap "OpenJPH not installed; capability matrix unchecked"
 else
 	MX="$WORK/matrix"
+	# ---- speed against OpenJPEG and OpenJPH -------------------------------
+	#
+	# Reported, not thresholded. A threshold on a shared machine is a check
+	# that gets excused later; the only assertion is a loose sanity bound that
+	# no amount of machine noise reaches and a broken inner loop would.
+	#
+	# The reference tools are command-line programs, so their timings carry
+	# process start and file I/O — about 5.5 ms here — that an in-process Go
+	# call does not pay. That is stated rather than subtracted: at 512x512 the
+	# overhead dominated and made this library look eleven times faster than
+	# OpenJPH, which reversed at 2048x2048 into a 1.6x win on encode and a 1.6x
+	# loss on decode. The fixture is large for that reason.
+	if ! command -v ojph_compress >/dev/null 2>&1; then
+		skip "codec speed: ojph_compress is not installed"
+	elif ! go build -o "$WORK/j2kbench" ./scripts/j2kbench/ 2>/dev/null; then
+		fail "codec speed: could not build scripts/j2kbench"
+	else
+		SPD="$WORK/speed"
+		mkdir -p "$SPD"
+		if ! oiiotool --pattern noise:type=uniform:seed=5 1024x1024 1 -d uint8 -o "$SPD/s.png" >/dev/null 2>&1 ||
+			! oiiotool "$SPD/s.png" -o "$SPD/s.pgm" >/dev/null 2>&1; then
+			gap "codec speed: could not build the fixture"
+		else
+			ours=$("$WORK/j2kbench" "$SPD/s.pgm" 2 ht 2>/dev/null | awk '$1=="encode"{print $2}')
+			refs=$(bash scripts/j2kcmp.sh "$SPD" "$SPD/s.pgm" 2 2>/dev/null | awk -F'\t' '$1=="openjph"{print $2}')
+			if [ -z "$ours" ] || [ -z "$refs" ]; then
+				gap "codec speed: one of the timings did not produce a number"
+			else
+				ratio=$(awk -v a="$ours" -v b="$refs" 'BEGIN{if(b<=0){print "0"}else{printf "%.2f", a/b}}')
+				over=$(awk -v r="$ratio" 'BEGIN{print (r>20)?1:0}')
+				if [ "$over" = "1" ]; then
+					fail "codec speed: HT encode is ${ratio}x OpenJPH's including its process start; an inner loop is broken, not merely slow"
+				else
+					pass "codec speed: HT encode ${ours}ms against OpenJPH's ${refs}ms wall clock (process start included, about 5.5ms of it) — reported, not thresholded, beyond a 20x sanity bound"
+				fi
+			fi
+		fi
+	fi
+
 	# ---- the RGN region-of-interest marker --------------------------------
 	#
 	# RGN is parsed rather than skipped, and an ROI style the standard does not
