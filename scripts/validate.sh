@@ -1692,8 +1692,7 @@ else
 	else
 		SPD="$WORK/speed"
 		mkdir -p "$SPD"
-		if ! oiiotool --pattern noise:type=uniform:seed=5 1024x1024 1 -d uint8 -o "$SPD/s.png" >/dev/null 2>&1 ||
-			! oiiotool "$SPD/s.png" -o "$SPD/s.pgm" >/dev/null 2>&1; then
+		if ! python3 scripts/mkpgm.py "$SPD/s.pgm" 1024 1024 5 >/dev/null 2>&1; then
 			gap "codec speed: could not build the fixture"
 		else
 			ours=$("$WORK/j2kbench" "$SPD/s.pgm" 2 ht 2>/dev/null | awk '$1=="encode"{print $2}')
@@ -1731,9 +1730,9 @@ else
 		RGND="$WORK/rgn"
 		mkdir -p "$RGND"
 		rgn_ok=1
-		oiiotool --pattern noise:type=uniform:seed=7 48x32 1 -d uint8 -o "$RGND/src.png" >/dev/null 2>&1
-		opj_compress -i "$RGND/src.png" -o "$RGND/roi.j2k" -ROI c=0,U=8 -r 10 >/dev/null 2>&1 || rgn_ok=0
-		opj_compress -i "$RGND/src.png" -o "$RGND/plain.j2k" -r 10 >/dev/null 2>&1 || rgn_ok=0
+		python3 scripts/mkpgm.py "$RGND/src.pgm" 48 32 7 >/dev/null 2>&1 || rgn_ok=0
+		opj_compress -i "$RGND/src.pgm" -o "$RGND/roi.j2k" -ROI c=0,U=8 -r 10 >/dev/null 2>&1 || rgn_ok=0
+		opj_compress -i "$RGND/src.pgm" -o "$RGND/plain.j2k" -r 10 >/dev/null 2>&1 || rgn_ok=0
 		if [ "$rgn_ok" = "0" ]; then
 			gap "RGN marker: the reference encoder would not build the fixtures"
 		else
@@ -1801,8 +1800,8 @@ else
 		fi
 
 		# And the other direction: the reference's own SOP/EPH stream read here.
-		if oiiotool --pattern noise:type=uniform:seed=3 48x32 1 -d uint8 -o "$SOPD/src.png" >/dev/null 2>&1 &&
-			opj_compress -i "$SOPD/src.png" -o "$SOPD/ref.j2k" -SOP -EPH >/dev/null 2>&1 &&
+		if python3 scripts/mkpgm.py "$SOPD/src.pgm" 48 32 3 >/dev/null 2>&1 &&
+			opj_compress -i "$SOPD/src.pgm" -o "$SOPD/ref.j2k" -SOP -EPH >/dev/null 2>&1 &&
 			opj_decompress -i "$SOPD/ref.j2k" -o "$SOPD/ref.pgm" >/dev/null 2>&1; then
 			d=$(go run ./scripts/decodecmp "$SOPD/ref.j2k" "$SOPD/ref.pgm" 2>&1 | head -1)
 			if [ "$d" = "0" ]; then
@@ -1894,9 +1893,9 @@ else
 	else
 		OFFD="$WORK/imgoffset"
 		mkdir -p "$OFFD"
-		if ! oiiotool --pattern noise:type=uniform:seed=7 48x32 1 -d uint8 -o "$OFFD/src.png" >/dev/null 2>&1; then
+		if ! python3 scripts/mkpgm.py "$OFFD/src.pgm" 48 32 7 >/dev/null 2>&1; then
 			gap "image offset: could not build the source raster"
-		elif ! opj_compress -i "$OFFD/src.png" -o "$OFFD/off.j2k" -d 7,5 >/dev/null 2>&1; then
+		elif ! opj_compress -i "$OFFD/src.pgm" -o "$OFFD/off.j2k" -d 7,5 >/dev/null 2>&1; then
 			fail "image offset: the reference encoder would not write a non-zero XOsiz/YOsiz"
 		elif ! opj_decompress -i "$OFFD/off.j2k" -o "$OFFD/off.ref.pgm" >/dev/null 2>&1; then
 			fail "image offset: the reference cannot decode its own offset codestream"

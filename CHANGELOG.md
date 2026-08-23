@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Such a case is reported as an `ARCH` line naming the job that does run the
   test, not skipped silently.
 
+### Fixed
+- **Four gate checks depended on `oiiotool` and failed in CI**, which does not
+  install it. They passed here because this machine has it and passed in the
+  sibling repository because its CI builds OpenImageIO from source; this
+  repository's CI has neither, and the checks added in v1.5.8 through v1.5.11
+  reported "could not build the fixture" on both architectures. Fixtures are
+  written by `scripts/mkpgm.py` now, which needs nothing that is not already
+  required. A gate whose fixtures need a tool the gate does not require is a
+  gate that only runs where it was written.
+
 ### Gate
 - 256 checks, 0 failures, 0 known gaps. 7 mutations, 0 mismatches.
 
