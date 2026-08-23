@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.12] - 2026-08-22
+
+### Fixed
+- **The mutation harness could call a test it cannot execute a test that does
+  not exist.** Ported from the sibling repository, where a mutation pinned to
+  `GOARCH=amd64` aborted the arm64 CI job: `go test` for a foreign architecture
+  builds the binary and cannot run it, so no test name is reported, which is
+  indistinguishable from a missing one. No mutation here pins a GOARCH today,
+  so this repository was not affected — the fix is carried across because the
+  two harnesses are the same file and diverging them silently is how one of
+  them ends up with a hole the other does not.
+
+  Such a case is reported as an `ARCH` line naming the job that does run the
+  test, not skipped silently.
+
+### Gate
+- 256 checks, 0 failures, 0 known gaps. 7 mutations, 0 mismatches.
+
 ## [1.5.11] - 2026-08-22
 
 ### Added
