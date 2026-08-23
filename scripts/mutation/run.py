@@ -139,7 +139,7 @@ RUN_RE = re.compile(r"^=== RUN\s+(\S+)", re.M)
 RESULT_RE = re.compile(r"^\s*--- (PASS|FAIL|SKIP):\s+(\S+)", re.M)
 
 
-def run_test(pkg, name, timeout=300, goarch=None):
+def run_test(pkg, name, timeout=300, goarch=None, race=False):
     """Run one test. Returns (status, detail) where status is
     pass | fail | skip | notfound | buildfail.
 
@@ -150,8 +150,15 @@ def run_test(pkg, name, timeout=300, goarch=None):
     listed with a goarch runs there instead, which on a machine that cannot
     execute that architecture natively means an emulator, and without one the
     run is reported as a build failure rather than a pass."""
-    cmd = [
-        "go", "test", pkg,
+    cmd = ["go", "test", pkg]
+    # Some defects are only observable to the race detector. A pooled buffer
+    # released before the decode that reads from it is one: the ordering is
+    # wrong, but Put does not invalidate the slice, so a plain run usually wins
+    # the race and reports nothing. Marking such a test race:true is what makes
+    # the mutation for it die rather than survive for want of bad luck.
+    if race:
+        cmd.append("-race")
+    cmd += [
         "-run", f"^{name}$",
         "-count=1", "-v",
         f"-timeout={timeout}s",
@@ -276,7 +283,8 @@ def main():
         saved = apply_mutation(m)
         try:
             for phase, t in entries:
-                status, detail = run_test(t["pkg"], t["run"], goarch=t.get("goarch"))
+                status, detail = run_test(t["pkg"], t["run"], goarch=t.get("goarch"),
+                                          race=bool(t.get("race")))
                 # Every test name in the manifest is verified against the
                 # source before any mutation is applied, so a name that reports
                 # notfound at run time under a foreign GOARCH cannot be a
