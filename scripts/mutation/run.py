@@ -164,6 +164,15 @@ def run_test(pkg, name, timeout=300, goarch=None):
         env=env,
     )
     out = proc.stdout + proc.stderr
+    # A GOARCH the host cannot execute is not a missing test, and the two look
+    # identical from the outside: `go test` for a foreign architecture builds
+    # the binary and then fails to run it, so no test name is ever reported.
+    # This machine has an emulator and the amd64 CI runner is native, so the
+    # difference only appeared on the Linux arm64 runner, where a mutation
+    # pinned to amd64 aborted the harness as "no such test".
+    if goarch and re.search(r"exec format error|cannot execute|bad CPU type|"
+                            r"Exec format error", out):
+        return "unrunnable", f"this host cannot execute {goarch} binaries"
     if "build failed" in out or "cannot use" in out or "[build failed]" in out:
         if not RUN_RE.search(out):
             return "buildfail", out.strip().splitlines()[-1] if out.strip() else ""
@@ -268,6 +277,25 @@ def main():
         try:
             for phase, t in entries:
                 status, detail = run_test(t["pkg"], t["run"], goarch=t.get("goarch"))
+                # Every test name in the manifest is verified against the
+                # source before any mutation is applied, so a name that reports
+                # notfound at run time under a foreign GOARCH cannot be a
+                # missing test — it is a binary this host cannot execute. That
+                # reasoning is used rather than matching an error string,
+                # because the string could not be observed from here: this
+                # machine has an emulator and the amd64 runner is native, so
+                # the case only arises on the Linux arm64 runner.
+                if status == "notfound" and t.get("goarch"):
+                    status = "unrunnable"
+                    detail = f"this host cannot execute {t['goarch']} binaries"
+                if status == "unrunnable":
+                    # Reported rather than counted, and not silently: the other
+                    # architecture's job runs this one natively, and a mutation
+                    # that is quietly skipped everywhere is a mutation that
+                    # verifies nothing.
+                    print(f"   ARCH    {phase:8s} {t['pkg']} {t['run']}: {detail}, "
+                          f"verified by the {t.get('goarch')} job")
+                    continue
                 if status == "notfound":
                     print(f"   ERROR   {phase:8s} {t['pkg']} {t['run']}: no such test")
                     restore(saved)
