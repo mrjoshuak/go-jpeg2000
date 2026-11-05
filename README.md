@@ -118,6 +118,29 @@ fmt.Printf("ColorSpace: %v\n", meta.ColorSpace)
 fmt.Printf("Tiles: %dx%d\n", meta.NumTilesX, meta.NumTilesY)
 ```
 
+### Signed 16-bit Samples
+
+```go
+// image.Image is unsigned; Int16Image carries signed samples as they are,
+// e.g. CT in Hounsfield units (DICOM PixelRepresentation 1).
+img := &jpeg2000.Int16Image{
+    Width:      736,
+    Height:     736,
+    Components: [][]int16{huSamples}, // row-major, one slice per component
+}
+
+opts := jpeg2000.DefaultOptions()
+opts.Format = jpeg2000.FormatJ2K
+opts.HighThroughput = true
+
+err := jpeg2000.EncodeInt16(file, img, opts) // always lossless; SIZ Ssiz = 0x8F
+
+decoded, err := jpeg2000.DecodeInt16(file2) // refuses unsigned, >16-bit and float data
+```
+
+`Decode` returns an `image.Image`, whose types are unsigned, so it clamps a
+signed component's negative samples to zero; `DecodeInt16` returns them.
+
 ### Float Encoding (32-bit HDR)
 
 ```go

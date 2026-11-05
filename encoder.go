@@ -53,6 +53,10 @@ type encoder struct {
 	floatImg *FloatImage
 	halfImg  *HalfImage
 
+	// Signed 16-bit integer samples, from EncodeInt16. Unlike halfImg these
+	// are integers already, so no point transform applies.
+	int16Img *Int16Image
+
 	// Wide sample state. A binary32 component fills the whole int32 range
 	// after the NLT Type 3 point transform, so its wavelet coefficients need
 	// more magnitude bits than a 32-bit sign-magnitude word holds. See wide.go.
@@ -574,6 +578,68 @@ func (e *encoder) extractHalfData() error {
 func (e *encoder) encodeHalf() error {
 	if err := e.extractHalfData(); err != nil {
 		return fmt.Errorf("extracting half data: %w", err)
+	}
+
+	if err := e.preprocess(); err != nil {
+		return fmt.Errorf("preprocessing: %w", err)
+	}
+
+	cs, err := e.generateCodestream()
+	if err != nil {
+		return fmt.Errorf("generating codestream: %w", err)
+	}
+
+	switch e.options.Format {
+	case FormatJP2:
+		return e.writeJP2(cs)
+	case FormatJ2K:
+		_, err := e.w.Write(cs)
+		return err
+	default:
+		return fmt.Errorf("unsupported format: %s", e.options.Format)
+	}
+}
+
+// extractInt16Data takes the samples of an Int16Image as they are. Each
+// component is declared 16-bit signed, so preprocess leaves out the DC level
+// shift and the wavelet sees the signed values directly.
+func (e *encoder) extractInt16Data() error {
+	m := e.int16Img
+	if m == nil || len(m.Components) == 0 {
+		return fmt.Errorf("int16 image has no components")
+	}
+	if m.Width <= 0 || m.Height <= 0 {
+		return fmt.Errorf("invalid int16 image size %dx%d", m.Width, m.Height)
+	}
+	want := m.Width * m.Height
+	for c, comp := range m.Components {
+		if len(comp) != want {
+			return fmt.Errorf("int16 component %d has %d samples, want %d", c, len(comp), want)
+		}
+	}
+
+	e.numComponents = len(m.Components)
+	e.componentPrecision = make([]int, e.numComponents)
+	e.componentSigned = make([]bool, e.numComponents)
+	e.componentData = make([][]int32, e.numComponents)
+	for c := 0; c < e.numComponents; c++ {
+		e.componentPrecision[c] = 16
+		e.componentSigned[c] = true
+		e.componentData[c] = make([]int32, want)
+		for i, v := range m.Components[c] {
+			e.componentData[c][i] = int32(v)
+		}
+	}
+	e.width = m.Width
+	e.height = m.Height
+
+	return e.applySubsampling()
+}
+
+// encodeInt16 encodes an Int16Image.
+func (e *encoder) encodeInt16() error {
+	if err := e.extractInt16Data(); err != nil {
+		return fmt.Errorf("extracting int16 data: %w", err)
 	}
 
 	if err := e.preprocess(); err != nil {
@@ -1698,12 +1764,22 @@ func (e *encoder) writeJP2(codestream []byte) error {
 		}
 	}
 
-	// Write JP2 header
+	// Write JP2 header. BPC is Ssiz's encoding: precision minus one, with
+	// bit 7 for signed samples (ISO/IEC 15444-1 I.5.3.1). Leaving the sign
+	// bit off for a signed codestream makes the box contradict SIZ.
+	bpc := uint8(e.maxPrecision() - 1)
+	allSigned := e.numComponents > 0
+	for c := 0; c < e.numComponents; c++ {
+		allSigned = allSigned && e.componentSigned[c]
+	}
+	if allSigned {
+		bpc |= 0x80
+	}
 	jp2hBox := box.CreateJP2Header(
 		uint32(e.width),
 		uint32(e.height),
 		uint16(e.numComponents),
-		uint8(e.maxPrecision()-1),
+		bpc,
 		colorspace,
 	)
 	if err := boxWriter.WriteBox(jp2hBox); err != nil {

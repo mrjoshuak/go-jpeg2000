@@ -1909,6 +1909,72 @@ else
 		fi
 	fi
 
+	# ---- signed 16-bit samples -------------------------------------------
+	#
+	# image.Image is unsigned, so before EncodeInt16 a signed source -- CT in
+	# Hounsfield units is the common one -- had to be offset into an unsigned
+	# range and the codestream described something other than the data. These
+	# codestreams declare Ssiz 0x8F and carry the samples as they are, and both
+	# references are asked for them back as signed raw samples. The fixtures
+	# include the DICOM HTJ2K Lossless RPCL parameters at a real CT frame size,
+	# and the two ends of the int16 range, which no CT slice reaches.
+	#
+	# Controls first: each reference must round-trip a signed raw raster
+	# through its own codec, or a mismatch would measure its raw I/O, not us.
+	I16="$WORK/int16"
+	mkdir -p "$I16"
+	if ! go run ./scripts/int16gen "$I16" >"$I16/cases.tsv" 2>"$I16/err"; then
+		fail "signed 16-bit: generator failed: $(head -1 "$I16/err")"
+	else
+		IFS=$'\t' read -r _ _ cw ch _ cref <"$I16/cases.tsv"
+		ojph_ok=0
+		if ojph_compress -i "$cref" -o "$I16/ctl.j2c" -dims "{$cw,$ch}" -num_comps 1 \
+			-signed true -bit_depth 16 -downsamp "{1,1}" -reversible true >/dev/null 2>&1 &&
+			ojph_expand -i "$I16/ctl.j2c" -o "$I16/ctl.raw" >/dev/null 2>&1 &&
+			cmp -s "$I16/ctl.raw" "$cref"; then
+			ojph_ok=1
+		else
+			gap "signed 16-bit: OpenJPH does not round-trip a signed raw raster, measurement would be meaningless"
+		fi
+		opj_ok=0
+		if ! have opj_decompress; then
+			gap "signed 16-bit: OpenJPEG is not installed"
+		elif cp "$cref" "$I16/ctl.rawl" &&
+			opj_compress -i "$I16/ctl.rawl" -F "$cw,$ch,1,16,s" -o "$I16/ctl.j2k" >/dev/null 2>&1 &&
+			opj_decompress -i "$I16/ctl.j2k" -o "$I16/ctl.out.rawl" >/dev/null 2>&1 &&
+			cmp -s "$I16/ctl.out.rawl" "$cref"; then
+			opj_ok=1
+		else
+			gap "signed 16-bit: OpenJPEG does not round-trip a signed raw raster, measurement would be meaningless"
+		fi
+		while IFS=$'\t' read -r name coder w h stream ref; do
+			if [ "$coder" = ht ] && [ "$ojph_ok" = 1 ]; then
+				if ! err=$(ojph_expand -i "$stream" -o "$I16/$name.ojph.raw" 2>&1); then
+					fail "signed 16-bit $name: OpenJPH refused our codestream: $(echo "$err" | grep -oE 'ojph error.*' | head -1 | cut -c1-70)"
+				elif cmp -s "$I16/$name.ojph.raw" "$ref"; then
+					pass "signed 16-bit $name (${w}x${h}): OpenJPH decodes it exactly"
+				else
+					fail "signed 16-bit $name: OpenJPH decodes different samples"
+				fi
+			fi
+			if [ "$opj_ok" = 1 ]; then
+				# The header has to say signed too: a reader that took Ssiz for
+				# unsigned would apply the DC shift and get every sample wrong
+				# by 32768, which the sample comparison would catch, but the
+				# dump says why.
+				if have opj_dump && ! opj_dump -i "$stream" 2>/dev/null | grep -q 'sgnd=1'; then
+					fail "signed 16-bit $name: OpenJPEG does not read the component as signed"
+				elif ! opj_decompress -i "$stream" -o "$I16/$name.opj.rawl" >/dev/null 2>&1; then
+					fail "signed 16-bit $name: OpenJPEG refused our codestream"
+				elif cmp -s "$I16/$name.opj.rawl" "$ref"; then
+					pass "signed 16-bit $name (${w}x${h}, $coder): OpenJPEG decodes it exactly and reads it as signed"
+				else
+					fail "signed 16-bit $name: OpenJPEG decodes different samples"
+				fi
+			fi
+		done <"$I16/cases.tsv"
+	fi
+
 	if ! go run ./scripts/matrixgen "$MX" >"$WORK/matrix.tsv" 2>"$WORK/matrix.err"; then
 		fail "capability matrix: generator failed"
 		head -5 "$WORK/matrix.err"
