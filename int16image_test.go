@@ -261,10 +261,26 @@ func TestDecodeInt16Refuses(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A signed codestream whose SIZ claims 20-bit samples: the refusal is
+	// made from the header, before anything is decoded.
+	var signed bytes.Buffer
+	if err := EncodeInt16(&signed, &Int16Image{Width: 8, Height: 8, Components: [][]int16{make([]int16, 64)}}, opts); err != nil {
+		t.Fatal(err)
+	}
+	wide := append([]byte{}, signed.Bytes()...)
+	if sizSsiz(t, wide, 0) != 0x8F {
+		t.Fatal("fixture is not 16-bit signed")
+	}
+	wide[2+40] = 0x80 | (20 - 1)
+
 	for name, cs := range map[string][]byte{
-		"unsigned": unsigned.Bytes(),
-		"half":     half.Bytes(),
-		"float":    float.Bytes(),
+		"unsigned":      unsigned.Bytes(),
+		"half":          half.Bytes(),
+		"float":         float.Bytes(),
+		"20-bit signed": wide,
+		"not JPEG 2000": []byte("definitely not a codestream"),
+		"truncated SIZ": signed.Bytes()[:20],
+		"empty":         nil,
 	} {
 		if _, err := DecodeInt16(bytes.NewReader(cs)); err == nil {
 			t.Errorf("%s: DecodeInt16 accepted it", name)
@@ -283,6 +299,15 @@ func TestEncodeInt16RejectsBadInput(t *testing.T) {
 		if err := EncodeInt16(&bytes.Buffer{}, img, nil); err == nil {
 			t.Errorf("%s: EncodeInt16 accepted it", name)
 		}
+	}
+
+	// A format this encoder does not write is refused, not written as
+	// something else.
+	opts := DefaultOptions()
+	opts.Format = FormatJPX
+	img := &Int16Image{Width: 4, Height: 4, Components: [][]int16{make([]int16, 16)}}
+	if err := EncodeInt16(&bytes.Buffer{}, img, opts); err == nil {
+		t.Errorf("FormatJPX: EncodeInt16 accepted it")
 	}
 }
 
