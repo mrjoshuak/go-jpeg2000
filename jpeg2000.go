@@ -486,6 +486,54 @@ func EncodeHalf(w io.Writer, img *HalfImage, o *Options) error {
 	return e.encodeHalf()
 }
 
+// EncodeInt16 writes an Int16Image to w in JPEG 2000 format, with every
+// component declared 16-bit signed (Ssiz 0x8F).
+//
+// Encoding is always lossless (5/3 reversible wavelet), whatever o.Lossless
+// says; o itself is not modified. Precision does not apply: the samples are
+// coded at 16 bits as given.
+func EncodeInt16(w io.Writer, img *Int16Image, o *Options) error {
+	if o == nil {
+		o = DefaultOptions()
+	}
+	// Copy before forcing Lossless, as EncodeHalf does: o belongs to the
+	// caller.
+	opts := *o
+	opts.Lossless = true
+	e := &encoder{
+		w:        w,
+		options:  &opts,
+		int16Img: img,
+	}
+	return e.encodeInt16()
+}
+
+// DecodeInt16 reads a JPEG 2000 image whose components are signed integers of
+// at most 16 bits, such as one written by EncodeInt16, and returns the samples
+// as they were coded. It returns an error for unsigned components, for
+// components wider than 16 bits, and for half or float data (an NLT marker),
+// rather than reinterpreting samples that are not signed integers.
+//
+// Decode, by contrast, returns an image.Image, whose types are unsigned, and
+// clamps a signed component's negative samples to zero.
+func DecodeInt16(r io.Reader) (*Int16Image, error) {
+	return DecodeInt16Config(r, nil)
+}
+
+// DecodeInt16Config decodes a signed integer JPEG 2000 image with the
+// specified configuration.
+func DecodeInt16Config(r io.Reader, cfg *Config) (*Int16Image, error) {
+	if err := checkConfig(cfg); err != nil {
+		return nil, err
+	}
+	d := newDecoder(r)
+	img, err := d.decodeInt16(cfg)
+	if img != nil {
+		img.Cost = DecodeCost{Decoded: d.regionBytes, Skipped: d.skippedBytes}
+	}
+	return img, err
+}
+
 // DecodeHalf reads a JPEG 2000 image written by EncodeHalf and returns the
 // exact binary16 bit patterns. It returns an error if the codestream does not
 // carry 16-bit NLT Type 3 samples, rather than silently reinterpreting data

@@ -391,6 +391,12 @@ point. The fields are now documented as decoder output, and
 `TestFloatImageBitDepthIsOutputOnly` asserts every value produces `Ssiz` 0x9F,
 so the asymmetry fails loudly if it ever changes.
 
+Signed 16-bit components are expressible now: `Int16Image` and `EncodeInt16`
+write Ssiz 0x8F with no DC level shift, and `DecodeInt16` reads them back. The
+gate decodes CT-like signed frames — including the DICOM HTJ2K Lossless RPCL
+parameters at 736x736 — and the two ends of the int16 range with OpenJPH and
+OpenJPEG, exactly. Signed depths other than 16 are still not writable.
+
 Four axes clean, one finding — and the four clean ones stay in the matrix.
 An axis that passes is evidence; an axis removed after passing is evidence
 thrown away.

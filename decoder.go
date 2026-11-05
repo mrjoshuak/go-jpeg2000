@@ -1160,6 +1160,59 @@ func (d *decoder) decodeHalf(cfg *Config) (*HalfImage, error) {
 	}, nil
 }
 
+// decodeInt16 decodes the image as an Int16Image.
+func (d *decoder) decodeInt16(cfg *Config) (*Int16Image, error) {
+	if err := d.readFormat(); err != nil {
+		return nil, fmt.Errorf("reading format: %w", err)
+	}
+
+	if err := d.parseCodestream(); err != nil {
+		return nil, fmt.Errorf("parsing codestream: %w", err)
+	}
+
+	h := d.header
+	numComp := int(h.NumComponents)
+	if numComp == 0 || len(h.ComponentInfo) == 0 {
+		return nil, fmt.Errorf("invalid image: no components")
+	}
+
+	// Refuse anything that is not a signed integer of at most 16 bits. The
+	// samples of such a component fit int16 exactly; anything else would be
+	// truncated or reinterpreted, silently.
+	for c := 0; c < numComp; c++ {
+		if h.HasNLT(c) {
+			return nil, fmt.Errorf("component %d has an NLT marker: float data, not integers", c)
+		}
+		if !h.ComponentInfo[c].IsSigned() {
+			return nil, fmt.Errorf("component %d is unsigned: not signed integer data", c)
+		}
+		if p := h.ComponentInfo[c].Precision(); p > 16 {
+			return nil, fmt.Errorf("component %d has %d-bit precision, want at most 16", c, p)
+		}
+	}
+
+	componentData, width, height, err := d.decodePlanes(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	components := make([][]int16, numComp)
+	for c := 0; c < numComp; c++ {
+		components[c] = make([]int16, width*height)
+		for i, v := range componentData[c] {
+			// A lossless decode is in range by construction; a lossy one can
+			// overshoot by a little, and saturating is the honest answer.
+			components[c][i] = int16(clampInt32(v, math.MinInt16, math.MaxInt16))
+		}
+	}
+
+	return &Int16Image{
+		Width:      width,
+		Height:     height,
+		Components: components,
+	}, nil
+}
+
 // decodeFloat decodes the image as a FloatImage.
 func (d *decoder) decodeFloat(cfg *Config) (*FloatImage, error) {
 	if err := d.readFormat(); err != nil {

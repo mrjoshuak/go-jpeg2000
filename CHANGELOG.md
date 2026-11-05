@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Signed 16-bit input: `Int16Image`, `EncodeInt16`, `DecodeInt16` and
+  `DecodeInt16Config`.** Go's `image.Image` types are unsigned, so a signed
+  source — CT in Hounsfield units is the common one — had to be offset into an
+  unsigned range, and the codestream then described something other than the
+  data (DICOM ties PixelRepresentation to the SIZ sign bit). `EncodeInt16`
+  declares each component 16-bit signed (Ssiz 0x8F), skips the DC level shift
+  as G.1.2 requires for signed components, and codes losslessly on both the
+  Part 1 and HT paths; like `EncodeHalf` it forces `Lossless` on a copy of the
+  caller's options. `DecodeInt16` refuses unsigned, wider-than-16-bit and NLT
+  (float) components rather than reinterpreting them.
+
+### Fixed
+- **The JP2 `ihdr` box declared signed codestreams unsigned.** BPC was written
+  as precision minus one with the sign bit always clear, contradicting SIZ for
+  every signed codestream — which until now meant the `EncodeFloat` and
+  `EncodeHalf` JP2 output. Bit 7 is set when every component is signed
+  (I.5.3.1).
+
+### Gate
+- Signed 16-bit write checks: `scripts/int16gen` writes CT-like frames (air,
+  soft tissue, a bone ring, dense spots, noise), among them the DICOM HTJ2K
+  Lossless RPCL parameters at 736x736, and the int16 extremes, on both coders.
+  OpenJPH and OpenJPEG decode every one to the exact signed samples, and
+  `opj_dump` reports the component as signed. Each reference first round-trips
+  a signed raw raster of its own, as the control.
+
 ## [1.5.12] - 2026-08-22
 
 ### Fixed
