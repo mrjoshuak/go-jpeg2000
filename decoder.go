@@ -843,7 +843,7 @@ func (d *decoder) createImage(
 					v = maxVal
 				}
 				// Scale to 16-bit
-				v = v * 65535 / maxVal
+				v = scaleTo16(v, maxVal)
 				img.SetGray16(x, y, color.Gray16{Y: uint16(v)})
 			}
 		}
@@ -896,9 +896,9 @@ func (d *decoder) createImage(
 				b = clampInt32(b, 0, maxVal)
 
 				// Scale to 16-bit
-				r = r * 65535 / maxVal
-				g = g * 65535 / maxVal
-				b = b * 65535 / maxVal
+				r = scaleTo16(r, maxVal)
+				g = scaleTo16(g, maxVal)
+				b = scaleTo16(b, maxVal)
 
 				img.SetRGBA64(x, y, color.RGBA64{
 					R: uint16(r),
@@ -949,10 +949,10 @@ func (d *decoder) createImage(
 				b := clampInt32(componentData[2][idx], 0, maxVal)
 				a := clampInt32(componentData[3][idx], 0, maxVal)
 
-				r = r * 65535 / maxVal
-				g = g * 65535 / maxVal
-				b = b * 65535 / maxVal
-				a = a * 65535 / maxVal
+				r = scaleTo16(r, maxVal)
+				g = scaleTo16(g, maxVal)
+				b = scaleTo16(b, maxVal)
+				a = scaleTo16(a, maxVal)
 
 				img.SetRGBA64(x, y, color.RGBA64{
 					R: uint16(r),
@@ -967,6 +967,17 @@ func (d *decoder) createImage(
 	default:
 		return nil, fmt.Errorf("unsupported number of components: %d", numComp)
 	}
+}
+
+// scaleTo16 maps a sample in [0, maxVal] onto [0, 65535].
+//
+// The product is formed in 64 bits. In int32, v*65535 passes MaxInt32 for any
+// v above 32768, and the wrapped quotient returned v-1 for every 16-bit
+// sample in the upper half of the range — a lossless codestream decoded with
+// half its values off by one. maxVal can exceed 65535 too, for precisions
+// above 16, where the int32 product wrapped much further.
+func scaleTo16(v, maxVal int32) int32 {
+	return int32(int64(v) * 65535 / int64(maxVal))
 }
 
 // Helper function

@@ -241,6 +241,37 @@
         "added": "killed",
         "existing": "survived"
       }
+    },
+    {
+      "id": "gray16-scale-int32",
+      "codec": "decode",
+      "description": "the 16-bit output rescale v*65535/maxVal is computed in int32, as it was until this fix",
+      "spec": "A lossless codestream decodes to its source samples. In int32 the product v*65535 passes MaxInt32 for every v above 32768, and the wrapped quotient returns v-1: half the 16-bit range off by one, in Part 1 and HT alike. OpenJPH decodes the same bytes exactly, so the codestream was right and the decoder was not. The pre-existing 16-bit round-trip tests survive it because they check dimensions only.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "decoder.go",
+          "count": 1,
+          "old": "\treturn int32(int64(v) * 65535 / int64(maxVal))",
+          "new": "\treturn v * 65535 / maxVal"
+        }
+      ],
+      "existing_tests": [
+        {
+          "pkg": "./",
+          "run": "TestDecode_Gray16Roundtrip"
+        }
+      ],
+      "added_tests": [
+        {
+          "pkg": "./",
+          "run": "TestDecode16BitUpperHalf"
+        }
+      ],
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     }
   ]
 }
