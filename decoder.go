@@ -24,9 +24,9 @@ type decoder struct {
 	jp2Header  *box.JP2Header
 	codestream []byte
 
-	// tileParts maps a tile index to the byte range of its tile-part data,
-	// built once on first use.
-	tileParts map[int][2]int
+	// tileParts maps a tile index to the byte ranges of its tile-parts' data,
+	// in tile-part order, built once on first use.
+	tileParts map[int][][2]int
 
 	// region is the decode area in output coordinates when one is in force,
 	// and the count of code-block bytes decoded and skipped because of it.
@@ -669,20 +669,53 @@ func (d *decoder) findTileData(tileIdx int) []byte {
 	if d.tileParts == nil {
 		d.tileParts = d.indexTileParts()
 	}
-	r, ok := d.tileParts[tileIdx]
-	if !ok {
+	parts := d.tileParts[tileIdx]
+	switch len(parts) {
+	case 0:
 		return nil
+	case 1:
+		return d.codestream[parts[0][0]:parts[0][1]]
 	}
-	return d.codestream[r[0]:r[1]]
+	// A tile split across tile-parts is one packet sequence that continues
+	// from each tile-part into the next (ISO/IEC 15444-1 A.4.2), and no packet
+	// straddles a boundary, so the tile's data is the parts' data in order.
+	n := 0
+	for _, r := range parts {
+		n += r[1] - r[0]
+	}
+	data := make([]byte, 0, n)
+	for _, r := range parts {
+		data = append(data, d.codestream[r[0]:r[1]]...)
+	}
+	return data
 }
 
-// indexTileParts records, for every tile index, the first tile-part that
-// declares it. The walk is byte by byte rather than tile-part by tile-part so
+// indexTileParts records, for every tile index, the data of each of its
+// tile-parts. The walk is byte by byte rather than tile-part by tile-part so
 // that a file whose Psot values do not partition the codestream is treated
 // exactly as the previous per-tile scan treated it.
-func (d *decoder) indexTileParts() map[int][2]int {
+//
+// It used to record only the first tile-part of each tile. A tile written as
+// several — OpenJPH's "-tileparts R", one per resolution — then decoded from
+// its lowest resolution alone: the right dimensions, holding a blurred image.
+//
+// A tile's first tile-part is found as it always was. A later one is taken
+// only when its TPsot is the next index for that tile and it does not lie
+// inside data already attributed to a tile-part, so that compressed data
+// which happens to look like an SOT segment is not read as one.
+func (d *decoder) indexTileParts() map[int][][2]int {
 	cs := d.codestream
-	out := map[int][2]int{}
+	out := map[int][][2]int{}
+	insideData := func(i int) bool {
+		for _, parts := range out {
+			for _, r := range parts {
+				if i >= r[0] && i < r[1] {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	for i := 0; i+14 <= len(cs); i++ {
 		// Look for SOT marker (0xFF90)
 		if cs[i] != 0xFF || cs[i+1] != 0x90 {
@@ -693,8 +726,10 @@ func (d *decoder) indexTileParts() map[int][2]int {
 			continue
 		}
 		isot := int(binary.BigEndian.Uint16(cs[i+4 : i+6]))
-		if _, seen := out[isot]; seen {
-			continue
+		if parts, seen := out[isot]; seen {
+			if int(cs[i+10]) != len(parts) || insideData(i) {
+				continue
+			}
 		}
 		// Read tile-part length. Psot = 0 means the tile-part runs to the end
 		// of the codestream.
@@ -746,10 +781,10 @@ func (d *decoder) indexTileParts() map[int][2]int {
 		if dataStart >= dataEnd {
 			// Recorded as present but empty, so that a later marker sequence
 			// inside this tile-part's data cannot be mistaken for it.
-			out[isot] = [2]int{dataStart, dataStart}
+			out[isot] = append(out[isot], [2]int{dataStart, dataStart})
 			continue
 		}
-		out[isot] = [2]int{dataStart, dataEnd}
+		out[isot] = append(out[isot], [2]int{dataStart, dataEnd})
 	}
 	return out
 }

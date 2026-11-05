@@ -203,6 +203,21 @@ opts := &jpeg2000.Options{
 }
 ```
 
+Resolution-progressive HTJ2K with tile-parts the main header can locate, as
+DICOM's HTJ2K Lossless RPCL transfer syntax (1.2.840.10008.1.2.4.202) asks:
+
+```go
+opts := jpeg2000.DefaultOptions()
+opts.Format = jpeg2000.FormatJ2K
+opts.Lossless = true
+opts.HighThroughput = true
+opts.ProgressionOrder = jpeg2000.RPCL
+opts.NumResolutions = 5                        // 736 / 2^4 = 46, at most 64
+opts.HTBlockWidth, opts.HTBlockHeight = 64, 64
+opts.WritePacketLengths = true                 // TLM in the main header, PLT per tile-part
+opts.TilePartsPerResolution = true             // one tile-part per resolution
+```
+
 ## Colorspace Support
 
 Full support for all colorspaces defined in ISO/IEC 15444-1 Annex M:

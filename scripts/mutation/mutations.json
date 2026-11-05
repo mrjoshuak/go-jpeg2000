@@ -241,6 +241,68 @@
         "added": "killed",
         "existing": "survived"
       }
+    },
+    {
+      "id": "decoder-first-tile-part-only",
+      "codec": "decode",
+      "description": "the decoder takes only the first tile-part of each tile, as it did before tile-parts per resolution",
+      "spec": "ISO/IEC 15444-1 A.4.2: a tile may be carried by several tile-parts, and its packets continue from each into the next. Reading only the first one decodes a codestream written with OpenJPH's -tileparts R to the right dimensions holding the lowest resolution. Every pre-existing codestream this library wrote had one tile-part per tile, so no round trip could see it.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "decoder.go",
+          "count": 1,
+          "old": "\t\t\tif int(cs[i+10]) != len(parts) || insideData(i) {",
+          "new": "\t\t\tif true || int(cs[i+10]) != len(parts) || insideData(i) {"
+        }
+      ],
+      "existing_tests": [
+        {
+          "pkg": "./",
+          "run": "TestRoundtrip_Grayscale_Lossless"
+        }
+      ],
+      "added_tests": [
+        {
+          "pkg": "./",
+          "run": "TestTilePartsPerResolution$"
+        }
+      ],
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
+    },
+    {
+      "id": "packet-index-walk-per-tile-part",
+      "codec": "T2",
+      "description": "BuildPacketIndex starts a fresh packet walk at every tile-part, as it did before",
+      "spec": "A tile's packet sequence and the tag-tree state its packet headers are coded against run on from one tile-part into the next (ISO/IEC 15444-1 A.4.2, B.10.2). Restarting the walk per tile-part indexes a tile's second tile-part as its first packets again: the wrong addresses on the right bytes. OpenJPH writes such codestreams with -tileparts R.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "packets.go",
+          "count": 1,
+          "old": "\t\tw := walks[tileIndex]\n\t\tif w == nil {",
+          "new": "\t\tw := walks[tileIndex]\n\t\tif true {"
+        }
+      ],
+      "existing_tests": [
+        {
+          "pkg": "./",
+          "run": "TestBuildPacketIndex_Basic"
+        }
+      ],
+      "added_tests": [
+        {
+          "pkg": "./",
+          "run": "TestTilePartsPerResolution$"
+        }
+      ],
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     }
   ]
 }

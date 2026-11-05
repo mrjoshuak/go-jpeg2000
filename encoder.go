@@ -884,8 +884,35 @@ func magnitudeBits(v float64) int {
 	return int(math.Floor(math.Log2(v))) + 1
 }
 
+// checkTilePartDivision refuses a tile-part division the progression order
+// cannot honour. One tile-part per resolution needs each resolution's packets
+// to be contiguous, which RPCL and RLCP guarantee and LRCP does only with a
+// single layer. PCRL and CPRL interleave resolutions inside every position or
+// component, so a "tile-part per resolution" there would be a tile-part per
+// packet run, which is not what was asked for.
+func (e *encoder) checkTilePartDivision() error {
+	if !e.options.TilePartsPerResolution {
+		return nil
+	}
+	switch e.options.ProgressionOrder {
+	case RPCL, RLCP:
+		return nil
+	case LRCP:
+		if e.options.NumLayers <= 1 {
+			return nil
+		}
+		return fmt.Errorf("jpeg2000: TilePartsPerResolution with LRCP needs a single quality layer, got %d", e.options.NumLayers)
+	default:
+		return fmt.Errorf("jpeg2000: TilePartsPerResolution needs RPCL, RLCP or single-layer LRCP progression, got %s", e.options.ProgressionOrder)
+	}
+}
+
 // generateCodestream generates the JPEG 2000 codestream.
 func (e *encoder) generateCodestream() ([]byte, error) {
+	if err := e.checkTilePartDivision(); err != nil {
+		return nil, err
+	}
+
 	var buf []byte
 
 	// SOC marker
@@ -1347,8 +1374,8 @@ func computeNumBPS(data []int32) int {
 func (e *encoder) encodeTile(tileIdx int) ([]byte, error) {
 	jobs, layout := e.collectJobs(e.componentData, e.wideData, 0, 0, e.width, e.height)
 	encoded, numBPS, passes := e.encodeJobs(jobs)
-	data, pktLens := e.assembleTileData(layout, jobs, encoded, numBPS, passes)
-	return e.createTileHeader(tileIdx, data, pktLens), nil
+	data, pktLens, breaks := e.assembleTileData(layout, jobs, encoded, numBPS, passes)
+	return e.createTileParts(tileIdx, data, pktLens, breaks), nil
 }
 
 // bandLayout is the code-block grid of one subband.
@@ -1577,7 +1604,7 @@ func (e *encoder) encodeJobs(jobs []codeBlockJob) ([][]byte, []int, [][]int) {
 
 // assembleTileData turns the encoded code-blocks of one tile into the bytes
 // that follow its SOD marker.
-func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) ([]byte, []int) {
+func (e *encoder) assembleTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) ([]byte, []int, []tilePartBreak) {
 	// Conforming T2 packets, verified end to end against both references:
 	// OpenJPH decodes the HT output and OpenJPEG the Part 1 MQ output to the
 	// exact source samples. Quality layers are real packets too — one per
@@ -1603,13 +1630,40 @@ func extractCodeBlock[T int32 | int64](data []T, stride, x, y, w, h int) []T {
 	return out
 }
 
+// tilePartBreak is where a tile's next tile-part begins: a byte offset into
+// the tile's packet data, and the index of the first packet it holds.
+type tilePartBreak struct {
+	offset int
+	packet int
+}
+
+// createTileParts cuts one tile's packet data into tile-parts at the given
+// breaks and writes each with its own header. With no breaks the tile is a
+// single tile-part.
+//
+// Packets never straddle a tile-part: the packet sequence simply continues in
+// the next one (ISO/IEC 15444-1 A.4.2), so each tile-part's PLT lists only the
+// packets it holds.
+func (e *encoder) createTileParts(tileIdx int, data []byte, pktLens []int, breaks []tilePartBreak) []byte {
+	cuts := append([]tilePartBreak{{0, 0}}, breaks...)
+	cuts = append(cuts, tilePartBreak{offset: len(data), packet: len(pktLens)})
+	numParts := len(cuts) - 1
+	var out []byte
+	for i := 0; i < numParts; i++ {
+		from, to := cuts[i], cuts[i+1]
+		out = append(out, e.createTileHeader(tileIdx, i, numParts,
+			data[from.offset:to.offset], pktLens[from.packet:to.packet])...)
+	}
+	return out
+}
+
 // createTileHeader creates the tile-part header, optionally carrying the PLT
 // segments that list this tile-part's packet lengths.
 //
 // PLT sits between the SOT segment and SOD, and its bytes count toward Psot,
 // so the length has to be computed after the segments exist rather than from
 // the tile data alone.
-func (e *encoder) createTileHeader(tileIdx int, tileData []byte, pktLens []int) []byte {
+func (e *encoder) createTileHeader(tileIdx, partIdx, numParts int, tileData []byte, pktLens []int) []byte {
 	var plt []byte
 	if e.options.WritePacketLengths {
 		plt = generatePLT(pktLens)
@@ -1623,8 +1677,8 @@ func (e *encoder) createTileHeader(tileIdx int, tileData []byte, pktLens []int) 
 	binary.BigEndian.PutUint16(header[2:4], uint16(sotLength))
 	binary.BigEndian.PutUint16(header[4:6], uint16(tileIdx))
 	binary.BigEndian.PutUint32(header[6:10], tilePartLength)
-	header[10] = 0 // Tile-part index
-	header[11] = 1 // Number of tile-parts
+	header[10] = uint8(partIdx)  // TPsot: tile-part index
+	header[11] = uint8(numParts) // TNsot: number of tile-parts of this tile
 
 	header = append(header, plt...)
 	header = binary.BigEndian.AppendUint16(header, uint16(codestream.SOD))

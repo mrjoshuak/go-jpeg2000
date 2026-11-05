@@ -112,7 +112,11 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 		fromPLT:     true,
 	}
 
-	// Walk tile-parts
+	// Walk tile-parts. A tile's packet sequence runs on from each of its
+	// tile-parts into the next, so the walk state is per tile, not per
+	// tile-part; walks lists them in the order their tiles first appear.
+	walks := map[uint16]*tileWalk{}
+	var walkOrder []uint16
 	pos := headerEnd
 	for pos < len(cs) {
 		if pos+2 > len(cs) {
@@ -202,8 +206,19 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 		// Tile data extends from SOD to end of tile-part
 		tileDataEnd := tpEnd
 
-		// Index packets in this tile
-		if err := idx.indexTilePackets(header, tileIndex, cs, sodPos, tileDataEnd, pltLens); err != nil {
+		// Index this tile-part's packets. TNsot says how many tile-parts the
+		// tile has, and in the last one every packet the walk has not reached
+		// is recorded as absent, as a single tile-part always was. TNsot = 0
+		// means the count is not given; such a tile is finished below.
+		w := walks[tileIndex]
+		if w == nil {
+			w = &tileWalk{}
+			walks[tileIndex] = w
+			walkOrder = append(walkOrder, tileIndex)
+		}
+		tpIdx, tpCount := int(cs[pos+10]), int(cs[pos+11])
+		w.finished = tpCount != 0 && tpIdx == tpCount-1
+		if err := idx.indexTilePackets(header, tileIndex, cs, sodPos, tileDataEnd, pltLens, w); err != nil {
 			return nil, fmt.Errorf("indexing tile %d packets: %w", tileIndex, err)
 		}
 
@@ -211,7 +226,36 @@ func BuildPacketIndex(cs []byte) (*PacketIndex, error) {
 		pos = tpEnd
 	}
 
+	// A tile whose last tile-part was never seen — TNsot was zero, or the
+	// codestream ends early — still has its remaining packets recorded, as
+	// absent, so every address a header implies is in the index.
+	for _, t := range walkOrder {
+		if w := walks[t]; !w.finished {
+			w.finished = true
+			if err := idx.indexTilePackets(header, t, cs, len(cs), len(cs), nil, w); err != nil {
+				return nil, fmt.Errorf("indexing tile %d packets: %w", t, err)
+			}
+		}
+	}
+
 	return idx, nil
+}
+
+// tileWalk is one tile's packet walk, carried from each of its tile-parts into
+// the next. The tag trees in grids hold inclusion and zero-bit-plane state
+// that a later packet's header is coded against, so they cannot be rebuilt
+// per tile-part; done is how many packets of the progression have been
+// indexed.
+type tileWalk struct {
+	grids    map[crKey][][]*bandGeometry
+	done     int
+	finished bool // this tile-part is the tile's last
+}
+
+// crKey names one component's resolution.
+type crKey struct {
+	comp int
+	res  int
 }
 
 // GetPacket returns the packet data for the given address.
@@ -283,6 +327,7 @@ func (idx *PacketIndex) indexTilePackets(
 	cs []byte,
 	dataStart, dataEnd int,
 	pltLens []int,
+	walk *tileWalk,
 ) error {
 	numComp := int(header.NumComponents)
 	numRes := header.CodingStyle.NumResolutions()
@@ -337,27 +382,28 @@ func (idx *PacketIndex) indexTilePackets(
 	//
 	// This used to parse a private table this library wrote and no other
 	// implementation produces, and returned empty packets for everything else.
-	type crKey struct {
-		comp int
-		res  int
-	}
-	grids := make(map[crKey][][]*bandGeometry, numComp*numRes)
-	for c := 0; c < numComp; c++ {
-		comp := header.ComponentInfo[c]
-		// The subband partition is derived from the tile component's absolute
-		// coordinates, so subsampling is applied to the tile's corners rather
-		// than to its size. See tileBands in subband.go, which the encoder and
-		// the tile decoder walk as well.
-		cx0 := ceilDivInt(tx0, int(comp.SubsamplingX))
-		cy0 := ceilDivInt(ty0, int(comp.SubsamplingY))
-		cx1 := ceilDivInt(tx1, int(comp.SubsamplingX))
-		cy1 := ceilDivInt(ty1, int(comp.SubsamplingY))
-		for r := 0; r < numRes; r++ {
-			ppx, ppy := precinctExps(header.CodingStyle, r)
-			grids[crKey{c, r}] = precinctsFor(cx0, cy0, cx1, cy1, numRes, r,
-				cbWidth, cbHeight, ppx, ppy)
+	// The tag trees are built on a tile's first tile-part and carried into
+	// the rest: see tileWalk.
+	if walk.grids == nil {
+		walk.grids = make(map[crKey][][]*bandGeometry, numComp*numRes)
+		for c := 0; c < numComp; c++ {
+			comp := header.ComponentInfo[c]
+			// The subband partition is derived from the tile component's absolute
+			// coordinates, so subsampling is applied to the tile's corners rather
+			// than to its size. See tileBands in subband.go, which the encoder and
+			// the tile decoder walk as well.
+			cx0 := ceilDivInt(tx0, int(comp.SubsamplingX))
+			cy0 := ceilDivInt(ty0, int(comp.SubsamplingY))
+			cx1 := ceilDivInt(tx1, int(comp.SubsamplingX))
+			cy1 := ceilDivInt(ty1, int(comp.SubsamplingY))
+			for r := 0; r < numRes; r++ {
+				ppx, ppy := precinctExps(header.CodingStyle, r)
+				walk.grids[crKey{c, r}] = precinctsFor(cx0, cy0, cx1, cy1, numRes, r,
+					cbWidth, cbHeight, ppx, ppy)
+			}
 		}
 	}
+	grids := walk.grids
 
 	sop, eph := packetMarkers(header.CodingStyle.CodingStyle)
 	reader := newPktReader(tileData, sop, eph)
@@ -366,7 +412,7 @@ func (idx *PacketIndex) indexTilePackets(
 	// entry this tile-part's first packet is, so the two stay aligned.
 	pltPos := 0
 	firstEntry := len(idx.entries)
-	if len(pltLens) == 0 {
+	if len(pltLens) == 0 && dataEnd > dataStart {
 		// One tile-part without PLT means the index as a whole was not built
 		// from the markers, whatever the others carry.
 		idx.fromPLT = false
@@ -455,8 +501,28 @@ func (idx *PacketIndex) indexTilePackets(
 	// which is what makes a byte range spatially addressable.
 	numPrec := func(r, c int) int { return len(grids[crKey{c, r}]) }
 
+	// Resume where this tile's previous tile-part stopped, and stop where this
+	// one's data does: no packet straddles a tile-part boundary, so the next
+	// packet is the next tile-part's first. In the tile's last tile-part the
+	// walk runs on and records whatever is missing as absent.
+	seq := 0
+	exhausted := func() bool {
+		if len(pltLens) > 0 {
+			return len(idx.entries)-firstEntry >= len(pltLens)
+		}
+		return reader.overrun || reader.pos >= len(tileData)
+	}
 	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(l, r, c, p int) bool {
+		if seq < walk.done {
+			seq++
+			return true
+		}
+		if !walk.finished && exhausted() {
+			return false
+		}
 		addPacket(l, r, c, p)
+		seq++
+		walk.done = seq
 		return true
 	})
 

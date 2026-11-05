@@ -115,6 +115,20 @@ ignores `TLM` gets the right pixels; the only sign was a line on stderr from
 `opj_dump` — "TLM marker not of expected size". The gate now fails on any
 diagnostic from the reference's header parse, not merely on wrong pixels.
 
+`Options.TilePartsPerResolution` writes each tile as one tile-part per
+resolution, which is what gives `TLM` something to say about resolutions: the
+offset at which each one ends follows by summation from the main header, and a
+prefix ending there decodes to the image at that resolution. A 736x736 16-bit
+frame at five resolutions, HT and RPCL: 46x46 from the first 3083 bytes, 92x92
+from 9077, 184x184 from 31236, 368x368 from 117567, of 457643. OpenJPEG and
+OpenJPH decode it exactly, and the gate asserts the tile-part structure and
+`TLM` from the bytes.
+
+Reading needed the same. This decoder took only the first tile-part of each
+tile, so OpenJPH's `-tileparts R` decoded to the right dimensions holding the
+lowest resolution, and `BuildPacketIndex` restarted the packet walk at every
+tile-part. Both now follow a tile across its tile-parts.
+
 ## Next
 
 ### ~~Multiple quality layers~~ — done, both directions, gated

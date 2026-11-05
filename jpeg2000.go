@@ -333,6 +333,24 @@ type Options struct {
 	// not want them skips both markers.
 	WritePacketLengths bool
 
+	// TilePartsPerResolution writes each tile as one tile-part per resolution
+	// level, lowest first, instead of a single tile-part. It is OpenJPH's
+	// "-tileparts R".
+	//
+	// A tile-part boundary is the one place in a codestream a reader can find
+	// without parsing packets, so this is what makes the resolutions
+	// addressable: with WritePacketLengths also set, the TLM marker in the main
+	// header lists every tile-part's length, and the byte offset at which each
+	// resolution ends follows by summation from the main header alone. A
+	// prefix of the codestream ending on one of those offsets decodes to the
+	// image at that resolution. DICOM's HTJ2K Lossless RPCL transfer syntax
+	// (1.2.840.10008.1.2.4.202) relies on TLM marking those breakpoints.
+	//
+	// The resolutions must arrive contiguously, so the progression order must
+	// be RPCL or RLCP, or LRCP with a single quality layer; any other
+	// combination is refused rather than written as something else.
+	TilePartsPerResolution bool
+
 	// PrecinctSizes gives the precinct partition, one entry per resolution
 	// from the lowest upward, as base-2 exponents of width and height. A
 	// shorter list repeats its last entry for the resolutions above it, and an

@@ -480,7 +480,11 @@ func layerContributions(encoded []byte, truncPoints []int, numLayers int, ht boo
 // every packet in the order it was written. The lengths are what PLT records:
 // given them a reader knows where each packet starts without parsing any of
 // them.
-func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) ([]byte, []int) {
+//
+// With Options.TilePartsPerResolution it also returns where each resolution
+// after the first begins, as the tile-part boundaries createTileParts cuts
+// at. Without it there are none and the tile is a single tile-part.
+func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob, encoded [][]byte, numBPS []int, truncPoints [][]int) ([]byte, []int, []tilePartBreak) {
 	numRes := layout.numRes
 	numComp := 0
 	if numRes > 0 {
@@ -610,12 +614,20 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 	}
 
 	var pktLens []int
+	var breaks []tilePartBreak
+	lastRes := -1
 	sopCount := 0
 	forEachPacket(order, numLayers, numRes, numComp, numPrec, pos, func(layer, res, c, prec int) bool {
 		precincts := bandsFor[key{c, res}]
 		if prec >= len(precincts) {
 			return true
 		}
+		// A new resolution starts a new tile-part. The SOP marker belongs to
+		// the packet it precedes, so the cut goes before it.
+		if e.options.TilePartsPerResolution && lastRes >= 0 && res != lastRes {
+			breaks = append(breaks, tilePartBreak{offset: len(out), packet: len(pktLens)})
+		}
+		lastRes = res
 		pkt := encodePacket(precincts[prec], layer, e.options.EnableEPH)
 		if e.options.EnableSOP {
 			// SOP precedes the packet and is not part of it: the packet
@@ -627,5 +639,5 @@ func (e *encoder) buildStandardTileData(layout *tileLayout, jobs []codeBlockJob,
 		pktLens = append(pktLens, len(pkt))
 		return true
 	})
-	return out, pktLens
+	return out, pktLens, breaks
 }

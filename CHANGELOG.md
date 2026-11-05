@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`Options.TilePartsPerResolution`: one tile-part per resolution level**,
+  lowest first — OpenJPH's `-tileparts R`. With `WritePacketLengths` the TLM
+  marker then lists each resolution's tile-part, so where every resolution
+  ends is known from the main header alone and a prefix of the codestream
+  decodes to the lower resolutions. This is what DICOM's HTJ2K Lossless RPCL
+  transfer syntax (1.2.840.10008.1.2.4.202) means by TLM finding "the
+  resolution breakpoints". TPsot counts up from zero and TNsot gives the count;
+  each tile-part's PLT lists only its own packets. RPCL, RLCP and single-layer
+  LRCP are accepted; PCRL, CPRL and multi-layer LRCP interleave resolutions and
+  are refused rather than written as something else.
+
+### Fixed
+- **A tile split across tile-parts decoded from its first tile-part alone.**
+  The decoder indexed only the first SOT it found for each tile, so a
+  codestream written with OpenJPH's `-tileparts R` decoded to the right
+  dimensions holding the lowest resolution. Every tile-part of a tile is now
+  read, in TPsot order; a later one is accepted only when its TPsot is the next
+  index and it does not lie inside data already attributed to a tile-part.
+- **`BuildPacketIndex` restarted the packet walk at every tile-part**, so the
+  second tile-part of a tile was indexed as that tile's first packets again.
+  The walk, and the tag-tree state packet headers are coded against, now
+  carries across a tile's tile-parts. A tile whose last tile-part is missing,
+  or whose TNsot is zero, still has every packet the header implies recorded.
+
+### Gate
+- Write checks for tile-parts per resolution on both coders, with precincts,
+  tiles, three components, layers and 16-bit samples: the tile-part structure
+  and TLM are checked from the bytes, OpenJPEG (and OpenJPH, for HT) decode
+  them exactly, and `opj_dump` parses them without a diagnostic.
+- Read checks of OpenJPH `-tileparts R -tlm_marker true`: decoded exactly, and
+  `BuildPacketIndex` finds the same packets with the same bytes as in the
+  unsplit codestream.
+
 ## [1.5.12] - 2026-08-22
 
 ### Fixed
