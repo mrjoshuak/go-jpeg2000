@@ -544,6 +544,81 @@ PYEOF
 		fi
 	done
 
+	# READ side, one tile-part per resolution. This decoder used to take only
+	# the first tile-part of each tile, so OpenJPH's "-tileparts R" decoded to
+	# the right dimensions holding the lowest resolution alone. The index has
+	# to see the packets as the same packets whichever way the tile is split,
+	# so it is compared against the index of the unsplit codestream.
+	cat >"$WORK/idxcmp.go" <<'GOEOF'
+//go:build ignore
+
+package main
+
+// idxcmp <a.j2c> <b.j2c>: prints "same" when BuildPacketIndex finds the same
+// packets, in the same order and with the same bytes, in both codestreams.
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+
+	jp2 "github.com/mrjoshuak/go-jpeg2000"
+)
+
+func main() {
+	var idx [2]*jp2.PacketIndex
+	for i := range idx {
+		cs, err := os.ReadFile(os.Args[1+i])
+		if err == nil {
+			idx[i], err = jp2.BuildPacketIndex(cs)
+		}
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	}
+	a, b := idx[0].AllAddresses(), idx[1].AllAddresses()
+	if len(a) != len(b) {
+		fmt.Printf("%d packets against %d\n", len(b), len(a))
+		os.Exit(1)
+	}
+	for i := range a {
+		pa, _ := idx[0].GetPacket(a[i])
+		pb, errb := idx[1].GetPacket(b[i])
+		if a[i] != b[i] || errb != nil || !bytes.Equal(pa, pb) {
+			fmt.Printf("packet %d (%+v) differs\n", i, b[i])
+			os.Exit(1)
+		}
+	}
+	fmt.Printf("same %d packets\n", len(a))
+}
+GOEOF
+	for src in src src32; do
+		f="$WORK/rtp_$src.j2c"
+		if ! ojph_compress -i "$WORK/$src.pgm" -o "$f" -num_decomps 3 -reversible true \
+			-prog_order RPCL -tileparts R -tlm_marker true >/dev/null 2>&1 ||
+			! ojph_compress -i "$WORK/$src.pgm" -o "$f.whole.j2c" -num_decomps 3 -reversible true \
+				-prog_order RPCL >/dev/null 2>&1; then
+			gap "read HTJ2K $src -tileparts R: OpenJPH could not produce a fixture"
+			continue
+		fi
+		ojph_expand -i "$f" -o "$f.ctl.pgm" >/dev/null 2>&1
+		if ! cmp -s "$f.ctl.pgm" "$WORK/$src.pgm"; then
+			gap "read HTJ2K $src -tileparts R: oracle control failed, measurement would be meaningless"
+			continue
+		fi
+		out=$(go run ./scripts/decodecmp "$f" "$WORK/$src.pgm" 2>&1)
+		if [ "$out" != "0" ]; then
+			fail "read HTJ2K $src -tileparts R: $out samples differ"
+			continue
+		fi
+		if ! same=$(go run "$WORK/idxcmp.go" "$f.whole.j2c" "$f" 2>&1); then
+			fail "read HTJ2K $src -tileparts R: the packet index differs from the unsplit codestream's: $same"
+			continue
+		fi
+		pass "read HTJ2K $src -tileparts R -tlm_marker true: we decode OpenJPH's codestream exactly and index the $same"
+	done
+
 	# READ side, binary32. This is the direction the capability matrix cannot
 	# cover, and until it was checked no OpenJPH float codestream could be read
 	# at all: the reference writes Cnlt = 0xFFFF, the "all components" form, and
@@ -690,10 +765,11 @@ else
 
 package main
 
-// p1enc <out.j2k> <size> <nres> [tile] [comps] [depth] [layers] [quality] [order] [precexp]
+// p1enc <out.j2k> <size> <nres> [tile] [comps] [depth] [layers] [quality] [order] [precexp] [pktlen] [tileparts] [ht]
 //
 // Encodes a Part 1 (MQ) codestream through the public API and writes the source
-// raster beside it as a PGM or PPM.
+// raster beside it as a PGM or PPM. A non-zero ht selects the HT block coder
+// instead, for the checks that want the same fixture on both coders.
 
 import (
 	"bufio"
@@ -757,6 +833,8 @@ func main() {
 	order := arg(9, 0)   // Table A.16: 0=LRCP, 1=RLCP, 2=RPCL, 3=PCRL, 4=CPRL
 	precexp := arg(10, 0) // 0 leaves the maximal precinct; otherwise 2^n per side
 	pktlen := arg(11, 0)  // non-zero writes PLT in every tile-part and TLM in the main header
+	tileparts := arg(12, 0) // non-zero writes one tile-part per resolution
+	ht := arg(13, 0)        // non-zero uses the HT block coder
 
 	maxv := (1 << depth) - 1
 	sample := func(x, y, c int) int {
@@ -812,6 +890,8 @@ func main() {
 		}
 	}
 	opts.WritePacketLengths = pktlen != 0
+	opts.TilePartsPerResolution = tileparts != 0
+	opts.HighThroughput = ht != 0
 	if quality > 0 {
 		opts.Quality = quality
 	}
@@ -1281,6 +1361,103 @@ SUBWEOF
 	plt_write "tiled" 128 3 64 1 8 1 0 0 5 1
 	plt_write "rgb" 64 3 0 3 8 1 0 0 5 1
 	plt_write "layers3" 64 3 0 1 8 3 0 0 5 1
+
+	# One tile-part per resolution: Options.TilePartsPerResolution, OpenJPH's
+	# "-tileparts R". DICOM HTJ2K Lossless RPCL relies on TLM marking where
+	# each resolution ends, so the structure is asserted from the bytes, not
+	# only the pixels: every tile is as many tile-parts as it has
+	# resolutions, TPsot counts up from zero, TNsot gives the count, and TLM
+	# lists every tile-part with its tile index and Psot, in order. A decoder
+	# that reads only the first tile-part of a tile -- which this library's
+	# did -- returns the right dimensions holding the lowest resolution, so
+	# the pixel check matters as much.
+	tp_structure() {
+		python3 - "$1" "$2" <<'PYEOF'
+import struct, sys
+cs = open(sys.argv[1], 'rb').read(); nres = int(sys.argv[2])
+p = 2; tlm = []
+while struct.unpack('>H', cs[p:p+2])[0] != 0xFF90:
+    m, n = struct.unpack('>HH', cs[p:p+4])
+    if m == 0xFF55:
+        body = cs[p+4:p+2+n]; stlm = body[1]
+        st = (stlm >> 4) & 3; sp = 4 if stlm & 0x40 else 2
+        q = 2
+        while q + st + sp <= len(body):
+            t = int.from_bytes(body[q:q+st], 'big') if st else 0
+            tlm.append((t, int.from_bytes(body[q+st:q+st+sp], 'big'))); q += st + sp
+        if q != len(body):
+            print("TLM body is not a whole number of %d-byte entries" % (st + sp)); sys.exit(1)
+    p += 2 + n
+sots = []
+while struct.unpack('>H', cs[p:p+2])[0] == 0xFF90:
+    isot, psot, tp, tn = struct.unpack('>HIBB', cs[p+4:p+12])
+    sots.append((isot, psot, tp, tn)); p += psot
+if cs[p:] != b'\xff\xd9':
+    print("Psot does not walk the codestream to EOC"); sys.exit(1)
+seen = {}
+for isot, psot, tp, tn in sots:
+    if tp != seen.get(isot, 0) or tn != nres:
+        print("tile %d tile-part TPsot=%d TNsot=%d, want %d of %d" % (isot, tp, tn, seen.get(isot, 0), nres)); sys.exit(1)
+    seen[isot] = tp + 1
+if any(v != nres for v in seen.values()):
+    print("a tile has %s tile-parts, want %d" % (sorted(set(seen.values())), nres)); sys.exit(1)
+if [(i, l) for i, l, _, _ in sots] != tlm:
+    print("TLM lists %d tile-parts that disagree with the %d SOT segments" % (len(tlm), len(sots))); sys.exit(1)
+print("%d tile-parts, %d in TLM" % (len(sots), len(tlm)))
+PYEOF
+	}
+	tp_write() {
+		name=$1
+		shift
+		local f="$WORK/tp_$name.j2k" nres=$2 ht=${12:-0} ext=pgm
+		[ "${4:-1}" = 3 ] && ext=ppm
+		if ! ref=$(go run "$WORK/p1enc.go" "$f" "$@" 2>&1); then
+			fail "write tile-parts per resolution $name: our encoder failed: $(echo "$ref" | head -1)"
+			return
+		fi
+		if ! st=$(tp_structure "$f" "$nres"); then
+			fail "write tile-parts per resolution $name: $st"
+			return
+		fi
+		if ! err=$(opj_decompress -i "$f" -o "$f.out.$ext" 2>&1); then
+			fail "write tile-parts per resolution $name: OpenJPEG refused our codestream: $(echo "$err" | grep -i error | head -1 | cut -c1-70)"
+			return
+		fi
+		if ! d=$(cmp_raster "$f.out.$ext" "$ref"); then
+			fail "write tile-parts per resolution $name: OpenJPEG: $d"
+			return
+		fi
+		if have opj_dump; then
+			diag=$(opj_dump -i "$f" 2>&1 | grep -iE "warning|error" | head -1)
+			if [ -n "$diag" ]; then
+				fail "write tile-parts per resolution $name: the reference decodes it but complains: $(echo "$diag" | cut -c1-95)"
+				return
+			fi
+		fi
+		local who="OpenJPEG decodes"
+		if [ "$ht" != 0 ] && have ojph_expand; then
+			if ! ojph_expand -i "$f" -o "$f.ojph.$ext" >/dev/null 2>&1; then
+				fail "write tile-parts per resolution $name: OpenJPH refused our codestream"
+				return
+			fi
+			if ! d=$(cmp_raster "$f.ojph.$ext" "$ref"); then
+				fail "write tile-parts per resolution $name: OpenJPH: $d"
+				return
+			fi
+			who="OpenJPEG and OpenJPH decode"
+		fi
+		pass "write tile-parts per resolution $name ($st): $who it exactly"
+	}
+
+	# Arguments as p1enc: size nres tile comps depth layers quality order
+	# precexp pktlen tileparts ht. Order 2 is RPCL, 1 RLCP, 0 LRCP.
+	tp_write "ht_rpcl_tlm" 64 4 0 1 8 1 0 2 0 1 1 1
+	tp_write "ht_rpcl_16bit" 64 5 0 1 16 1 0 2 0 1 1 1
+	tp_write "ht_rpcl_precincts" 64 4 0 1 8 1 0 2 4 1 1 1
+	tp_write "ht_rpcl_tiled" 128 3 64 1 8 1 0 2 0 1 1 1
+	tp_write "ht_rpcl_rgb" 64 4 0 3 8 1 0 2 0 1 1 1
+	tp_write "p1_rlcp_layers3" 64 4 0 1 8 3 0 1 0 1 1 0
+	tp_write "p1_lrcp" 64 3 0 1 8 1 0 0 0 1 1 0
 
 	# An index built from the markers must name the same packets, at the same
 	# byte ranges, as one built by parsing every packet header; and it must
