@@ -522,6 +522,35 @@ PYEOF
 		done
 	done
 
+	# READ side, 16-bit. Every read check above is 8-bit, which is how this
+	# decoder returned each 16-bit sample above 32768 off by one — the rescale
+	# to image.Gray16 wrapped in int32 — while the gate stayed green. The
+	# fixture's samples cover the whole 16-bit range, and the comparison is at
+	# full width: the top byte alone would hide an off-by-one.
+	if python3 scripts/mkpgm.py "$WORK/src16.pgm" 64 48 11 65535 >/dev/null 2>&1; then
+		for nd in 0 3; do
+			f="$WORK/r16_$nd.j2c"
+			if ! ojph_compress -i "$WORK/src16.pgm" -o "$f" \
+				-num_decomps "$nd" -reversible true >/dev/null 2>&1; then
+				gap "read HTJ2K 16-bit -num_decomps $nd: OpenJPH could not produce a fixture"
+				continue
+			fi
+			ojph_expand -i "$f" -o "$WORK/r16_$nd.ctl.pgm" >/dev/null 2>&1
+			if ! cmp -s "$WORK/r16_$nd.ctl.pgm" "$WORK/src16.pgm"; then
+				gap "read HTJ2K 16-bit -num_decomps $nd: oracle control failed, measurement would be meaningless"
+				continue
+			fi
+			out=$(go run ./scripts/decodecmp "$f" "$WORK/src16.pgm" 2>&1)
+			if [ "$out" = "0" ]; then
+				pass "read HTJ2K 16-bit full range -num_decomps $nd: we decode OpenJPH's codestream exactly"
+			else
+				fail "read HTJ2K 16-bit full range -num_decomps $nd: $out samples differ"
+			fi
+		done
+	else
+		gap "read HTJ2K 16-bit: could not build the fixture"
+	fi
+
 	# READ side, tiled: the same geometry from the other direction. src32 is
 	# 32x32, so 12 and 13 leave a short last tile and put tiles at odd origins.
 	for tile in 8 16 12 13; do
@@ -1407,6 +1436,26 @@ PYEOF
 			fi
 		done
 	done
+
+	# The same 16-bit read through the Part 1 coder; see the HTJ2K 16-bit check.
+	if python3 scripts/mkpgm.py "$WORK/src16.pgm" 64 48 11 65535 >/dev/null 2>&1; then
+		f="$WORK/p16.j2k"
+		if ! opj_compress -i "$WORK/src16.pgm" -o "$f" -n 4 -r 1 >/dev/null 2>&1; then
+			gap "read Part 1 16-bit: OpenJPEG could not produce a fixture"
+		elif ! opj_decompress -i "$f" -o "$WORK/p16.ctl.pgm" >/dev/null 2>&1 ||
+			[ "$(cmp_raster "$WORK/p16.ctl.pgm" "$WORK/src16.pgm")" != "exact" ]; then
+			gap "read Part 1 16-bit: oracle control failed, measurement would be meaningless"
+		else
+			out=$(go run ./scripts/decodecmp "$f" "$WORK/src16.pgm" 2>&1)
+			if [ "$out" = "0" ]; then
+				pass "read Part 1 MQ 16-bit full range: we decode OpenJPEG's codestream exactly"
+			else
+				fail "read Part 1 MQ 16-bit full range: $out samples differ"
+			fi
+		fi
+	else
+		gap "read Part 1 16-bit: could not build the fixture"
+	fi
 
 	# WRITE side, HT with quality layers. Multiple layers used to be written as
 	# a private per-layer length table rather than as packets; they are real

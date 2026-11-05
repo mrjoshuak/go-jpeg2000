@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Every 16-bit sample above 32768 decoded one count low.** `Decode` rescales
+  each sample to `image.Gray16` / `image.RGBA64` as `v*65535/maxVal`, and did it
+  in int32, where the product passes `MaxInt32` for any `v` above 32768; the
+  wrapped quotient is `v-1`. Part 1 and HT alike, any 16-bit lossless image
+  with content in the upper half of the range. The codestreams were right —
+  OpenJPH and OpenJPEG decode them exactly — and only the `image.Image`
+  conversion was wrong. The product is now formed in 64 bits.
+
+  The existing 16-bit round-trip tests check dimensions only, so they survive
+  the defect; mutation `gray16-scale-int32`
+  records that. `TestDecode16BitUpperHalf` and `TestCreateImage16BitScaling`
+  kill it.
+
+### Gate
+- Two read checks at 16 bits, against OpenJPH (HT) and OpenJPEG (Part 1),
+  with a fixture spanning the whole range and compared at full width. Every
+  read check before them was 8-bit, which is why this one was not seen.
+  `scripts/mkpgm.py` takes an optional maxval of 65535 and
+  `scripts/decodecmp` compares 16-bit references sample for sample.
+
 ## [1.5.12] - 2026-08-22
 
 ### Fixed
