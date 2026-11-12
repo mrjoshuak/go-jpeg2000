@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Concurrent HTJ2K decodes could return wrong samples.** The HT block decoder
+  is pooled, and `HTDecoder.Decode` returns a view of the decoder's own buffer.
+  `decodeStandardTileData` put the decoder back in the pool before it read the
+  coefficients, so a second goroutine could take the same decoder and overwrite
+  them. `Decode` called from several goroutines at once could then return a
+  different image from the one encoded. The decoder now goes back to the pool
+  after its coefficients are placed. `TileDecoder.DecodeCodeBlock` had the same
+  ordering and now copies the coefficients, as its wide branch already did; it
+  has no caller in the decode path today. A sequential decode cannot see this
+  bug, so neither the round trips nor the external-decoder gate caught it.
+  `TestDecodeHTConcurrentStable` decodes on eight goroutines under `-race`, and
+  the mutation `ht-decoder-pooled-before-read` records that it is the test that
+  catches this.
+
 ## [1.5.12] - 2026-08-22
 
 ### Fixed
