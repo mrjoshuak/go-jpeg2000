@@ -241,6 +241,38 @@
         "added": "killed",
         "existing": "survived"
       }
+    },
+    {
+      "id": "ht-decoder-pooled-before-read",
+      "codec": "HT",
+      "description": "decodeStandardTileData returns the HT block decoder to its pool before reading the coefficients it decoded, as it did until this fix",
+      "spec": "HTDecoder.Decode returns a view of the decoder's own buffer, so the decoder belongs to the caller until the coefficients are copied out. Released early, a concurrent decode can take the same decoder and overwrite them, and Decode returns wrong samples. A sequential decode never sees it: nothing else takes the decoder between the Put and the read, so every round trip and every external-decoder check passes. Only concurrent decodes under the race detector observe the ordering.",
+      "symmetric": false,
+      "edits": [
+        {
+          "file": "t2_packets.go",
+          "count": 1,
+          "old": "\t\t\t\t\t\t\t\thtDec = entropy.GetHTDecoder(w, hh)\n\t\t\t\t\t\t\t\tcoeffs = htDec.Decode(cb.data, numbps, bg.bandType)\n",
+          "new": "\t\t\t\t\t\t\t\thtDec = entropy.GetHTDecoder(w, hh)\n\t\t\t\t\t\t\t\tcoeffs = htDec.Decode(cb.data, numbps, bg.bandType)\n\t\t\t\t\t\t\t\tentropy.PutHTDecoder(htDec)\n\t\t\t\t\t\t\t\thtDec = nil\n"
+        }
+      ],
+      "existing_tests": [
+        {
+          "pkg": "./",
+          "run": "TestReduceResolutionIsStableAcrossPaths"
+        }
+      ],
+      "added_tests": [
+        {
+          "pkg": "./",
+          "run": "TestDecodeHTConcurrentStable",
+          "race": true
+        }
+      ],
+      "expect": {
+        "added": "killed",
+        "existing": "survived"
+      }
     }
   ]
 }

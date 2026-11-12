@@ -819,6 +819,7 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 							}
 							var coeffs []int32
 							var coeffs64 []int64
+							var htDec *entropy.HTDecoder
 							switch {
 							case wide && h.IsHTJ2K():
 								// The signalled magnitude budget does not fit a
@@ -828,9 +829,8 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 									dec.Decode64(cb.data, numbps, bg.bandType)...)
 								entropy.PutHTDecoder(dec)
 							case h.IsHTJ2K():
-								dec := entropy.GetHTDecoder(w, hh)
-								coeffs = dec.Decode(cb.data, numbps, bg.bandType)
-								entropy.PutHTDecoder(dec)
+								htDec = entropy.GetHTDecoder(w, hh)
+								coeffs = htDec.Decode(cb.data, numbps, bg.bandType)
 							default:
 								// The Part 1 MQ coder carries int32 coefficients
 								// and nothing wider. A codestream that declares a
@@ -865,6 +865,9 @@ func (d *decoder) decodeStandardTileData(tile *tcd.Tile, tileData []byte, qualit
 									}
 									tc.Data[dy*tcW+dx] = coeffs[yy*w+xx]
 								}
+							}
+							if htDec != nil {
+								entropy.PutHTDecoder(htDec)
 							}
 						}
 					}
